@@ -85,11 +85,16 @@ impl Default for ClientConfig {
 }
 
 impl ClientConfig {
-    /// Returns `~/.config/furcadia-native/config.ini` when `HOME` or `XDG_CONFIG_HOME` is set.
+    /// Returns `~/.config/furcadia-native/config.ini` (or Windows `%APPDATA%\furcadia-native\config.ini`).
     pub fn default_path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+            .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("AppData/Roaming"))
+            })?;
         Some(base.join("furcadia-native").join("config.ini"))
     }
 

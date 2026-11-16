@@ -2094,7 +2094,12 @@ impl FurcadiaApp {
         self.chat_log = target.chat_log;
         self.whispers = target.whispers;
         self.active_chat_tab = target.active_chat_tab;
-        self.current_dream_dir = target.current_dream_dir;
+        if self.current_dream_dir != target.current_dream_dir {
+            self.clear_dream_patches();
+            if let Some(dir) = target.current_dream_dir {
+                self.load_dream_dir(&dir);
+            }
+        }
         self.cam_offset = target.cam_offset;
         self.to_net = target.to_net;
         self.from_net = target.from_net;
@@ -2145,8 +2150,9 @@ impl FurcadiaApp {
                                 plain.clone(),
                                 true,
                             ));
+                        } else {
+                            sess.chat_log.push(line);
                         }
-                        sess.chat_log.push(line);
                     }
                     NetToUi::Message(ServerMessage::WorldPacket { opcode, data }) => {
                         sess.world.apply_world_packet(opcode, &data);
@@ -5517,6 +5523,7 @@ impl FurcadiaApp {
                     let active_name = self.active_character_name();
                     let mut switch_to: Option<usize> = None;
                     let mut close_bg: Option<usize> = None;
+                    let mut close_active = false;
                     let mut tab_rects: Vec<(usize, Rect)> = Vec::with_capacity(total_tabs);
 
                     ui.horizontal_wrapped(|ui| {
@@ -5536,6 +5543,13 @@ impl FurcadiaApp {
                                     self.dragging_char_tab = Some(vis);
                                 }
                                 tab_rects.push((vis, resp.rect));
+                                if ui
+                                    .small_button("×")
+                                    .on_hover_text("Disconnect & close this character tab")
+                                    .clicked()
+                                {
+                                    close_active = true;
+                                }
                             } else {
                                 let bg_idx = if vis < active_pos { vis } else { vis - 1 };
                                 let bg = &self.bg_sessions[bg_idx];
@@ -5597,7 +5611,16 @@ impl FurcadiaApp {
                         }
                     }
 
-                    if let Some(idx) = close_bg {
+                    if close_active {
+                        let _ = self.to_net.send(UiToNet::Disconnect);
+                        self.is_connected = false;
+                        if !self.bg_sessions.is_empty() {
+                            let next_idx = active_pos.min(self.bg_sessions.len() - 1);
+                            self.switch_to_bg_session(next_idx, ctx);
+                        } else {
+                            self.screen = AppScreen::CharacterSelect;
+                        }
+                    } else if let Some(idx) = close_bg {
                         let sess = self.bg_sessions.remove(idx);
                         let _ = sess.to_net.send(UiToNet::Disconnect);
                         let removed_vis = if idx < active_pos { idx } else { idx + 1 };
@@ -9746,17 +9769,37 @@ fn format_whisper_tab_line(
     };
 
     let trimmed = body.trim();
+    let speaker_disp = speaker.replace('|', " ");
+    let speaker_space = speaker_disp.to_ascii_lowercase();
+    let speaker_pipe = speaker.replace(' ', "|").to_ascii_lowercase();
+    let lower = trimmed.to_ascii_lowercase();
+    let is_name_prefixed_emote = lower.starts_with(&format!("{speaker_space} "))
+        || lower.starts_with(&format!("{speaker_pipe} "))
+        || lower.starts_with(&format!("{speaker_space}'"))
+        || lower.starts_with(&format!("{speaker_pipe}'"));
+    let escape_html = |text: &str| text.replace('&', "&amp;").replace('<', "&lt;");
     if let Some(emote) = trimmed.strip_prefix(':') {
         let emote_body = emote.trim_start();
-        let line_html = format!("<font color='emote'>{speaker} {emote_body}</font>");
+        let line_html = format!(
+            "<font color='emote'>{} {}</font>",
+            escape_html(&speaker_disp),
+            escape_html(emote_body)
+        );
         parse_chat_line(&line_html)
-    } else if trimmed
-        .to_ascii_lowercase()
-        .starts_with(&format!("{} ", speaker.to_ascii_lowercase()))
-    {
-        parse_chat_line(&format!("<font color='emote'>{trimmed}</font>"))
+    } else if is_name_prefixed_emote {
+        let normalized = if lower.starts_with(&speaker_pipe) && speaker_pipe != speaker_space {
+            let rest = &trimmed[speaker_pipe.len()..];
+            format!("{speaker_disp}{rest}")
+        } else {
+            trimmed.to_owned()
+        };
+        parse_chat_line(&format!("<font color='emote'>{}</font>", escape_html(&normalized)))
     } else {
-        parse_chat_line(&format!("<name>{speaker}</name>: {trimmed}"))
+        parse_chat_line(&format!(
+            "<name>{}</name>: {}",
+            escape_html(&speaker_disp),
+            escape_html(trimmed)
+        ))
     }
 }
 
@@ -11461,7 +11504,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Furcadia Native Linux Client"),
+            .with_title("Furcadia Native Client"),
         ..Default::default()
     };
     eframe::run_native(
@@ -11498,6 +11541,14 @@ mod tests {
         );
         let rewritten = rewrite_pounce_add_message(line);
         assert_eq!(rewritten.to_plain_text(), "Kira Lyrica has been added to Pounce");
+    }
+
+    #[test]
+    fn format_whisper_tab_line_does_not_repeat_pipe_name_in_emote() {
+        let plain = r#"[ Alty Bunnie whispers, "Alty|Bunnie shivers and waves." to you. ]"#;
+        let fallback = parse_chat_line(plain);
+        let formatted = format_whisper_tab_line("Amala|Devi", "Alty Bunnie", plain, &fallback);
+        assert_eq!(formatted.to_plain_text(), "Alty Bunnie shivers and waves.");
     }
 
     #[test]

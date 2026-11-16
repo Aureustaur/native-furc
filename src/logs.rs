@@ -5,11 +5,16 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Returns `~/.local/share/furcadia-native/logs` (respecting `XDG_DATA_HOME`).
+/// Returns `~/.local/share/furcadia-native/logs` (or Windows `%LOCALAPPDATA%\furcadia-native\logs`).
 pub fn default_logs_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("AppData/Local"))
+        })?;
     Some(base.join("furcadia-native").join("logs"))
 }
 

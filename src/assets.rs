@@ -62,31 +62,33 @@ impl Default for AssetLocator {
 }
 
 impl AssetLocator {
-    /// Returns `~/.local/share/furcadia-client/assets` (or equivalent XDG data dir).
+    fn user_data_base() -> Option<PathBuf> {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("AppData/Local"))
+            })
+    }
+
+    /// Returns `~/.local/share/furcadia-client/assets` (or equivalent XDG / Windows AppData dir).
     pub fn user_assets_dir() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-        Some(base.join("furcadia-client/assets"))
+        Some(Self::user_data_base()?.join("furcadia-client/assets"))
     }
 
-    /// Returns `~/.local/share/furcadia-client/dreams` for cached/downloaded dreams.
+    /// Returns `~/.local/share/furcadia-client/dreams` (or equivalent XDG / Windows AppData dir) for cached/downloaded dreams.
     pub fn dreams_cache_dir() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-        Some(base.join("furcadia-client/dreams"))
+        Some(Self::user_data_base()?.join("furcadia-client/dreams"))
     }
 
-    /// Returns `~/.local/share/furcadia-client/species` for cached/downloaded species archives.
+    /// Returns `~/.local/share/furcadia-client/species` (or equivalent XDG / Windows AppData dir) for cached/downloaded species archives.
     pub fn species_cache_dir() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-        Some(base.join("furcadia-client/species"))
+        Some(Self::user_data_base()?.join("furcadia-client/species"))
     }
 
-    /// Searches standard workspace-relative and XDG user paths for Furcadia assets.
+    /// Searches standard workspace-relative, XDG user, and Windows installation paths for Furcadia assets.
     pub fn discover() -> Self {
         let mut candidates = vec![
             PathBuf::from("Furcadia Windows/program Files (x86)/Furcadia"),
@@ -95,14 +97,29 @@ impl AssetLocator {
         if let Some(user_dir) = Self::user_assets_dir() {
             candidates.push(user_dir);
         }
+        if let Some(pf86) = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from) {
+            candidates.push(pf86.join("Furcadia"));
+        }
+        if let Some(pf) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+            candidates.push(pf.join("Furcadia"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            candidates.push(local.join("Programs/Furcadia"));
+            candidates.push(local.join("Furcadia"));
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+            candidates.push(profile.join("Furcadia"));
+        }
+        candidates.push(PathBuf::from(r"C:\Program Files (x86)\Furcadia"));
+        candidates.push(PathBuf::from(r"C:\Program Files\Furcadia"));
         let root = candidates.into_iter().find(|p| p.is_dir());
         Self { root }
     }
 
-    /// Copies `maps/`, `patches/default/`, and `patches/legacy/` from an existing Furcadia installation into `~/.local/share/furcadia-client/assets`.
+    /// Copies `maps/`, `patches/default/`, and `patches/legacy/` from an existing Furcadia installation into the user assets directory.
     pub fn import_assets_from(src_root: &Path) -> io::Result<usize> {
         let dst_root = Self::user_assets_dir().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "could not resolve XDG data directory")
+            io::Error::new(io::ErrorKind::NotFound, "could not resolve user data directory")
         })?;
         let mut copied = 0usize;
         for sub in ["maps", "patches/default", "patches/legacy"] {
