@@ -99,29 +99,27 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.4
-            - Fix dream-patched floor `0` and item `128` being randomized into default variants (wrong blocks in custom dreams)
-            - Windows: no more console window or flashing consoles; working sounds, notifications, and folder browser
-            - Windows: also look for fonts/sounds in the detected Furcadia install
-            - Fix the Cookie button (now uses `make-cookie`) and show cookie counts in the character panel
-            - Includes v1.0.4: GitHub update checker, First-Time Setup dialog, and update toggles in Settings/About
+            ### What's New in v1.0.5
+            - Fix DreamEd empty/void floor `161` rendering as pit blocks instead of black when not overridden by a dream
+            - Fix HTTP 500 dream download errors for main maps (`allegria023` → `pmallegria`, `pmimag` → `pmimaginarium`, etc.)
+            - Add built-in 127k-word English + Furcadia/RP spellcheck dictionary (`assets/dictionary.txt.bz2`) with suggestions and live player-name awareness (works natively on Windows and Linux)
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.0.4-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.0.5-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.4_amd64.deb
+            sudo apt install ./furcadia-native_1.0.5_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.4-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.0.5-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

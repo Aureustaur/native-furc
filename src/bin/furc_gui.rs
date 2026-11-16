@@ -2686,16 +2686,7 @@ impl FurcadiaApp {
             return;
         }
         let lower = trimmed.trim_end_matches(".map").to_ascii_lowercase();
-        let normalized = match lower.as_str() {
-            "furn" => "pmfurn",
-            "vinca" => "pmvinca",
-            "acrop" | "acropoli" | "acropolis" => "pmacrop",
-            "alleg" | "allegria" => "pmalleg",
-            "imagine" | "imaginarium" => "pmimag",
-            "meov" | "meovanni" => "pmmeov",
-            "hawth" | "hawthorn" => "pmhawth",
-            _ => trimmed,
-        };
+        let normalized = normalize_main_map_id(&lower).unwrap_or(trimmed);
         let already_pending = self.pending_dream_name.as_deref().is_some_and(|p| {
             p.trim()
                 .trim_end_matches(".map")
@@ -3991,6 +3982,36 @@ impl FurcadiaApp {
                 }
             }
         }
+    }
+
+    fn spellcheck_dict_with_names(&self) -> std::collections::HashSet<String> {
+        let mut dict = self.custom_dict_words.clone();
+        let mut add_name = |name: &str| {
+            for part in name.split(|c: char| !c.is_ascii_alphabetic() && c != '\'') {
+                let w = part.trim_matches('\'').to_ascii_lowercase();
+                if w.len() >= 2 {
+                    dict.insert(w);
+                }
+            }
+        };
+        for av in self.world.avatars.values() {
+            add_name(&av.name);
+        }
+        for entry in self.pounce.entries() {
+            add_name(&entry.name);
+        }
+        for w in &self.whispers {
+            add_name(&w.peer);
+        }
+        if let Some(lp) = &self.looked_player {
+            add_name(&lp.info.name);
+        }
+        if let Some(info) = &self.account_info {
+            for ch in &info.characters {
+                add_name(&ch.name);
+            }
+        }
+        dict
     }
 
     fn add_word_to_dictionary(&mut self, word: &str) {
@@ -7811,7 +7832,7 @@ impl FurcadiaApp {
                         let _ = self.to_net.send(UiToNet::SpellCheck {
                             seq: self.spell_seq,
                             text: self.chat_input.clone(),
-                            custom_dict: self.custom_dict_words.clone(),
+                            custom_dict: self.spellcheck_dict_with_names(),
                         });
                     } else {
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
@@ -8271,6 +8292,17 @@ impl FurcadiaApp {
         let mut floor_elevs: HashMap<(usize, usize), (i16, i16)> = HashMap::new();
         let mut tile_elevs: HashMap<(usize, usize), (i16, i16)> = HashMap::new();
         for tile in &mut tiles_to_draw {
+            // Floor 161 is the DreamEd "no floor" placeholder (a pit sprite in the default
+            // `floors.fox`); Furcadia renders it as empty black unless the dream defines its own.
+            if tile.floor_id == 161
+                && !self
+                    .floors_cache
+                    .dream_archive
+                    .as_ref()
+                    .is_some_and(|f| f.resolve_shape(161, 0).is_some())
+            {
+                continue;
+            }
             if let Some(cs) = self.resolve_floor_sprite(&ctx, tile.floor_id, tile.x, tile.y) {
                 tile.floor_elev = cs.elev;
                 if cs.elev != (0, 0) {
@@ -10827,6 +10859,30 @@ fn rewrite_pounce_add_message(mut line: ChatLine) -> ChatLine {
     line
 }
 
+fn normalize_main_map_id(lower: &str) -> Option<&'static str> {
+    if lower == "furn" || lower == "pmfurn" {
+        Some("pmfurn")
+    } else if lower == "vinca" || lower == "pmvinca" {
+        Some("pmvinca")
+    } else if lower.starts_with("acrop") || lower == "pmacrop" || lower == "pmacropolis" {
+        Some("pmacropolis")
+    } else if lower.starts_with("alleg") || lower == "pmalleg" || lower == "pmallegria" {
+        Some("pmallegria")
+    } else if lower.starts_with("imagin") || lower == "pmimag" || lower == "pmimaginarium" {
+        Some("pmimaginarium")
+    } else if lower.starts_with("meov") || lower == "pmmeov" || lower == "pmmeovanni" {
+        Some("pmmeovanni")
+    } else if lower.starts_with("hawth") || lower == "pmhawth" || lower == "pmhawthorn" {
+        Some("pmhawthorn")
+    } else if lower.starts_with("oldetown") || lower == "pmoldetown" {
+        Some("pmoldetown")
+    } else if lower.starts_with("wylde") || lower == "pmwylde" {
+        Some("pmwylde")
+    } else {
+        None
+    }
+}
+
 fn custom_dictionary_path() -> Option<std::path::PathBuf> {
     default_logs_dir()
         .and_then(|d| d.parent().map(|p| p.join("custom_dictionary.txt")))
@@ -10934,13 +10990,130 @@ fn extract_spellcheck_words(text: &str) -> Vec<(String, usize, usize)> {
     words
 }
 
+static BUNDLED_DICT_BZ2: &[u8] = include_bytes!("../../assets/dictionary.txt.bz2");
+static BUNDLED_DICT: std::sync::OnceLock<std::collections::HashSet<String>> =
+    std::sync::OnceLock::new();
+
+fn bundled_dictionary() -> &'static std::collections::HashSet<String> {
+    BUNDLED_DICT.get_or_init(|| {
+        use std::io::Read;
+        let mut set = std::collections::HashSet::with_capacity(130_000);
+        let mut decoder = bzip2_rs::DecoderReader::new(BUNDLED_DICT_BZ2);
+        let mut text = String::new();
+        if decoder.read_to_string(&mut text).is_ok() {
+            for line in text.lines() {
+                let w = line.trim();
+                if !w.is_empty() {
+                    set.insert(w.to_owned());
+                }
+            }
+        }
+        set
+    })
+}
+
+fn spellcheck_word_known(
+    word: &str,
+    custom_dict: &std::collections::HashSet<String>,
+    dict: &std::collections::HashSet<String>,
+) -> bool {
+    let lower = word.to_ascii_lowercase();
+    if custom_dict.contains(&lower) || dict.contains(&lower) {
+        return true;
+    }
+    if let Some(base) = lower.strip_suffix("'s").or_else(|| lower.strip_suffix('\'')) {
+        if custom_dict.contains(base) || dict.contains(base) {
+            return true;
+        }
+    }
+    false
+}
+
+fn edit1_suggestions(
+    word: &str,
+    dict: &std::collections::HashSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    let lower = word.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push_if_valid = |cand: String| {
+        if found.len() < limit && dict.contains(&cand) && seen.insert(cand.clone()) {
+            found.push(cand);
+        }
+    };
+    // Deletions
+    for i in 0..bytes.len() {
+        let mut s = String::with_capacity(bytes.len() - 1);
+        s.push_str(&lower[..i]);
+        s.push_str(&lower[i + 1..]);
+        push_if_valid(s);
+    }
+    // Transpositions
+    for i in 0..bytes.len().saturating_sub(1) {
+        let mut b = bytes.to_vec();
+        b.swap(i, i + 1);
+        if let Ok(s) = String::from_utf8(b) {
+            push_if_valid(s);
+        }
+    }
+    // Replacements
+    for i in 0..bytes.len() {
+        for ch in b'a'..=b'z' {
+            if bytes[i] == ch {
+                continue;
+            }
+            let mut b = bytes.to_vec();
+            b[i] = ch;
+            if let Ok(s) = String::from_utf8(b) {
+                push_if_valid(s);
+            }
+        }
+    }
+    // Insertions
+    for i in 0..=bytes.len() {
+        for ch in b'a'..=b'z' {
+            let mut b = Vec::with_capacity(bytes.len() + 1);
+            b.extend_from_slice(&bytes[..i]);
+            b.push(ch);
+            b.extend_from_slice(&bytes[i..]);
+            if let Ok(s) = String::from_utf8(b) {
+                push_if_valid(s);
+            }
+        }
+    }
+    found
+}
+
+fn run_bundled_spell_check(
+    text: &str,
+    custom_dict: &std::collections::HashSet<String>,
+) -> Vec<MisspelledWord> {
+    let dict = bundled_dictionary();
+    extract_spellcheck_words(text)
+        .into_iter()
+        .filter(|(w, _, _)| !spellcheck_word_known(w, custom_dict, dict))
+        .map(|(word, start, end)| {
+            let suggestions = edit1_suggestions(&word, dict, 5);
+            MisspelledWord {
+                word,
+                start,
+                end,
+                suggestions,
+            }
+        })
+        .collect()
+}
+
 fn run_hunspell_check(
     text: &str,
     custom_dict: &std::collections::HashSet<String>,
 ) -> Vec<MisspelledWord> {
     let Some(dic) = find_hunspell_dict() else {
-        return Vec::new();
+        return run_bundled_spell_check(text, custom_dict);
     };
+    let dict = bundled_dictionary();
     let words = extract_spellcheck_words(text);
     if words.is_empty() {
         return Vec::new();
@@ -10948,7 +11121,7 @@ fn run_hunspell_check(
     let mut stdin_buf = String::new();
     let mut active = Vec::new();
     for (w, s, e) in words {
-        if custom_dict.contains(&w.to_ascii_lowercase()) {
+        if spellcheck_word_known(&w, custom_dict, dict) {
             continue;
         }
         stdin_buf.push('^');
@@ -10965,17 +11138,17 @@ fn run_hunspell_check(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let Ok(mut child) = cmd.spawn() else {
-        return Vec::new();
+        return run_bundled_spell_check(text, custom_dict);
     };
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         let _ = stdin.write_all(stdin_buf.as_bytes());
     }
     let Ok(out) = child.wait_with_output() else {
-        return Vec::new();
+        return run_bundled_spell_check(text, custom_dict);
     };
     if !out.status.success() {
-        return Vec::new();
+        return run_bundled_spell_check(text, custom_dict);
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut results = Vec::new();
@@ -12077,6 +12250,28 @@ mod tests {
             (None, Some(42))
         );
         assert_eq!(parse_cookie_counts("hello world"), (None, None));
+    }
+
+    #[test]
+    fn bundled_spellcheck_recognizes_furcadia_and_flags_typos() {
+        let custom = std::collections::HashSet::new();
+        let ok = run_bundled_spell_check("Furcadia handpaws nuzzled Alty's", &custom);
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].word, "Alty's");
+
+        let typos = run_bundled_spell_check("teh furre", &custom);
+        assert_eq!(typos.len(), 1);
+        assert_eq!(typos[0].word, "teh");
+        assert!(typos[0].suggestions.iter().any(|s| s == "the"));
+    }
+
+    #[test]
+    fn main_map_ids_normalize_to_apollo_names() {
+        assert_eq!(normalize_main_map_id("allegria023"), Some("pmallegria"));
+        assert_eq!(normalize_main_map_id("pmimag"), Some("pmimaginarium"));
+        assert_eq!(normalize_main_map_id("imagine"), Some("pmimaginarium"));
+        assert_eq!(normalize_main_map_id("acropoli"), Some("pmacropolis"));
+        assert_eq!(normalize_main_map_id("furn"), Some("pmfurn"));
     }
 
     #[test]
