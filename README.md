@@ -1,53 +1,74 @@
-# Furcadia Native Client
+<div align="center">
+  <img src="native-icon.png" alt="Furcadia Native Client icon" width="112" />
+  <h1>Furcadia Native Client</h1>
+  <p>A native Rust client for exploring Furcadia dreams, chatting, and keeping up with the people you know.</p>
+  <p>
+    <a href="https://github.com/morganlowe/native-furcadia/releases">Download the latest release</a>
+    ·
+    <a href="https://github.com/morganlowe/native-furcadia/issues">Report an issue</a>
+  </p>
+</div>
 
-A native, cross-platform client for Furcadia written in Rust (`furc-gui` and `furc-cli`). Designed for fast startup, low resource usage, and full support for modern Furcadia dreams and features on Linux and Windows.
+![Furcadia Native Client in a dream](furc.png)
 
-![Furcadia Native Client](furc.png)
+Furcadia Native Client is an independent desktop client for Furcadia, built in Rust with an `egui` interface. It includes a graphical client for everyday play, a command-line client for terminal workflows, and a reusable library for Furcadia networking and asset formats. The project targets Linux and Windows and is designed to use Furcadia data already present on your system.
 
-## Features
+## What you can do
 
-- **Native GUI and CLI**: Hardware-accelerated interface built with `eframe` / `egui`, plus a standalone `furc-cli` binary.
-- **Modern Dream & Avatar Rendering**: Supports Fox5/FR01 archives, dynamic avatars, digos, desctags, and custom portraits.
-- **Chat, Emotes & Whispers**: Accent-colored player names in chat and emotes, drag-to-reorder character and whisper tabs, clickable links, and chat logging.
-- **Player Interaction**: Live description viewer, Pounce watchlist, saved dreams, and quick actions (Whisper, Join, Summon, Follow, Cookie, Gift).
-- **Asset Import**: Import maps, patches, portraits, and settings directly from an existing Furcadia installation.
+### Explore dreams and play
 
-## Installation
+- Connect to Furcadia, sign in with an account or character, and switch between characters and chat tabs.
+- View dream maps with animated avatars, portraits, player names, and dream-specific skins.
+- Join saved dreams or enter a `furc://` address; use map shortcuts and player actions to move around.
+- Inspect player descriptions and use common actions such as whisper, join, summon, follow, pounce, cookie, and gift.
 
-Prebuilt installers and packages are available on the [Releases](https://github.com/morganlowe/native-furcadia/releases) page.
+### Keep up with conversations
 
-### Windows
+- Use main chat, emotes, whispers, clickable links, and character-colored names.
+- Reorder character and whisper tabs, and open incoming whispers in their own tabs.
+- Keep local chat and whisper logs, with configurable logging and retention.
+- Follow characters with the Pounce watchlist and receive configurable notifications for pounces, whispers, and mentions.
+- Read Furcadia news and review online status from the client.
 
-1. Download `FurcadiaNative-Setup-1.0.8-x86_64.exe` from the latest release.
-2. Run the installer to install `furc-gui` and `furc-cli`, create a **Furcadia Native Client** Start Menu entry, and register a standard Windows uninstaller.
+### Bring your Furcadia files with you
 
-### Debian / Ubuntu / Linux Mint
+Import maps, patches, portraits, settings, character details, Pounce lists, and logs from an existing Windows or Wine Furcadia installation. The importer searches common install and Documents locations, and you can also select a location from the client.
 
-Download `furcadia-native_1.0.8_amd64.deb` from the latest release and double-click it in your file manager, or install via terminal:
+The client reads Fox5 and FR01 asset archives and supports Furcadia map formats V01.40 and V01.50. Proprietary game files are not included in this repository; use files from your own Furcadia installation.
+
+### Choose how to use it
+
+- **GUI (`furc-gui`)** — the full desktop client, including dream view, chat, character selection, saved dreams, settings, and Pounce tools.
+- **CLI (`furc-cli`)** — a terminal client for connecting, chatting, sending protocol commands, and monitoring watched characters.
+- **Rust library (`furcadia_client`)** — networking, protocol messages, authentication, map and archive readers, world state, and related utilities.
+
+## Get the client
+
+Prebuilt packages are published on the [GitHub Releases page](https://github.com/morganlowe/native-furcadia/releases). Choose the asset for your operating system:
+
+| Platform | Release asset |
+| --- | --- |
+| Windows 64-bit | `FurcadiaNative-Setup-<version>-x86_64.exe` |
+| Debian, Ubuntu, Linux Mint | `furcadia-native_<version>_amd64.deb` |
+| Arch Linux | `furcadia-native-<version>-1-x86_64.pkg.tar.zst` |
+
+On Debian-based distributions, install the downloaded package with:
 
 ```sh
-sudo apt install ./furcadia-native_1.0.8_amd64.deb
+sudo apt install ./furcadia-native_<version>_amd64.deb
 ```
 
-### Arch Linux
-
-Download `furcadia-native-1.0.8-1-x86_64.pkg.tar.zst` from the latest release and install with:
+On Arch Linux, install the downloaded package with:
 
 ```sh
-sudo pacman -U furcadia-native-1.0.8-1-x86_64.pkg.tar.zst
+sudo pacman -U ./furcadia-native-<version>-1-x86_64.pkg.tar.zst
 ```
 
-Or build and install directly from the included `PKGBUILD`:
+The Windows installer installs both client binaries and adds a Start Menu entry. Package contents and available platforms can vary by release; check the release notes for the current assets.
 
-```sh
-git clone https://github.com/morganlowe/native-furcadia.git
-cd native-furcadia/packaging/arch
-makepkg -si
-```
+## Build from source
 
-## Building from Source
-
-Requires Rust (stable) and, on Linux, X11/Wayland/OpenGL development libraries (`libxcb`, `libxkbcommon`, `libgl`).
+You will need the [stable Rust toolchain](https://www.rust-lang.org/tools/install). Linux builds also need the system development libraries required by `eframe`/`winit` for your desktop session (X11 or Wayland) and OpenGL.
 
 ```sh
 git clone https://github.com/morganlowe/native-furcadia.git
@@ -55,22 +76,38 @@ cd native-furcadia
 cargo build --release --bins
 ```
 
-Binaries are written to `target/release/furc-gui` and `target/release/furc-cli`.
+The binaries are written to `target/release/furc-gui` and `target/release/furc-cli`. To launch the graphical client, run `./target/release/furc-gui`.
 
-## Open Source Resources and Credits
+## Command-line client
 
-- **eframe / egui** (MIT / Apache-2.0): Immediate-mode Rust GUI framework.
-- **image** (MIT / Apache-2.0): PNG and image decoding.
-- **lzma-rs** (MIT): LZMA decompression for Furcadia Fox5/FR01 archives.
-- **Rust Standard Library** (MIT / Apache-2.0): Networking, filesystem, and concurrency primitives.
-- **Furcadia**: Furcadia and its protocol/assets are copyright Dragon's Eye Productions, Inc. This client does not redistribute proprietary game assets and uses user-supplied local Furcadia files.
+`furc-cli` connects to the default Furcadia server. Supply either a character name or an account email and a password:
 
-## License
+```sh
+./target/release/furc-cli --name CharacterName --password 'your-password'
+```
 
-Licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0). Non-commercial use only; this software may not be sold. See [LICENSE](LICENSE) for details.
+```sh
+./target/release/furc-cli --account you@example.com --password 'your-password' --watch FriendOne,FriendTwo
+```
 
----
+While connected, enter chat text directly or use `/wh NAME message`, `/who`, `/onln NAME`, `/glook NAME`, `/watch NAME`, `/unwatch NAME`, and `/pounce`. Prefix a protocol command with `/raw ` or a backtick. Run `furc-cli --help` for connection options such as `--host`, `--port`, and `--timeout-secs`.
+
+## Data and privacy
+
+Settings are stored locally at `~/.config/furcadia-native/config.ini` on Linux (or `%APPDATA%\furcadia-native\config.ini` on Windows). Chat logs are also stored locally. The client connects to Furcadia services for login, game sessions, news, and update checks; account login details are used to authenticate with Furcadia. On Unix-like systems the configuration file is written with owner-only permissions when possible. Avoid sharing your configuration file because it may contain saved credentials.
+
+## Project status
+
+This is an independent, actively developed client. Some behavior and asset support may differ from the official client, and compatibility can vary across dreams and installations. Please report reproducible problems through [GitHub Issues](https://github.com/morganlowe/native-furcadia/issues), including your operating system and the relevant log or error details. Do not attach account passwords or private credentials.
+
+## Credits and license
+
+The desktop interface uses [egui/eframe](https://github.com/emilk/egui). The project also uses `image` for PNG decoding, `lzma-rs` for LZMA decompression, and `bzip2-rs` for BZip2 data. See [`Cargo.toml`](Cargo.toml) for dependency details and their licenses.
+
+Furcadia and its protocol and assets are associated with Dragon's Eye Productions, Inc. This is an independent community client and is not affiliated with or endorsed by Dragon's Eye Productions. It does not redistribute proprietary game assets.
+
+This software is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](LICENSE). Commercial use is not permitted under this license.
 
 <p align="center">
-  <img src="bear-built-logo.png" alt="Bear Built" />
+  <img src="bear-built-logo.png" alt="Bear Built" width="180" />
 </p>
