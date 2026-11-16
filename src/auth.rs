@@ -19,6 +19,8 @@ pub struct CharacterSummary {
     pub name: String,
     pub species: String,
     pub colors: String,
+    /// Last portrait/port selected for this character by the account service.
+    pub last_port: Option<u32>,
     pub last_login: String,
     pub desc: String,
 }
@@ -177,6 +179,9 @@ pub fn parse_clogin_xml(xml: &str) -> Result<AccountInfo, AuthError> {
             name: raw_name.replace('|', " "),
             species: extract_attr(char_tag, "species").unwrap_or_default(),
             colors: extract_attr(char_tag, "colors").unwrap_or_default(),
+            last_port: extract_attr(char_tag, "lastport")
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v > 0),
             last_login: extract_attr(char_tag, "lastlogin").unwrap_or_default(),
             desc,
         });
@@ -306,12 +311,23 @@ fn clean_error_body(raw: &str) -> String {
 }
 
 fn unescape_xml(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
+    let mut decoded = s.to_owned();
+    // Some account responses double-escape attribute values (for example
+    // `&amp;gt;`); decode a few rounds so color codes are usable as sent.
+    for _ in 0..3 {
+        let next = decoded
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&");
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    decoded
 }
 
 #[cfg(test)]

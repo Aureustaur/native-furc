@@ -2441,6 +2441,13 @@ impl FurcadiaApp {
         });
     }
 
+    fn refresh_character_list(&mut self) {
+        if let Some(ch) = self.selected_character() {
+            self.saved_character = ch.name.clone();
+        }
+        self.trigger_login();
+    }
+
     fn trigger_play(&mut self) {
         let Some(ch) = self.selected_character().cloned() else {
             return;
@@ -2810,6 +2817,27 @@ impl FurcadiaApp {
         }
         let app = furcadia_client::parse_color_code(colors);
         self.portrait_for_appearance(ctx, &app, format!("char:{id}:{colors}"))
+    }
+
+    /// Prefer the character's saved custom port when the account response has one.
+    fn account_character_portrait(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        colors: &str,
+        last_port: Option<u32>,
+    ) -> Option<TextureHandle> {
+        if let Some(pid) = last_port {
+            if let Some(tex) = self.custom_portrait_texture(ctx, pid) {
+                return Some(tex);
+            }
+            if !self.custom_portrait_rgba.contains_key(&pid)
+                && self.pending_portrait_downloads.insert(pid)
+            {
+                let _ = self.to_net.send(UiToNet::DownloadPortrait { portrait_id: pid });
+            }
+        }
+        self.character_portrait(ctx, id, colors)
     }
 
     /// Portrait for the logged-in character (live appearance, falling back to account colors).
@@ -5599,6 +5627,13 @@ impl FurcadiaApp {
                                     |ui| {
                                         ui.radio_value(&mut self.char_sort, CharSort::Alphabetical, "A-Z");
                                         ui.radio_value(&mut self.char_sort, CharSort::Recent, "Recent");
+                                        if ui
+                                            .add_enabled(!self.auth_busy, egui::Button::new("↻ Refresh"))
+                                            .on_hover_text("Fetch the latest character list from your account")
+                                            .clicked()
+                                        {
+                                            self.refresh_character_list();
+                                        }
                                     },
                                 );
                             });
@@ -5639,7 +5674,7 @@ impl FurcadiaApp {
                                 }
                             }
 
-                            let tiles: Vec<(usize, String, String, String)> = self
+                            let tiles: Vec<(usize, String, String, String, Option<u32>)> = self
                                 .account_info
                                 .as_ref()
                                 .map(|info| {
@@ -5647,7 +5682,7 @@ impl FurcadiaApp {
                                         .iter()
                                         .map(|&i| {
                                             let c = &info.characters[i];
-                                            (i, c.id.clone(), c.name.replace('|', " "), c.colors.clone())
+                                            (i, c.id.clone(), c.name.replace('|', " "), c.colors.clone(), c.last_port)
                                         })
                                         .collect()
                                 })
@@ -5676,9 +5711,9 @@ impl FurcadiaApp {
                                             }
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                                for (idx, id, name, colors) in &tiles {
+                                                for (idx, id, name, colors, last_port) in &tiles {
                                                     let selected = *idx == self.selected_char_idx;
-                                                    let portrait = self.character_portrait(ctx, id, colors);
+                                                    let portrait = self.account_character_portrait(ctx, id, colors, *last_port);
                                                     let tile_size = Vec2::new(112.0, 134.0);
                                                     let (rect, resp) =
                                                         ui.allocate_exact_size(tile_size, Sense::click());
@@ -7545,7 +7580,7 @@ impl FurcadiaApp {
             let shift = i.modifiers.shift;
             if i.key_pressed(egui::Key::Escape) {
                 clear_input = true;
-            } else if i.key_pressed(egui::Key::F1) || (ctrl && i.key_pressed(egui::Key::Z)) {
+            } else if i.key_pressed(egui::Key::F1) || (!wants_text && ctrl && i.key_pressed(egui::Key::Z)) {
                 toggle_help = true;
             } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
                 toggle_names = true;
