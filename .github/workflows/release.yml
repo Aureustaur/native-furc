@@ -99,27 +99,32 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.5
-            - Fix DreamEd empty/void floor `161` rendering as pit blocks instead of black when not overridden by a dream
-            - Fix HTTP 500 dream download errors for main maps (`allegria023` → `pmallegria`, `pmimag` → `pmimaginarium`, etc.)
-            - Add built-in 127k-word English + Furcadia/RP spellcheck dictionary (`assets/dictionary.txt.bz2`) with suggestions and live player-name awareness (works natively on Windows and Linux)
+            ### What's New in v1.0.6
+            - In-app **Download & Install** updater (launches Inno Setup on Windows; uses `pkexec` for `.deb` / `.pkg.tar.zst` on Linux)
+            - Configurable dice roll button in Settings (`1d6`, `1d20`, `1d100`, `2d6`, or custom) and fix `roll` command sending as spoken chat
+            - Display your custom portrait in the upper character card when loaded
+            - Rebuilt **D: DIGO** and **E: DIGO** tabs with labeled Digo Market toggles (wings, mythicals, Ferians, Nobles) and Digo magic/abilities
+            - Added **Ignore / Unignore** to player right-click menus
+            - Fixed off-screen tile culling so large trees, roofs, and dream effects poking into view render properly (including in Chat View)
+            - Auto-load previous whisper logs (in grayed font) when opening a whisper tab, plus horizontally scrollable whisper tabs and moved `↗ Pop Out` to the whisper action bar
+            - Renamed `av` counter to `Visible` and centered the Bear Built logo in the README
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.0.5-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.0.6-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.5_amd64.deb
+            sudo apt install ./furcadia-native_1.0.6_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.5-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.0.6-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

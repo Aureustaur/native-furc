@@ -71,4 +71,6 @@ Licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 Int
 
 ---
 
-![Bear Built](bear-built-logo.png)
+<p align="center">
+  <img src="bear-built-logo.png" alt="Bear Built" />
+</p>

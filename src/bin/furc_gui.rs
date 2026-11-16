@@ -17,7 +17,7 @@ use furcadia_client::{
     decode_fsh_sprites, extract_fr01_to_dir, fetch_account_characters, fetch_news, is_fr01,
     logs::{
         append_chat_log, append_whisper_log, default_logs_dir, list_log_characters,
-        list_log_files, prune_old_logs,
+        list_log_files, load_whisper_log, prune_old_logs,
     },
     parse_chat_line, unescape_html,
     win_import::import_windows_furcadia_dir,
@@ -117,6 +117,35 @@ enum UpdateCheckMsg {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdateInstallState {
+    Idle,
+    Downloading,
+    Installing,
+    Installed,
+    Failed(String),
+}
+
+enum UpdateInstallMsg {
+    #[cfg(not(target_os = "windows"))]
+    Installing,
+    #[cfg(not(target_os = "windows"))]
+    Installed,
+    #[cfg(target_os = "windows")]
+    LaunchInstallerAndExit(std::path::PathBuf),
+    Failed(String),
+}
+
+fn update_download_filename(url: &str) -> String {
+    let base = url.split('?').next().unwrap_or(url);
+    let name = base.rsplit('/').next().unwrap_or("").trim();
+    if name.is_empty() {
+        "furcadia-native-update".to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
 fn extract_json_string_field(json: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
     let idx = json.find(&needle)?;
@@ -198,6 +227,7 @@ fn parse_github_release_json(json: &str) -> Option<UpdateReleaseInfo> {
 
 struct WhisperSession {
     peer: String,
+    history_lines: Vec<String>,
     lines: Vec<ChatLine>,
     input: String,
     unread: usize,
@@ -208,11 +238,35 @@ impl WhisperSession {
     fn new(peer: String) -> Self {
         Self {
             peer,
+            history_lines: Vec::new(),
             lines: Vec::new(),
             input: String::new(),
             unread: 0,
             detached: false,
         }
+    }
+}
+
+fn render_whisper_history_lines(
+    ui: &mut egui::Ui,
+    history_lines: &[String],
+    has_live_lines: bool,
+) {
+    if history_lines.is_empty() {
+        return;
+    }
+    let log_color = Color32::from_rgb(142, 145, 160);
+    for line in history_lines {
+        ui.add(
+            egui::Label::new(RichText::new(line).size(12.5).color(log_color)).wrap(),
+        );
+    }
+    if has_live_lines {
+        ui.label(
+            RichText::new("─── Current Session ───")
+                .size(11.0)
+                .color(Color32::from_rgb(108, 110, 126)),
+        );
     }
 }
 
@@ -305,6 +359,7 @@ enum PlayerMenuAction {
     Lead,
     Cuddle,
     TogglePounce,
+    ToggleIgnore,
     ShareEdit,
     UnshareEdit,
     Raw(&'static str),
@@ -350,6 +405,7 @@ fn render_player_menu_buttons(
         item(ui, "Follow", PlayerMenuAction::Follow);
         item(ui, "Cuddle", PlayerMenuAction::Cuddle);
         ui.separator();
+        item(ui, "Ignore / Unignore", PlayerMenuAction::ToggleIgnore);
         item(ui, "Remove", PlayerMenuAction::TogglePounce);
     } else {
         item(ui, "Look", PlayerMenuAction::Look);
@@ -370,6 +426,7 @@ fn render_player_menu_buttons(
             },
             PlayerMenuAction::TogglePounce,
         );
+        item(ui, "Ignore / Unignore", PlayerMenuAction::ToggleIgnore);
         item(ui, "Share Edit", PlayerMenuAction::ShareEdit);
         item(ui, "Unshare Edit", PlayerMenuAction::UnshareEdit);
     }
@@ -1355,8 +1412,11 @@ struct FurcadiaApp {
     update_available: Option<UpdateReleaseInfo>,
     update_popup_open: bool,
     update_rx: Option<mpsc::Receiver<UpdateCheckMsg>>,
+    update_install_state: UpdateInstallState,
+    update_install_rx: Option<mpsc::Receiver<UpdateInstallMsg>>,
     cookies_collected: Option<u32>,
     cookies_total: Option<u32>,
+    dice_roll: String,
 }
 
 impl FurcadiaApp {
@@ -1671,8 +1731,11 @@ impl FurcadiaApp {
             update_available: None,
             update_popup_open: false,
             update_rx: None,
+            update_install_state: UpdateInstallState::Idle,
+            update_install_rx: None,
             cookies_collected: None,
             cookies_total: None,
+            dice_roll: cfg.dice_roll.clone(),
         };
         app.apply_font_settings(&ctx);
         if app.first_setup_done && app.check_updates_on_startup {
@@ -1735,6 +1798,11 @@ impl FurcadiaApp {
             portrait_size: self.portrait_size.round().clamp(48.0, 160.0) as u16,
             check_updates_on_startup: self.check_updates_on_startup,
             first_setup_done: self.first_setup_done,
+            dice_roll: if self.dice_roll.trim().is_empty() {
+                "1d6".to_owned()
+            } else {
+                self.dice_roll.trim().to_owned()
+            },
         };
         let _ = cfg.save_default();
     }
@@ -2734,7 +2802,46 @@ impl FurcadiaApp {
     }
 
     /// Portrait for the logged-in character (live appearance, falling back to account colors).
+    fn custom_portrait_texture(&mut self, ctx: &egui::Context, pid: u32) -> Option<TextureHandle> {
+        if let Some(tex) = self.custom_portrait_textures.get(&pid) {
+            return Some(tex.clone());
+        }
+        if let Some(Some((w, h, pixels))) = self.custom_portrait_rgba.get(&pid) {
+            let img = ColorImage::from_rgba_unmultiplied([*w, *h], pixels);
+            let tex = ctx.load_texture(
+                format!("custom_portrait_{pid}"),
+                img,
+                TextureOptions::LINEAR,
+            );
+            self.custom_portrait_textures.insert(pid, tex.clone());
+            return Some(tex);
+        }
+        None
+    }
+
+    fn self_custom_portrait_id(&self) -> Option<u32> {
+        let self_name = self.world.self_name.as_deref().unwrap_or("");
+        let active_name = self.active_character_name();
+        let target_key = if !self_name.is_empty() {
+            shortname_key(self_name)
+        } else {
+            shortname_key(&active_name)
+        };
+        if target_key.is_empty() {
+            return None;
+        }
+        self.player_portrait_ids
+            .iter()
+            .find(|(name, _)| shortname_key(name) == target_key)
+            .map(|(_, &pid)| pid)
+    }
+
     fn self_portrait(&mut self, ctx: &egui::Context) -> Option<TextureHandle> {
+        if let Some(pid) = self.self_custom_portrait_id() {
+            if let Some(tex) = self.custom_portrait_texture(ctx, pid) {
+                return Some(tex);
+            }
+        }
         let live = self
             .world
             .self_uid
@@ -3674,7 +3781,12 @@ impl FurcadiaApp {
             }
             return idx;
         }
-        self.whispers.push(WhisperSession::new(trimmed.to_owned()));
+        let mut session = WhisperSession::new(trimmed.to_owned());
+        if let Some(dir) = default_logs_dir() {
+            session.history_lines =
+                load_whisper_log(&dir, &self.active_character_name(), trimmed, 200);
+        }
+        self.whispers.push(session);
         let idx = self.whispers.len() - 1;
         if focus {
             self.active_chat_tab = Some(self.whispers[idx].peer.clone());
@@ -4237,6 +4349,7 @@ impl eframe::App for FurcadiaApp {
             self.render_about_window(ctx);
         }
         self.poll_update_check();
+        self.poll_update_install(ctx);
         if self.first_setup_open {
             self.render_first_setup_window(ctx);
         }
@@ -4334,6 +4447,174 @@ impl FurcadiaApp {
                 }
                 UpdateCheckMsg::Error(err) => {
                     self.update_status = Some(format!("Update check failed: {err}"));
+                }
+            }
+        }
+    }
+
+    fn trigger_update_install(&mut self, ctx: &egui::Context) {
+        if matches!(
+            self.update_install_state,
+            UpdateInstallState::Downloading | UpdateInstallState::Installing
+        ) {
+            return;
+        }
+        let Some(asset_url) = self
+            .update_available
+            .as_ref()
+            .and_then(|info| info.asset_url.clone())
+        else {
+            self.update_install_state = UpdateInstallState::Failed(
+                "No matching installer asset found for this platform.".to_owned(),
+            );
+            return;
+        };
+
+        self.update_install_state = UpdateInstallState::Downloading;
+        let (tx, rx) = mpsc::channel();
+        self.update_install_rx = Some(rx);
+        let ctx_clone = ctx.clone();
+
+        thread::spawn(move || {
+            let filename = update_download_filename(&asset_url);
+            let dest_path = std::env::temp_dir().join(&filename);
+            let dest_str = dest_path.to_string_lossy().into_owned();
+
+            let dl = furcadia_client::sys::command("curl")
+                .args(["-fsSL", "--max-time", "180", "-o", &dest_str, &asset_url])
+                .output();
+            match dl {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    let _ = std::fs::remove_file(&dest_path);
+                    let err = String::from_utf8_lossy(&o.stderr).trim().to_owned();
+                    let _ = tx.send(UpdateInstallMsg::Failed(if err.is_empty() {
+                        format!("Download failed (curl exited {}).", o.status)
+                    } else {
+                        format!("Download failed: {err}")
+                    }));
+                    ctx_clone.request_repaint();
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(UpdateInstallMsg::Failed(format!(
+                        "Failed to run curl: {e}"
+                    )));
+                    ctx_clone.request_repaint();
+                    return;
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                let _ = tx.send(UpdateInstallMsg::LaunchInstallerAndExit(dest_path));
+                ctx_clone.request_repaint();
+                return;
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = tx.send(UpdateInstallMsg::Installing);
+                ctx_clone.request_repaint();
+
+                let is_arch = filename.ends_with(".pkg.tar.zst");
+                let is_deb = filename.ends_with(".deb");
+                let install_res = if is_arch {
+                    std::process::Command::new("pkexec")
+                        .args(["pacman", "-U", "--noconfirm", &dest_str])
+                        .output()
+                } else if is_deb {
+                    std::process::Command::new("pkexec")
+                        .args(["apt-get", "install", "-y", &dest_str])
+                        .output()
+                } else {
+                    let _ = std::fs::remove_file(&dest_path);
+                    let _ = tx.send(UpdateInstallMsg::Failed(format!(
+                        "Unsupported package format: {filename}"
+                    )));
+                    ctx_clone.request_repaint();
+                    return;
+                };
+
+                let _ = std::fs::remove_file(&dest_path);
+                match install_res {
+                    Ok(o) if o.status.success() => {
+                        let _ = tx.send(UpdateInstallMsg::Installed);
+                    }
+                    Ok(o) => {
+                        let err = String::from_utf8_lossy(&o.stderr).trim().to_owned();
+                        let msg = if o.status.code() == Some(126) || o.status.code() == Some(127) {
+                            "Authorization cancelled or pkexec unavailable.".to_owned()
+                        } else if err.is_empty() {
+                            format!("Installer exited with {}.", o.status)
+                        } else {
+                            format!("Install failed: {err}")
+                        };
+                        let _ = tx.send(UpdateInstallMsg::Failed(msg));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(UpdateInstallMsg::Failed(format!(
+                            "Failed to launch pkexec: {e}"
+                        )));
+                    }
+                }
+                ctx_clone.request_repaint();
+            }
+        });
+    }
+
+    fn poll_update_install(&mut self, #[allow(unused_variables)] ctx: &egui::Context) {
+        let msg = match &self.update_install_rx {
+            Some(rx) => match rx.try_recv() {
+                Ok(m) => Some(m),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if matches!(
+                        self.update_install_state,
+                        UpdateInstallState::Downloading | UpdateInstallState::Installing
+                    ) {
+                        self.update_install_state = UpdateInstallState::Failed(
+                            "Update worker stopped unexpectedly.".to_owned(),
+                        );
+                    }
+                    self.update_install_rx = None;
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(m) = msg {
+            match m {
+                #[cfg(not(target_os = "windows"))]
+                UpdateInstallMsg::Installing => {
+                    self.update_install_state = UpdateInstallState::Installing;
+                }
+                #[cfg(not(target_os = "windows"))]
+                UpdateInstallMsg::Installed => {
+                    self.update_install_rx = None;
+                    self.update_install_state = UpdateInstallState::Installed;
+                    self.update_status = Some("Update installed! Restart to apply.".to_owned());
+                }
+                #[cfg(target_os = "windows")]
+                UpdateInstallMsg::LaunchInstallerAndExit(path) => {
+                    self.update_install_rx = None;
+                    match furcadia_client::sys::command(&path)
+                        .arg("/CLOSEAPPLICATIONS")
+                        .spawn()
+                    {
+                        Ok(_) => {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Err(e) => {
+                            self.update_install_state = UpdateInstallState::Failed(format!(
+                                "Could not launch installer: {e}"
+                            ));
+                        }
+                    }
+                }
+                UpdateInstallMsg::Failed(err) => {
+                    self.update_install_rx = None;
+                    self.update_install_state = UpdateInstallState::Failed(err);
                 }
             }
         }
@@ -4458,29 +4739,104 @@ impl FurcadiaApp {
                     .color(Color32::LIGHT_GRAY),
                 );
                 ui.add_space(10.0);
-                ui.horizontal_wrapped(|ui| {
-                    if let Some(asset_url) = &info.asset_url {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Download Update")
-                                        .strong()
-                                        .color(Color32::from_rgb(20, 14, 6)),
-                                )
-                                .fill(accent),
+                match &self.update_install_state {
+                    UpdateInstallState::Idle => {
+                        ui.horizontal_wrapped(|ui| {
+                            if info.asset_url.is_some()
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Download & Install")
+                                                .strong()
+                                                .color(Color32::from_rgb(20, 14, 6)),
+                                        )
+                                        .fill(accent),
+                                    )
+                                    .clicked()
+                            {
+                                self.trigger_update_install(ctx);
+                            }
+                            if ui.button("Open Release Page").clicked() {
+                                ctx.open_url(egui::OpenUrl::new_tab(&info.html_url));
+                            }
+                            if ui.button("Later").clicked() {
+                                self.update_popup_open = false;
+                            }
+                        });
+                    }
+                    UpdateInstallState::Downloading => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Downloading update package...");
+                        });
+                    }
+                    UpdateInstallState::Installing => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Installing update (waiting for authorization)...");
+                        });
+                    }
+                    UpdateInstallState::Installed => {
+                        ui.label(
+                            RichText::new(
+                                "Update installed! Restart the client to run the new version.",
                             )
-                            .clicked()
-                        {
-                            ctx.open_url(egui::OpenUrl::new_tab(asset_url));
-                        }
+                            .color(Color32::from_rgb(120, 220, 140)),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Restart Now")
+                                            .strong()
+                                            .color(Color32::from_rgb(20, 14, 6)),
+                                    )
+                                    .fill(accent),
+                                )
+                                .clicked()
+                            {
+                                if let Ok(exe) = std::env::current_exe() {
+                                    let _ = std::process::Command::new(exe).spawn();
+                                }
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            if ui.button("Close").clicked() {
+                                self.update_popup_open = false;
+                            }
+                        });
                     }
-                    if ui.button("Open Release Page").clicked() {
-                        ctx.open_url(egui::OpenUrl::new_tab(&info.html_url));
+                    UpdateInstallState::Failed(err) => {
+                        ui.label(
+                            RichText::new(err)
+                                .size(12.0)
+                                .color(Color32::from_rgb(240, 110, 110)),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if info.asset_url.is_some()
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Retry Install")
+                                                .strong()
+                                                .color(Color32::from_rgb(20, 14, 6)),
+                                        )
+                                        .fill(accent),
+                                    )
+                                    .clicked()
+                            {
+                                self.trigger_update_install(ctx);
+                            }
+                            if ui.button("Open Release Page").clicked() {
+                                ctx.open_url(egui::OpenUrl::new_tab(&info.html_url));
+                            }
+                            if ui.button("Later").clicked() {
+                                self.update_popup_open = false;
+                            }
+                        });
                     }
-                    if ui.button("Later").clicked() {
-                        self.update_popup_open = false;
-                    }
-                });
+                }
             });
         if !open {
             self.update_popup_open = false;
@@ -4623,6 +4979,30 @@ impl FurcadiaApp {
                         {
                             self.save_config();
                         }
+                        ui.separator();
+                        ui.label(RichText::new("Dice Roll Button").strong().color(accent));
+                        ui.horizontal(|ui| {
+                            ui.label("Roll expression:");
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.dice_roll)
+                                        .hint_text("1d6")
+                                        .desired_width(90.0),
+                                )
+                                .changed()
+                            {
+                                self.save_config();
+                            }
+                            for preset in ["1d6", "1d20", "1d100", "2d6"] {
+                                if ui
+                                    .selectable_label(self.dice_roll.trim() == preset, preset)
+                                    .clicked()
+                                {
+                                    self.dice_roll = preset.to_owned();
+                                    self.save_config();
+                                }
+                            }
+                        });
                     }
                     3 => {
                         ui.label(RichText::new("Audio & Desktop Notifications").strong().color(accent));
@@ -4719,7 +5099,7 @@ impl FurcadiaApp {
                                 self.trigger_update_check(ctx);
                             }
                             if self.update_available.is_some()
-                                && ui.button("Download Update").clicked()
+                                && ui.button("Install Update...").clicked()
                             {
                                 self.update_popup_open = true;
                             }
@@ -5880,6 +6260,11 @@ impl FurcadiaApp {
                                 .max_height(h)
                                 .stick_to_bottom(true)
                                 .show(ui, |ui| {
+                                    render_whisper_history_lines(
+                                        ui,
+                                        &w.history_lines,
+                                        !w.lines.is_empty(),
+                                    );
                                     for line in &w.lines {
                                         render_chat_line(
                                             ui,
@@ -6613,7 +6998,7 @@ impl FurcadiaApp {
                             }
                         }
                         SidebarTab::Digo => {
-                            ui.label(RichText::new("💎 DIGO & COSTUMES").strong().color(accent));
+                            ui.label(RichText::new("💎 DIGO TOGGLES & WINGS").strong().color(accent));
                             if let Some(ch) = self.selected_character() {
                                 ui.label(
                                     RichText::new(format!("Colors: {}", ch.colors))
@@ -6622,62 +7007,186 @@ impl FurcadiaApp {
                                 );
                             }
                             ui.horizontal_wrapped(|ui| {
-                                if ui.button("🪽 Wings").clicked() {
+                                if ui.button("🪽 Cycle Wings").on_hover_text("Cycle owned wings (`wings)").clicked() {
                                     self.send_raw_cmd("wings");
                                 }
-                                if ui.button("🎭 Costume").clicked() {
-                                    self.send_raw_cmd("costume");
-                                }
-                                if ui.button("🏷 Desctag").clicked() {
+                                if ui.button("🏷 Desctags").on_hover_text("List/toggle desctags (`desctags)").clicked() {
                                     self.send_raw_cmd("desctags");
                                 }
-                                if ui.button("✋ Get").clicked() {
-                                    self.send_raw_cmd("get");
+                                if ui.button("🖼 Cycle Portrait").on_hover_text("Cycle custom portraits (`portrchng)").clicked() {
+                                    self.send_raw_cmd("portrchng");
                                 }
-                                if ui.button("✨ Use").clicked() {
-                                    self.send_raw_cmd("use");
-                                }
-                                if ui.button("ℹ Info").clicked() {
-                                    self.send_raw_cmd("info");
-                                }
-                                if ui.button("💎 Digo Market").clicked() {
+                                if ui.button("💎 Digo Market").on_hover_text("Open Digo Market in browser").clicked() {
                                     ctx.open_url(egui::OpenUrl::new_tab(
                                         "https://www.furcadia.com/digo/",
                                     ));
                                 }
                             });
+
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Species & Avatars").size(11.5).color(accent));
-                            let base_app = self
-                                .world
-                                .self_uid
-                                .and_then(|uid| self.world.avatars.get(&uid))
-                                .map(|a| a.appearance.clone())
-                                .or_else(|| {
-                                    self.selected_character()
-                                        .map(|c| furcadia_client::parse_color_code(&c.colors))
-                                })
-                                .unwrap_or_default();
+                            ui.label(RichText::new("Wings (Toggle On/Off)").size(11.5).color(accent));
                             ui.horizontal_wrapped(|ui| {
-                                for sp_id in 1usize..=20usize {
-                                    let mut app = base_app.clone();
-                                    app.species_id = sp_id as u16;
-                                    let key = format!("digo:{sp_id}:{}", app.gender);
-                                    if let Some(tex) = self.portrait_for_appearance(ctx, &app, key) {
-                                        let img_btn = egui::ImageButton::new((tex.id(), Vec2::new(40.0, 40.0)));
-                                        if ui
-                                            .add(img_btn)
-                                            .on_hover_text(format!("Species #{sp_id} (send `costume)"))
-                                            .clicked()
-                                        {
-                                            self.send_raw_cmd("costume");
-                                        }
+                                for (label, cmd) in [
+                                    ("Classic", "clsscwngs"),
+                                    ("Tricolor", "triwngs"),
+                                    ("Butterfly", "bflywngs"),
+                                    ("Bat", "batwngs"),
+                                    ("Prime", "primewngs"),
+                                    ("Dragonfly", "dfwings"),
+                                ] {
+                                    if ui
+                                        .add(egui::Button::new(label).min_size(Vec2::new(68.0, 24.0)))
+                                        .on_hover_text(format!("Toggle {label} wings (`{cmd})"))
+                                        .clicked()
+                                    {
+                                        self.send_raw_cmd(cmd);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Mythical & Special Digos (Toggle)").size(11.5).color(accent));
+                            ui.horizontal_wrapped(|ui| {
+                                for (label, cmd) in [
+                                    ("Dragon", "dragon"),
+                                    ("Phoenix", "phoenix"),
+                                    ("Gryffe", "gryffe"),
+                                    ("Unicorn", "unicorn"),
+                                    ("Naga", "naga"),
+                                    ("Kirin", "kirin"),
+                                    ("Gargoyle", "gargoyle"),
+                                    ("Angelcat", "angelcat"),
+                                    ("Purrwing", "purrwing"),
+                                    ("Kitter Sm", "kitw1"),
+                                    ("Kitter Lg", "kitw2"),
+                                    ("Kiwi", "kiwi"),
+                                    ("Werewolf", "werewolf"),
+                                    ("Furling", "furling"),
+                                    ("Noble (Cycle)", "noble"),
+                                ] {
+                                    if ui
+                                        .add(egui::Button::new(label).min_size(Vec2::new(72.0, 24.0)))
+                                        .on_hover_text(format!("Toggle {label} (`{cmd})"))
+                                        .clicked()
+                                    {
+                                        self.send_raw_cmd(cmd);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Ferians (Toggle)").size(11.5).color(accent));
+                            ui.horizontal_wrapped(|ui| {
+                                for (label, cmd) in [
+                                    ("Wolven", "wolven"),
+                                    ("Foxen", "foxen"),
+                                    ("Catten", "catten"),
+                                    ("Owlen", "owlen"),
+                                    ("Ferian Dragon", "mfdragon"),
+                                    ("Ferian Unicorn", "mfunicorn"),
+                                ] {
+                                    if ui
+                                        .add(egui::Button::new(label).min_size(Vec2::new(72.0, 24.0)))
+                                        .on_hover_text(format!("Toggle {label} (`{cmd})"))
+                                        .clicked()
+                                    {
+                                        self.send_raw_cmd(cmd);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Nobles (Toggle)").size(11.5).color(accent));
+                            ui.horizontal_wrapped(|ui| {
+                                for (label, cmd) in [
+                                    ("Canine", "noblecanine"),
+                                    ("Feline", "noblefeline"),
+                                    ("Equine", "nobleequine"),
+                                    ("Lapine", "noblelapine"),
+                                    ("Musteline", "noblemusteline"),
+                                    ("Rodent", "noblerodent"),
+                                    ("Squirrel", "noblesquirrel"),
+                                    ("Hyooman", "noblehyooman"),
+                                ] {
+                                    if ui
+                                        .add(egui::Button::new(label).min_size(Vec2::new(72.0, 24.0)))
+                                        .on_hover_text(format!("Toggle Noble {label} (`{cmd})"))
+                                        .clicked()
+                                    {
+                                        self.send_raw_cmd(cmd);
                                     }
                                 }
                             });
                         }
                         SidebarTab::Emotes => {
-                            ui.label(RichText::new("EMOTES & DIGO #2").strong().color(accent));
+                            ui.label(RichText::new("✨ DIGO ABILITIES & ACTIONS").strong().color(accent));
+                            ui.add_space(2.0);
+                            ui.label(RichText::new("Digo Magic & Effects").size(11.5).color(accent));
+                            ui.horizontal_wrapped(|ui| {
+                                for (label, cmd) in [
+                                    ("✨ Magic", "magic"),
+                                    ("🪽 Fly", "fly"),
+                                    ("🔥 Flame", "flame"),
+                                    ("💨 Breath", "breath"),
+                                    ("🌟 Glamour", "glamour"),
+                                    ("💦 Splash", "splash"),
+                                    ("🪨 Stone", "stone"),
+                                    ("☁ Kirin Cloud", "kirincloud"),
+                                    ("🧹 Purify", "purify"),
+                                ] {
+                                    if ui
+                                        .add(egui::Button::new(label).min_size(Vec2::new(72.0, 24.0)))
+                                        .on_hover_text(format!("Send `{cmd}"))
+                                        .clicked()
+                                    {
+                                        self.send_raw_cmd(cmd);
+                                    }
+                                }
+                            });
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new("Size:").size(11.5).color(Color32::LIGHT_GRAY));
+                                for (label, cmd) in [
+                                    ("50%", "kittersize 50"),
+                                    ("100%", "kittersize 100"),
+                                    ("150%", "kittersize 150"),
+                                ] {
+                                    if ui
+                                        .small_button(label)
+                                        .on_hover_text(format!("Send `{cmd}"))
+                                        .clicked()
+                                    {
+                                        self.send_raw_cmd(cmd);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Social & Actions").size(11.5).color(accent));
+                            ui.horizontal_wrapped(|ui| {
+                                for (label, cmd) in [
+                                    ("🤝 Lead", "lead"),
+                                    ("👣 Follow", "follow"),
+                                    ("✋ Stop", "stop"),
+                                    ("✋ Get", "get"),
+                                    ("✨ Use", "use"),
+                                    ("ℹ Info", "info"),
+                                    ("⬅ Summon", "summon"),
+                                    ("➡ Join", "join"),
+                                    ("🚫 Decline", "decline"),
+                                    ("🍪 Cookie", "buy-cookie"),
+                                ] {
+                                    if ui
+                                        .add(egui::Button::new(label).min_size(Vec2::new(68.0, 24.0)))
+                                        .clicked()
+                                    {
+                                        self.send_raw_cmd(cmd);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Emotes").size(11.5).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, emote) in [
                                     ("Wave", ":waves."),
@@ -6694,30 +7203,10 @@ impl FurcadiaApp {
                                     ("Wink", ":winks."),
                                 ] {
                                     if ui
-                                        .add(egui::Button::new(label).min_size(Vec2::new(72.0, 26.0)))
+                                        .add(egui::Button::new(label).min_size(Vec2::new(68.0, 24.0)))
                                         .clicked()
                                     {
                                         self.send_raw_cmd(emote);
-                                    }
-                                }
-                            });
-                            ui.add_space(6.0);
-                            ui.label(RichText::new("Social & Actions").size(11.5).color(accent));
-                            ui.horizontal_wrapped(|ui| {
-                                for (label, cmd) in [
-                                    ("🤝 Lead", "lead"),
-                                    ("👣 Follow", "follow"),
-                                    ("✋ Stop", "stop"),
-                                    ("⬅ Summon", "summon"),
-                                    ("➡ Join", "join"),
-                                    ("🚫 Decline", "decline"),
-                                    ("🍪 Cookie", "buy-cookie"),
-                                ] {
-                                    if ui
-                                        .add(egui::Button::new(label).min_size(Vec2::new(68.0, 26.0)))
-                                        .clicked()
-                                    {
-                                        self.send_raw_cmd(cmd);
                                     }
                                 }
                             });
@@ -7295,10 +7784,11 @@ impl FurcadiaApp {
                         self.save_config();
                     }
                     ui.label(
-                        RichText::new(format!("{} av", self.last_visible_avatar_count))
+                        RichText::new(format!("{} Visible", self.last_visible_avatar_count))
                             .size(11.0)
                             .color(Color32::LIGHT_GRAY),
-                    );
+                    )
+                    .on_hover_text("Visible avatars on the map");
                     ui.separator();
                     if ui.small_button("Who").on_hover_text("Who is online (F4)").clicked() && self.is_connected {
                         let _ = self.to_net.send(UiToNet::Send(ClientCommand::Who));
@@ -7404,7 +7894,7 @@ impl FurcadiaApp {
                 }
                 self.focus_chat_input = true;
             }
-            if ui.small_button("🚫 Ignore").on_hover_text(format!("Ignore {peer}")).clicked() {
+            if ui.small_button("🚫 Ignore").on_hover_text(format!("Ignore / Unignore {peer}")).clicked() {
                 self.send_raw_cmd(&format!("ignore {wire}"));
                 self.focus_chat_input = true;
             }
@@ -7423,114 +7913,160 @@ impl FurcadiaApp {
                     self.load_log_file_into_viewer(p);
                 }
             }
+            if ui
+                .small_button("↗ Pop Out")
+                .on_hover_text(format!("Detach {peer} whisper into its own window"))
+                .clicked()
+            {
+                if let Some(w) = self
+                    .whispers
+                    .iter_mut()
+                    .find(|w| w.peer.eq_ignore_ascii_case(peer))
+                {
+                    w.detached = true;
+                    w.unread = 0;
+                }
+                if self
+                    .active_chat_tab
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(peer))
+                {
+                    self.main_chat_unread = 0;
+                    self.active_chat_tab = None;
+                    self.focus_chat_input = true;
+                }
+            }
         });
     }
 
     fn render_chat_panel_contents(&mut self, ui: &mut egui::Ui) {
         let accent = self.theme.accent();
-                // Chat + Whisper Tabs bar
-                let mut detach_peer: Option<String> = None;
+                // Chat + Whisper Tabs bar (horizontally scrollable when many whispers are open)
                 let mut close_peer: Option<String> = None;
-                ui.horizontal_wrapped(|ui| {
-                    let main_sel = self.active_chat_tab.is_none();
-                    let main_label = if self.main_chat_unread > 0 && !main_sel {
-                        format!("Main Chat ({})", self.main_chat_unread)
-                    } else {
-                        "Main Chat".to_owned()
-                    };
-                    let main_clicked = if !main_sel && self.main_chat_unread > 0 {
-                        ui.add(
-                            egui::Button::new(
-                                RichText::new(main_label)
-                                    .strong()
-                                    .color(Color32::from_rgb(20, 14, 6)),
+                ui.horizontal(|ui| {
+                    let tabs_max_w = (ui.available_width() - 178.0).max(120.0);
+                    ui.allocate_ui(Vec2::new(tabs_max_w, 26.0), |ui| {
+                        egui::ScrollArea::horizontal()
+                            .id_salt("whisper_tabs_scroll")
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
                             )
-                            .fill(Color32::from_rgb(235, 180, 60))
-                            .stroke(Stroke::new(1.5_f32, Color32::from_rgb(255, 225, 130))),
-                        )
-                        .clicked()
-                    } else {
-                        ui.selectable_label(main_sel, main_label).clicked()
-                    };
-                    if main_clicked {
-                        self.main_chat_unread = 0;
-                        self.active_chat_tab = None;
-                        self.focus_chat_input = true;
-                    }
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let main_sel = self.active_chat_tab.is_none();
+                                    let main_label = if self.main_chat_unread > 0 && !main_sel {
+                                        format!("Main Chat ({})", self.main_chat_unread)
+                                    } else {
+                                        "Main Chat".to_owned()
+                                    };
+                                    let main_clicked = if !main_sel && self.main_chat_unread > 0 {
+                                        ui.add(
+                                            egui::Button::new(
+                                                RichText::new(main_label)
+                                                    .strong()
+                                                    .color(Color32::from_rgb(20, 14, 6)),
+                                            )
+                                            .fill(Color32::from_rgb(235, 180, 60))
+                                            .stroke(Stroke::new(
+                                                1.5_f32,
+                                                Color32::from_rgb(255, 225, 130),
+                                            )),
+                                        )
+                                        .clicked()
+                                    } else {
+                                        ui.selectable_label(main_sel, main_label).clicked()
+                                    };
+                                    if main_clicked {
+                                        self.main_chat_unread = 0;
+                                        self.active_chat_tab = None;
+                                        self.focus_chat_input = true;
+                                    }
 
-                    let mut whisper_tab_rects: Vec<(usize, Rect)> = Vec::new();
-                    for (idx, w) in self.whispers.iter_mut().enumerate() {
-                        if w.detached {
-                            continue;
-                        }
-                        let sel = self
-                            .active_chat_tab
-                            .as_deref()
-                            .is_some_and(|a| a.eq_ignore_ascii_case(&w.peer));
-                        let label = if w.unread > 0 && !sel {
-                            format!("💬 {} ({})", w.peer, w.unread)
-                        } else {
-                            format!("💬 {}", w.peer)
-                        };
-                        let resp = if !sel && w.unread > 0 {
-                            ui.add(
-                                egui::Button::new(
-                                    RichText::new(label)
-                                        .strong()
-                                        .color(Color32::from_rgb(20, 14, 6)),
-                                )
-                                .fill(Color32::from_rgb(235, 180, 60))
-                                .stroke(Stroke::new(1.5_f32, Color32::from_rgb(255, 225, 130)))
-                                .sense(Sense::click_and_drag()),
-                            )
-                        } else if sel {
-                            ui.add(
-                                egui::Button::new(
-                                    RichText::new(label)
-                                        .strong()
-                                        .color(Color32::from_rgb(24, 16, 6)),
-                                )
-                                .fill(accent)
-                                .sense(Sense::click_and_drag()),
-                            )
-                        } else {
-                            ui.add(
-                                egui::Button::new(label)
-                                    .fill(Color32::from_rgb(42, 30, 68))
-                                    .sense(Sense::click_and_drag()),
-                            )
-                        };
-                        if resp.drag_started() {
-                            self.dragging_whisper_tab = Some(idx);
-                        } else if resp.clicked() {
-                            w.unread = 0;
-                            self.active_chat_tab = Some(w.peer.clone());
-                            self.focus_chat_input = true;
-                        }
-                        whisper_tab_rects.push((idx, resp.rect));
-                        if ui.small_button("↗").on_hover_text("Detach whisper").clicked() {
-                            detach_peer = Some(w.peer.clone());
-                        }
-                        if ui.small_button("×").on_hover_text("Close tab").clicked() {
-                            close_peer = Some(w.peer.clone());
-                        }
-                    }
-                    if !ui.input(|i| i.pointer.any_down()) {
-                        self.dragging_whisper_tab = None;
-                    } else if let (Some(from_idx), Some(pos)) = (
-                        self.dragging_whisper_tab,
-                        ui.input(|i| i.pointer.interact_pos()),
-                    ) {
-                        if let Some(&(to_idx, _)) = whisper_tab_rects
-                            .iter()
-                            .find(|(i, r)| *i != from_idx && r.contains(pos))
-                        {
-                            if from_idx < self.whispers.len() && to_idx < self.whispers.len() {
-                                self.whispers.swap(from_idx, to_idx);
-                                self.dragging_whisper_tab = Some(to_idx);
-                            }
-                        }
-                    }
+                                    let mut whisper_tab_rects: Vec<(usize, Rect)> = Vec::new();
+                                    for (idx, w) in self.whispers.iter_mut().enumerate() {
+                                        if w.detached {
+                                            continue;
+                                        }
+                                        let sel = self
+                                            .active_chat_tab
+                                            .as_deref()
+                                            .is_some_and(|a| a.eq_ignore_ascii_case(&w.peer));
+                                        let label = if w.unread > 0 && !sel {
+                                            format!("💬 {} ({})", w.peer, w.unread)
+                                        } else {
+                                            format!("💬 {}", w.peer)
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            let resp = if !sel && w.unread > 0 {
+                                                ui.add(
+                                                    egui::Button::new(
+                                                        RichText::new(label)
+                                                            .strong()
+                                                            .color(Color32::from_rgb(20, 14, 6)),
+                                                    )
+                                                    .fill(Color32::from_rgb(235, 180, 60))
+                                                    .stroke(Stroke::new(
+                                                        1.5_f32,
+                                                        Color32::from_rgb(255, 225, 130),
+                                                    ))
+                                                    .sense(Sense::click_and_drag()),
+                                                )
+                                            } else if sel {
+                                                ui.add(
+                                                    egui::Button::new(
+                                                        RichText::new(label)
+                                                            .strong()
+                                                            .color(Color32::from_rgb(24, 16, 6)),
+                                                    )
+                                                    .fill(accent)
+                                                    .sense(Sense::click_and_drag()),
+                                                )
+                                            } else {
+                                                ui.add(
+                                                    egui::Button::new(label)
+                                                        .fill(Color32::from_rgb(42, 30, 68))
+                                                        .sense(Sense::click_and_drag()),
+                                                )
+                                            };
+                                            if resp.drag_started() {
+                                                self.dragging_whisper_tab = Some(idx);
+                                            } else if resp.clicked() {
+                                                w.unread = 0;
+                                                self.active_chat_tab = Some(w.peer.clone());
+                                                self.focus_chat_input = true;
+                                            }
+                                            whisper_tab_rects.push((idx, resp.rect));
+                                            if ui
+                                                .small_button("×")
+                                                .on_hover_text("Close tab")
+                                                .clicked()
+                                            {
+                                                close_peer = Some(w.peer.clone());
+                                            }
+                                        });
+                                    }
+                                    if !ui.input(|i| i.pointer.any_down()) {
+                                        self.dragging_whisper_tab = None;
+                                    } else if let (Some(from_idx), Some(pos)) = (
+                                        self.dragging_whisper_tab,
+                                        ui.input(|i| i.pointer.interact_pos()),
+                                    ) {
+                                        if let Some(&(to_idx, _)) = whisper_tab_rects
+                                            .iter()
+                                            .find(|(i, r)| *i != from_idx && r.contains(pos))
+                                        {
+                                            if from_idx < self.whispers.len()
+                                                && to_idx < self.whispers.len()
+                                            {
+                                                self.whispers.swap(from_idx, to_idx);
+                                                self.dragging_whisper_tab = Some(to_idx);
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+                    });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("+ Whisper").clicked()
@@ -7556,25 +8092,6 @@ impl FurcadiaApp {
                     });
                 });
 
-                if let Some(peer) = detach_peer {
-                    if let Some(w) = self
-                        .whispers
-                        .iter_mut()
-                        .find(|w| w.peer.eq_ignore_ascii_case(&peer))
-                    {
-                        w.detached = true;
-                        w.unread = 0;
-                    }
-                    if self
-                        .active_chat_tab
-                        .as_deref()
-                        .is_some_and(|a| a.eq_ignore_ascii_case(&peer))
-                    {
-                        self.main_chat_unread = 0;
-                        self.active_chat_tab = None;
-                        self.focus_chat_input = true;
-                    }
-                }
                 if let Some(peer) = close_peer {
                     self.whispers
                         .retain(|w| !w.peer.eq_ignore_ascii_case(&peer));
@@ -7624,8 +8141,20 @@ impl FurcadiaApp {
                     {
                         self.link_builder_open = !self.link_builder_open;
                     }
-                    if ui.small_button("🎲 1d6").on_hover_text("Roll 1d6").clicked() && self.is_connected {
-                        let _ = self.to_net.send(UiToNet::Send(ClientCommand::Raw("roll 1d6".into())));
+                    let dice = if self.dice_roll.trim().is_empty() {
+                        "1d6"
+                    } else {
+                        self.dice_roll.trim()
+                    };
+                    if ui
+                        .small_button(format!("🎲 {dice}"))
+                        .on_hover_text(format!("Roll {dice} (configurable in Settings → Whispers & Chat)"))
+                        .clicked()
+                        && self.is_connected
+                    {
+                        let _ = self.to_net.send(UiToNet::Send(ClientCommand::Say(format!(
+                            "roll {dice}"
+                        ))));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
@@ -7787,13 +8316,18 @@ impl FurcadiaApp {
                                 .iter()
                                 .find(|w| w.peer.eq_ignore_ascii_case(peer))
                             {
-                                if w.lines.is_empty() {
+                                if w.history_lines.is_empty() && w.lines.is_empty() {
                                     ui.label(
                                         RichText::new(format!("Whispering with {}...", w.peer))
                                             .italics()
                                             .color(Color32::GRAY),
                                     );
                                 } else {
+                                    render_whisper_history_lines(
+                                        ui,
+                                        &w.history_lines,
+                                        !w.lines.is_empty(),
+                                    );
                                     for line in &w.lines {
                                         render_chat_line(
                                             ui,
@@ -8090,9 +8624,11 @@ impl FurcadiaApp {
             "Half" => raw_anim_ms / 2,
             _ => raw_anim_ms,
         };
+        // Generous overdraw margin so tall trees, walls, roofs, and dream effects
+        // anchored outside the viewport still render when they poke into view.
         let cull_rect = egui::Rect::from_min_max(
-            Pos2::new(rect.min.x - tile_w * 3.5, rect.min.y - tile_h * 4.0),
-            Pos2::new(rect.max.x + tile_w * 3.5, rect.max.y + tile_h * 8.0),
+            Pos2::new(rect.min.x - tile_w * 8.0, rect.min.y - tile_h * 8.0),
+            Pos2::new(rect.max.x + tile_w * 8.0, rect.max.y + tile_h * 16.0),
         );
 
         let cur_region = if let (Some(map), Some((sx, sy))) = (&self.world.map, self.world.self_pos)
@@ -8189,7 +8725,11 @@ impl FurcadiaApp {
                 for x in 0..map.width {
                     let center = origin + tile_to_screen(x as f32, y as f32, tile_w, tile_h);
                     if let Some(clip) = chat_clip_rect {
-                        if !clip.expand2(Vec2::new(tile_w, tile_h * 2.0)).contains(center) {
+                        let chat_cull = egui::Rect::from_min_max(
+                            Pos2::new(clip.min.x - tile_w * 8.0, clip.min.y - tile_h * 8.0),
+                            Pos2::new(clip.max.x + tile_w * 8.0, clip.max.y + tile_h * 16.0),
+                        );
+                        if !chat_cull.contains(center) {
                             continue;
                         }
                     }
@@ -8960,6 +9500,7 @@ impl FurcadiaApp {
             PlayerMenuAction::Lead => self.send_raw_cmd(&format!("lead {short_name}")),
             PlayerMenuAction::Cuddle => self.send_raw_cmd(&format!("cuddle {short_name}")),
             PlayerMenuAction::TogglePounce => self.toggle_pounce_watch(display_name, short_name),
+            PlayerMenuAction::ToggleIgnore => self.send_raw_cmd(&format!("ignore {short_name}")),
             PlayerMenuAction::ShareEdit => self.send_raw_cmd(&format!("share {short_name}")),
             PlayerMenuAction::UnshareEdit => self.send_raw_cmd(&format!("unshare {short_name}")),
             PlayerMenuAction::Raw(cmd) => self.send_raw_cmd(cmd),
@@ -9036,7 +9577,7 @@ impl FurcadiaApp {
         }
         let in_pounce = !target.is_self && self.pounce.contains(&target.display_name);
         let menu_w = 172.0_f32;
-        let menu_h = if target.is_self { 245.0_f32 } else { 275.0_f32 };
+        let menu_h = if target.is_self { 245.0_f32 } else { 300.0_f32 };
         let menu_pos = Pos2::new(
             target
                 .anchor_pos
@@ -9183,22 +9724,9 @@ impl FurcadiaApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let port_size = Vec2::splat(self.portrait_size);
-                    let custom_tex = snapshot.portrait_id.and_then(|pid| {
-                        if let Some(tex) = self.custom_portrait_textures.get(&pid) {
-                            return Some(tex.clone());
-                        }
-                        if let Some(Some((w, h, pixels))) = self.custom_portrait_rgba.get(&pid) {
-                            let img = ColorImage::from_rgba_unmultiplied([*w, *h], pixels);
-                            let tex = ctx.load_texture(
-                                format!("custom_portrait_{pid}"),
-                                img,
-                                TextureOptions::LINEAR,
-                            );
-                            self.custom_portrait_textures.insert(pid, tex.clone());
-                            return Some(tex);
-                        }
-                        None
-                    });
+                    let custom_tex = snapshot
+                        .portrait_id
+                        .and_then(|pid| self.custom_portrait_texture(ctx, pid));
                     if let Some(ref tex) = custom_tex.or(portrait_tex) {
                         let resp = ui.image(egui::load::SizedTexture::new(tex.id(), port_size));
                         if let Some(pid) = snapshot.portrait_id {
@@ -12295,6 +12823,14 @@ mod tests {
         assert_eq!(
             info.html_url,
             "https://github.com/morganlowe/native-furcadia/releases/tag/v1.0.3"
+        );
+        assert_eq!(
+            update_download_filename("https://example.com/releases/FurcadiaNative-Setup-1.0.3-x86_64.exe?dl=1"),
+            "FurcadiaNative-Setup-1.0.3-x86_64.exe"
+        );
+        assert_eq!(
+            update_download_filename("https://example.com/furcadia-native_1.0.3_amd64.deb"),
+            "furcadia-native_1.0.3_amd64.deb"
         );
     }
 

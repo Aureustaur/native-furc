@@ -99,6 +99,54 @@ pub fn append_whisper_log(
     )
 }
 
+/// Loads up to `max_lines` most recent lines from `<logs_dir>/<character>/whispers/<peer>.txt`.
+pub fn load_whisper_log(
+    base_dir: &Path,
+    character: &str,
+    peer: &str,
+    max_lines: usize,
+) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    let whispers_dir = base_dir.join(sanitize_segment(character)).join("whispers");
+    let peer_file = sanitize_segment(peer);
+    let exact = whispers_dir.join(format!("{peer_file}.txt"));
+    let path = if exact.is_file() {
+        exact
+    } else if let Ok(entries) = fs::read_dir(&whispers_dir) {
+        let target_stem = peer_file.to_ascii_lowercase();
+        let found = entries.flatten().map(|e| e.path()).find(|p| {
+            p.is_file()
+                && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+                && p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.to_ascii_lowercase() == target_stem)
+        });
+        match found {
+            Some(p) => p,
+            None => return Vec::new(),
+        }
+    } else {
+        return Vec::new();
+    };
+
+    let Ok(bytes) = fs::read(&path) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if lines.len() > max_lines {
+        lines.drain(..lines.len() - max_lines);
+    }
+    lines
+}
+
 /// Removes log files older than `retention_days` (no-op when `retention_days == 0`).
 pub fn prune_old_logs(base_dir: &Path, retention_days: u32) -> usize {
     if retention_days == 0 || !base_dir.is_dir() {
@@ -197,9 +245,13 @@ mod tests {
         ));
         append_chat_log(&tmp, "TestHero", "Hello world!").unwrap();
         append_whisper_log(&tmp, "TestHero", "TestFriend", "Hi there").unwrap();
+        append_whisper_log(&tmp, "TestHero", "TestFriend", "Second line").unwrap();
         assert_eq!(list_log_characters(&tmp), vec!["TestHero".to_owned()]);
         let files = list_log_files(&tmp, "TestHero");
         assert_eq!(files.len(), 2);
+        let loaded = load_whisper_log(&tmp, "TestHero", "testfriend", 1);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].ends_with("Second line"));
         let _ = fs::remove_dir_all(&tmp);
     }
 }
