@@ -41,6 +41,8 @@ pub struct ClientConfig {
     pub limit_view_range: bool,
     pub allow_dream_skins: bool,
     pub portrait_size: u16,
+    pub check_updates_on_startup: bool,
+    pub first_setup_done: bool,
 }
 
 impl Default for ClientConfig {
@@ -80,6 +82,8 @@ impl Default for ClientConfig {
             limit_view_range: true,
             allow_dream_skins: true,
             portrait_size: 64,
+            check_updates_on_startup: true,
+            first_setup_done: false,
         }
     }
 }
@@ -223,6 +227,12 @@ impl ClientConfig {
                             cfg.portrait_size = sz.clamp(48, 160);
                         }
                     }
+                    "check_updates_on_startup" => {
+                        cfg.check_updates_on_startup = v.trim() != "false";
+                    }
+                    "first_setup_done" => {
+                        cfg.first_setup_done = v.trim() == "true";
+                    }
                     _ => {}
                 }
             }
@@ -248,7 +258,7 @@ impl ClientConfig {
             ""
         };
         format!(
-            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\n",
+            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
@@ -282,7 +292,9 @@ impl ClientConfig {
             self.dream_bookmarks.join(","),
             self.limit_view_range,
             self.allow_dream_skins,
-            self.portrait_size
+            self.portrait_size,
+            self.check_updates_on_startup,
+            self.first_setup_done
         )
     }
 }
@@ -328,6 +340,8 @@ mod tests {
             limit_view_range: false,
             allow_dream_skins: false,
             portrait_size: 96,
+            check_updates_on_startup: false,
+            first_setup_done: true,
         };
         let serialized = cfg.serialize();
         assert_eq!(ClientConfig::parse(&serialized), cfg);

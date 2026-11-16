@@ -102,6 +102,99 @@ impl DreamTheme {
     }
 }
 
+#[derive(Debug, Clone)]
+struct UpdateReleaseInfo {
+    tag: String,
+    version: String,
+    html_url: String,
+    asset_url: Option<String>,
+}
+
+enum UpdateCheckMsg {
+    UpToDate(String),
+    UpdateAvailable(UpdateReleaseInfo),
+    Error(String),
+}
+
+fn extract_json_string_field(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let idx = json.find(&needle)?;
+    let rest = &json[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let after_colon = rest[colon + 1..].trim_start();
+    let content = after_colon.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in content.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(out);
+        } else {
+            out.push(ch);
+        }
+    }
+    None
+}
+
+fn parse_version_tuple(raw: &str) -> Option<(u64, u64, u64)> {
+    let trimmed = raw.trim().trim_start_matches(['v', 'V']);
+    let core = trimmed.split(['-', '+']).next().unwrap_or(trimmed);
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+    let patch = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+    Some((major, minor, patch))
+}
+
+fn is_newer_version(current: &str, latest: &str) -> bool {
+    match (parse_version_tuple(current), parse_version_tuple(latest)) {
+        (Some(c), Some(l)) => l > c,
+        _ => false,
+    }
+}
+
+fn parse_github_release_json(json: &str) -> Option<UpdateReleaseInfo> {
+    let tag = extract_json_string_field(json, "tag_name")?;
+    let version = tag.trim().trim_start_matches(['v', 'V']).to_owned();
+    let html_url = extract_json_string_field(json, "html_url")
+        .unwrap_or_else(|| "https://github.com/morganlowe/native-furcadia/releases".to_owned());
+
+    let mut urls = Vec::new();
+    let mut search = json;
+    while let Some(pos) = search.find("\"browser_download_url\"") {
+        let slice = &search[pos..];
+        if let Some(url) = extract_json_string_field(slice, "browser_download_url") {
+            urls.push(url);
+        }
+        search = &search[pos + "\"browser_download_url\"".len()..];
+    }
+
+    #[cfg(target_os = "windows")]
+    let asset_url = urls
+        .iter()
+        .find(|u| u.to_ascii_lowercase().ends_with(".exe"))
+        .cloned();
+    #[cfg(not(target_os = "windows"))]
+    let asset_url = if std::path::Path::new("/etc/arch-release").exists() {
+        urls.iter()
+            .find(|u| u.ends_with(".pkg.tar.zst") && !u.contains("-debug-"))
+            .cloned()
+    } else {
+        urls.iter().find(|u| u.ends_with(".deb")).cloned()
+    };
+
+    Some(UpdateReleaseInfo {
+        tag,
+        version,
+        html_url,
+        asset_url,
+    })
+}
+
 struct WhisperSession {
     peer: String,
     lines: Vec<ChatLine>,
@@ -1253,6 +1346,14 @@ struct FurcadiaApp {
     allow_dream_skins: bool,
     portrait_size: f32,
     custom_dream_skin: Option<(Color32, Color32, Color32)>,
+    check_updates_on_startup: bool,
+    first_setup_done: bool,
+    first_setup_open: bool,
+    update_checking: bool,
+    update_status: Option<String>,
+    update_available: Option<UpdateReleaseInfo>,
+    update_popup_open: bool,
+    update_rx: Option<mpsc::Receiver<UpdateCheckMsg>>,
 }
 
 impl FurcadiaApp {
@@ -1559,8 +1660,19 @@ impl FurcadiaApp {
             allow_dream_skins: cfg.allow_dream_skins,
             portrait_size: cfg.portrait_size as f32,
             custom_dream_skin: None,
+            check_updates_on_startup: cfg.check_updates_on_startup,
+            first_setup_done: cfg.first_setup_done,
+            first_setup_open: !cfg.first_setup_done,
+            update_checking: false,
+            update_status: None,
+            update_available: None,
+            update_popup_open: false,
+            update_rx: None,
         };
         app.apply_font_settings(&ctx);
+        if app.first_setup_done && app.check_updates_on_startup {
+            app.trigger_update_check(&ctx);
+        }
         app
     }
 
@@ -1616,6 +1728,8 @@ impl FurcadiaApp {
             limit_view_range: self.limit_view_range,
             allow_dream_skins: self.allow_dream_skins,
             portrait_size: self.portrait_size.round().clamp(48.0, 160.0) as u16,
+            check_updates_on_startup: self.check_updates_on_startup,
+            first_setup_done: self.first_setup_done,
         };
         let _ = cfg.save_default();
     }
@@ -4027,6 +4141,13 @@ impl eframe::App for FurcadiaApp {
         if self.about_open {
             self.render_about_window(ctx);
         }
+        self.poll_update_check();
+        if self.first_setup_open {
+            self.render_first_setup_window(ctx);
+        }
+        if self.update_popup_open {
+            self.render_update_window(ctx);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -4036,6 +4157,241 @@ impl eframe::App for FurcadiaApp {
 }
 
 impl FurcadiaApp {
+    fn trigger_update_check(&mut self, ctx: &egui::Context) {
+        if self.update_checking {
+            return;
+        }
+        self.update_checking = true;
+        self.update_status = Some("Checking GitHub for updates...".to_owned());
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        let ctx_clone = ctx.clone();
+        let current_ver = env!("CARGO_PKG_VERSION").to_owned();
+        thread::spawn(move || {
+            let out = std::process::Command::new("curl")
+                .args([
+                    "-fsSL",
+                    "-H",
+                    "Accept: application/vnd.github+json",
+                    "-H",
+                    "User-Agent: furcadia-native",
+                    "--max-time",
+                    "10",
+                    "https://api.github.com/repos/morganlowe/native-furcadia/releases/latest",
+                ])
+                .output();
+            let msg = match out {
+                Ok(o) if o.status.success() => {
+                    let body = String::from_utf8_lossy(&o.stdout);
+                    if let Some(info) = parse_github_release_json(&body) {
+                        if is_newer_version(&current_ver, &info.version) {
+                            UpdateCheckMsg::UpdateAvailable(info)
+                        } else {
+                            UpdateCheckMsg::UpToDate(info.version)
+                        }
+                    } else {
+                        UpdateCheckMsg::Error("Could not parse GitHub release metadata.".to_owned())
+                    }
+                }
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr).trim().to_owned();
+                    UpdateCheckMsg::Error(if err.is_empty() {
+                        format!("HTTP/curl exited {}", o.status)
+                    } else {
+                        err
+                    })
+                }
+                Err(e) => UpdateCheckMsg::Error(format!("Failed to run curl: {e}")),
+            };
+            let _ = tx.send(msg);
+            ctx_clone.request_repaint();
+        });
+    }
+
+    fn poll_update_check(&mut self) {
+        let msg = match &self.update_rx {
+            Some(rx) => match rx.try_recv() {
+                Ok(m) => Some(m),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.update_checking = false;
+                    self.update_rx = None;
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(m) = msg {
+            self.update_checking = false;
+            self.update_rx = None;
+            match m {
+                UpdateCheckMsg::UpToDate(_latest) => {
+                    self.update_available = None;
+                    self.update_status = Some(format!(
+                        "Up to date (v{}).",
+                        env!("CARGO_PKG_VERSION")
+                    ));
+                }
+                UpdateCheckMsg::UpdateAvailable(info) => {
+                    self.update_status = Some(format!("Update available: {}", info.tag));
+                    self.update_available = Some(info);
+                    self.update_popup_open = true;
+                }
+                UpdateCheckMsg::Error(err) => {
+                    self.update_status = Some(format!("Update check failed: {err}"));
+                }
+            }
+        }
+    }
+
+    fn render_first_setup_window(&mut self, ctx: &egui::Context) {
+        let accent = self.theme.accent();
+        let mut open = self.first_setup_open;
+        egui::Window::new("Welcome — First-Time Setup")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                ui.heading(RichText::new("Furcadia Native Client").color(accent));
+                ui.label(
+                    RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                        .size(12.0)
+                        .color(Color32::LIGHT_GRAY),
+                );
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("Automatic Updates").strong().color(accent));
+                ui.checkbox(
+                    &mut self.check_updates_on_startup,
+                    "Automatically check GitHub for updates on startup",
+                );
+                ui.label(
+                    RichText::new(
+                        "You can change this anytime in Settings → Pounce, Tray & Updates.",
+                    )
+                    .size(11.0)
+                    .color(Color32::GRAY),
+                );
+
+                ui.add_space(10.0);
+                ui.label(RichText::new("Local Furcadia Assets").strong().color(accent));
+                if let Some(root) = &self.assets.root {
+                    ui.colored_label(
+                        Color32::from_rgb(130, 225, 145),
+                        format!("Detected assets: {}", root.display()),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "No local Furcadia installation detected yet. You can import maps/patches from Windows Furcadia below or later in Settings.",
+                        )
+                        .size(11.5)
+                        .color(Color32::LIGHT_GRAY),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.import_path_input)
+                                .desired_width(240.0),
+                        );
+                        if ui.button("Browse...").clicked() {
+                            self.browse_import_directory();
+                        }
+                        if ui.button("Import").clicked() {
+                            self.run_windows_import();
+                        }
+                    });
+                    if let Some(report) = &self.import_report {
+                        ui.colored_label(Color32::from_rgb(130, 225, 145), report);
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Finish Setup")
+                                    .strong()
+                                    .color(Color32::from_rgb(20, 14, 6)),
+                            )
+                            .fill(accent),
+                        )
+                        .clicked()
+                    {
+                        self.first_setup_done = true;
+                        self.first_setup_open = false;
+                        self.save_config();
+                        if self.check_updates_on_startup {
+                            self.trigger_update_check(ctx);
+                        }
+                    }
+                });
+            });
+        if !open && self.first_setup_open {
+            self.first_setup_done = true;
+            self.first_setup_open = false;
+            self.save_config();
+        }
+    }
+
+    fn render_update_window(&mut self, ctx: &egui::Context) {
+        let Some(info) = self.update_available.clone() else {
+            self.update_popup_open = false;
+            return;
+        };
+        let accent = self.theme.accent();
+        let mut open = self.update_popup_open;
+        egui::Window::new("Update Available")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                ui.heading(RichText::new(format!("New version {} is available!", info.tag)).color(accent));
+                ui.label(
+                    RichText::new(format!(
+                        "You are currently running v{}.",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .color(Color32::LIGHT_GRAY),
+                );
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(asset_url) = &info.asset_url {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Download Update")
+                                        .strong()
+                                        .color(Color32::from_rgb(20, 14, 6)),
+                                )
+                                .fill(accent),
+                            )
+                            .clicked()
+                        {
+                            ctx.open_url(egui::OpenUrl::new_tab(asset_url));
+                        }
+                    }
+                    if ui.button("Open Release Page").clicked() {
+                        ctx.open_url(egui::OpenUrl::new_tab(&info.html_url));
+                    }
+                    if ui.button("Later").clicked() {
+                        self.update_popup_open = false;
+                    }
+                });
+            });
+        if !open {
+            self.update_popup_open = false;
+        }
+    }
+
     fn render_settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         let accent = self.theme.accent();
@@ -4050,7 +4406,7 @@ impl FurcadiaApp {
                         (1, "Animations & Map"),
                         (2, "Whispers & Chat"),
                         (3, "Sounds & Notify"),
-                        (4, "Pounce & Tray"),
+                        (4, "Pounce, Tray & Updates"),
                         (5, "Logs"),
                         (6, "Windows Importer"),
                     ] {
@@ -4245,6 +4601,36 @@ impl FurcadiaApp {
                             .changed()
                         {
                             self.save_config();
+                        }
+                        ui.separator();
+                        ui.label(RichText::new("GitHub Updates").strong().color(accent));
+                        if ui
+                            .checkbox(
+                                &mut self.check_updates_on_startup,
+                                "Check GitHub for updates on startup",
+                            )
+                            .changed()
+                        {
+                            self.save_config();
+                        }
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    !self.update_checking,
+                                    egui::Button::new("Check for Updates Now"),
+                                )
+                                .clicked()
+                            {
+                                self.trigger_update_check(ctx);
+                            }
+                            if self.update_available.is_some()
+                                && ui.button("Download Update").clicked()
+                            {
+                                self.update_popup_open = true;
+                            }
+                        });
+                        if let Some(status) = &self.update_status {
+                            ui.label(RichText::new(status).size(11.5).color(Color32::LIGHT_GRAY));
                         }
                     }
                     5 => {
@@ -6434,6 +6820,21 @@ impl FurcadiaApp {
                             .size(13.0)
                             .color(Color32::LIGHT_GRAY),
                     );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !self.update_checking,
+                                egui::Button::new("Check for Updates"),
+                            )
+                            .clicked()
+                        {
+                            self.trigger_update_check(ctx);
+                        }
+                        if let Some(status) = &self.update_status {
+                            ui.label(RichText::new(status).size(11.5).color(Color32::LIGHT_GRAY));
+                        }
+                    });
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new("Native cross-platform Furcadia client for Linux and Windows.")
@@ -11536,6 +11937,30 @@ mod tests {
         let fallback = parse_chat_line(plain);
         let formatted = format_whisper_tab_line("Amala|Devi", "Alty Bunnie", plain, &fallback);
         assert_eq!(formatted.to_plain_text(), "Alty Bunnie shivers and waves.");
+    }
+
+    #[test]
+    fn update_version_comparison_and_json_parsing() {
+        assert!(is_newer_version("1.0.2", "v1.0.3"));
+        assert!(is_newer_version("1.0.2", "1.1.0"));
+        assert!(!is_newer_version("1.0.2", "v1.0.2"));
+        assert!(!is_newer_version("1.0.2", "1.0.1"));
+
+        let sample = r#"{
+            "tag_name": "v1.0.3",
+            "html_url": "https://github.com/morganlowe/native-furcadia/releases/tag/v1.0.3",
+            "assets": [
+                {"browser_download_url": "https://github.com/morganlowe/native-furcadia/releases/download/v1.0.3/FurcadiaNative-Setup-1.0.3-x86_64.exe"},
+                {"browser_download_url": "https://github.com/morganlowe/native-furcadia/releases/download/v1.0.3/furcadia-native_1.0.3_amd64.deb"}
+            ]
+        }"#;
+        let info = parse_github_release_json(sample).expect("should parse release json");
+        assert_eq!(info.tag, "v1.0.3");
+        assert_eq!(info.version, "1.0.3");
+        assert_eq!(
+            info.html_url,
+            "https://github.com/morganlowe/native-furcadia/releases/tag/v1.0.3"
+        );
     }
 
     #[test]
