@@ -95,41 +95,35 @@ jobs:
 
             ### Highlights
             - Fast native GUI (`furc-gui`) built with `eframe` / `egui` and CLI (`furc-cli`)
-            - Modern dream rendering, custom portraits, desctags, and avatar/digo support
-            - Multi-character tabs, drag-to-reorder player/whisper tabs, and accent-colored chat/emotes
+            - Modern dream rendering, remappable portraits, desctags, and avatar/digo support
+            - Multi-character tabs, player badges in chat, and drag-to-reorder player/whisper tabs
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.11
-            - Sync preferences and logs through a folder managed by Nextcloud, Google Drive, Dropbox, or another file sync provider.
-            - Keep login credentials on each computer and store logs in separate per-device folders to avoid write conflicts.
-            - Combine per-device logs in the Log Viewer and copy existing logs when enabling or disabling sync.
-
-            ### Set up folder sync
-            1. Install and sign in to your preferred sync provider on each computer.
-            2. On the first computer, open **Settings → Logs**, choose a dedicated folder inside your provider's synced area, and select **Use Folder**.
-            3. Wait for the provider to finish syncing the folder and its `settings-<device>.ini` file.
-            4. On each other computer, open **Settings → Logs**, choose that same synced folder, and select **Use Folder**.
-            5. Restart the client on those computers to load the newest shared preferences.
-
-            The client creates `logs/<device>/` for each computer. Preferences are selected from the newest settings snapshot at startup. Let the provider finish syncing before launching the client on another computer. Passwords, email addresses, and auto-login credentials remain local to each computer.
+            ### What's New in v1.0.12
+            - Clear disconnected state, reconnect action, and a server-response check for silent network drops.
+            - Reconnect without clearing chat or unsent text, and preserve the server's live avatar palette.
+            - Tune chat text size and colors, and optionally autocorrect common typing mistakes.
+            - Match custom remappable portraits to character colors and show player badges alongside chat and emotes.
+            - Restore the default Furcadia log timestamp format and add link hover previews.
+            - Restart the updated client reliably after installing Linux packages.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.0.11-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.0.12-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.11_amd64.deb
+            sudo apt install ./furcadia-native_1.0.12_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.11-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.0.12-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

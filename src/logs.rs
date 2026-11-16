@@ -124,14 +124,20 @@ fn append_line_to(path: &Path, line: &str) -> io::Result<()> {
     writeln!(f, "{line}")
 }
 
+fn default_client_timestamp(t: SystemTime) -> String {
+    let (y, m, d, hh, mm, ss) = system_time_to_ymd_hms(t);
+    format!("{m:02}/{d:02}/{:02} {hh:02}:{mm:02}:{ss:02}*", y.rem_euclid(100))
+}
+
 /// Appends a timestamped line to `<logs_dir>/<character>/YYYY-MM-DD.txt`.
 pub fn append_chat_log(base_dir: &Path, character: &str, text: &str) -> io::Result<()> {
-    let (y, m, d, hh, mm, ss) = system_time_to_ymd_hms(SystemTime::now());
+    let now = SystemTime::now();
+    let (y, m, d, _, _, _) = system_time_to_ymd_hms(now);
     let char_dir = sanitize_segment(character);
     let file = base_dir
         .join(char_dir)
         .join(format!("{y:04}-{m:02}-{d:02}.txt"));
-    append_line_to(&file, &format!("[{hh:02}:{mm:02}:{ss:02}] {text}"))
+    append_line_to(&file, &format!("{} {text}", default_client_timestamp(now)))
 }
 
 /// Appends a timestamped line to `<logs_dir>/<character>/whispers/<peer>.txt`.
@@ -141,7 +147,7 @@ pub fn append_whisper_log(
     peer: &str,
     text: &str,
 ) -> io::Result<()> {
-    let (y, m, d, hh, mm, ss) = system_time_to_ymd_hms(SystemTime::now());
+    let now = SystemTime::now();
     let char_dir = sanitize_segment(character);
     let peer_file = sanitize_segment(peer);
     let file = base_dir
@@ -150,7 +156,7 @@ pub fn append_whisper_log(
         .join(format!("{peer_file}.txt"));
     append_line_to(
         &file,
-        &format!("[{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}] {text}"),
+        &format!("{} {text}", default_client_timestamp(now)),
     )
 }
 

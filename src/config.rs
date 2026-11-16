@@ -37,6 +37,10 @@ pub struct ClientConfig {
     pub close_to_tray: bool,
     pub font_family: String,
     pub font_size: u16,
+    pub chat_font_size: u16,
+    pub chat_text_color: u32,
+    pub input_text_color: u32,
+    pub autocorrect: bool,
     pub anim_mode: String,
     pub theme: String,
     pub show_avatar_names: bool,
@@ -85,6 +89,10 @@ impl Default for ClientConfig {
             close_to_tray: false,
             font_family: "Proportional".to_owned(),
             font_size: 13,
+            chat_font_size: 13,
+            chat_text_color: 0xfff8d7,
+            input_text_color: 0xffffff,
+            autocorrect: false,
             anim_mode: "Full".to_owned(),
             theme: "ClassicPurple".to_owned(),
             show_avatar_names: true,
@@ -252,6 +260,10 @@ impl ClientConfig {
         self.close_to_tray = shared.close_to_tray;
         self.font_family = shared.font_family.clone();
         self.font_size = shared.font_size;
+        self.chat_font_size = shared.chat_font_size;
+        self.chat_text_color = shared.chat_text_color;
+        self.input_text_color = shared.input_text_color;
+        self.autocorrect = shared.autocorrect;
         self.anim_mode = shared.anim_mode.clone();
         self.theme = shared.theme.clone();
         self.show_avatar_names = shared.show_avatar_names;
@@ -353,6 +365,12 @@ impl ClientConfig {
                             cfg.font_size = sz.clamp(9, 28);
                         }
                     }
+                    "chat_font_size" => {
+                        if let Ok(sz) = v.trim().parse::<u16>() { cfg.chat_font_size = sz.clamp(9, 28); }
+                    }
+                    "chat_text_color" => cfg.chat_text_color = u32::from_str_radix(v.trim().trim_start_matches('#'), 16).unwrap_or(cfg.chat_text_color) & 0xffffff,
+                    "input_text_color" => cfg.input_text_color = u32::from_str_radix(v.trim().trim_start_matches('#'), 16).unwrap_or(cfg.input_text_color) & 0xffffff,
+                    "autocorrect" => cfg.autocorrect = v.trim() == "true",
                     "anim_mode" => {
                         let m = v.trim();
                         if matches!(m, "Full" | "Half" | "Off") {
@@ -431,7 +449,7 @@ impl ClientConfig {
             ""
         };
         format!(
-            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
+            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
@@ -453,6 +471,10 @@ impl ClientConfig {
             self.close_to_tray,
             self.font_family,
             self.font_size,
+            self.chat_font_size,
+            self.chat_text_color,
+            self.input_text_color,
+            self.autocorrect,
             self.anim_mode,
             self.theme,
             self.show_avatar_names,
@@ -504,6 +526,10 @@ mod tests {
             close_to_tray: true,
             font_family: "Fixedsys".into(),
             font_size: 16,
+            chat_font_size: 15,
+            chat_text_color: 0xaabbcc,
+            input_text_color: 0xddeeff,
+            autocorrect: true,
             anim_mode: "Half".into(),
             theme: "DragonHoard".into(),
             show_avatar_names: false,

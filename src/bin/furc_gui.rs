@@ -1217,6 +1217,7 @@ enum NetToUi {
     PortraitDownloaded {
         portrait_id: u32,
         rgba: Option<(usize, usize, Vec<u8>)>,
+        remappable: bool,
     },
     ChatImageDownloaded {
         url: String,
@@ -1327,14 +1328,15 @@ struct FurcadiaApp {
     dynamic_avatars: HashMap<u16, (usize, u16)>,
     dynamic_avatar_server: Option<char>,
     custom_portrait_rgba: HashMap<u32, Option<(usize, usize, Vec<u8>)>>,
-    custom_portrait_textures: HashMap<u32, TextureHandle>,
+    custom_portrait_textures: HashMap<String, TextureHandle>,
+    remappable_portraits: std::collections::HashSet<u32>,
     pending_portrait_downloads: std::collections::HashSet<u32>,
     player_portrait_ids: HashMap<String, u32>,
     smiley_textures: Vec<Option<TextureHandle>>,
     desctag_textures: Vec<Option<TextureHandle>>,
     chat_img_textures: HashMap<String, Option<TextureHandle>>,
     pending_chat_img_downloads: std::collections::HashSet<String>,
-    player_accent_colors: HashMap<String, Color32>,
+    player_badge_colors: HashMap<String, Color32>,
     current_dream_dir: Option<std::path::PathBuf>,
     current_dream_url: Option<String>,
     world: WorldState,
@@ -1369,6 +1371,10 @@ struct FurcadiaApp {
     close_to_tray: bool,
     font_family: String,
     font_size: u16,
+    chat_font_size: u16,
+    chat_text_color: Color32,
+    input_text_color: Color32,
+    autocorrect: bool,
     fonts_configured: bool,
     applied_font_family: String,
     applied_font_size: u16,
@@ -1662,13 +1668,14 @@ impl FurcadiaApp {
             dynamic_avatar_server: None,
             custom_portrait_rgba: HashMap::new(),
             custom_portrait_textures: HashMap::new(),
+            remappable_portraits: std::collections::HashSet::new(),
             pending_portrait_downloads: std::collections::HashSet::new(),
             player_portrait_ids: HashMap::new(),
             smiley_textures,
             desctag_textures,
             chat_img_textures: HashMap::new(),
             pending_chat_img_downloads: std::collections::HashSet::new(),
-            player_accent_colors: HashMap::new(),
+            player_badge_colors: HashMap::new(),
             current_dream_dir: None,
             current_dream_url: None,
             world,
@@ -1699,6 +1706,10 @@ impl FurcadiaApp {
             close_to_tray: cfg.close_to_tray,
             font_family: cfg.font_family.clone(),
             font_size: cfg.font_size,
+            chat_font_size: cfg.chat_font_size,
+            chat_text_color: rgb_from_packed(cfg.chat_text_color),
+            input_text_color: rgb_from_packed(cfg.input_text_color),
+            autocorrect: cfg.autocorrect,
             fonts_configured: false,
             applied_font_family: String::new(),
             applied_font_size: 0,
@@ -1803,6 +1814,10 @@ impl FurcadiaApp {
             close_to_tray: self.close_to_tray,
             font_family: self.font_family.clone(),
             font_size: self.font_size,
+            chat_font_size: self.chat_font_size,
+            chat_text_color: packed_from_rgb(self.chat_text_color),
+            input_text_color: packed_from_rgb(self.input_text_color),
+            autocorrect: self.autocorrect,
             anim_mode: self.anim_mode.clone(),
             theme: theme_name.to_owned(),
             show_avatar_names: self.show_avatar_names,
@@ -2624,6 +2639,26 @@ impl FurcadiaApp {
         });
     }
 
+    fn reconnect_active_character(&mut self) {
+        if self.is_connected || self.connecting_stage == "Reconnecting..." {
+            return;
+        }
+        let character = self.active_character_name();
+        self.connect_seq = self.connect_seq.wrapping_add(1);
+        self.connecting_error = None;
+        self.connecting_stage = "Reconnecting...".to_owned();
+        let _ = self.to_net.send(UiToNet::ConnectCharacter {
+            seq: self.connect_seq,
+            email: self.email.trim().to_owned(),
+            character,
+            password: self.password.clone(),
+            updated_desc: None,
+            // Let the server keep the live avatar palette during reconnect. Account
+            // summaries can be stale and resending them can overwrite current colors.
+            colors: None,
+        });
+    }
+
     fn push_system_line(&mut self, color: &str, text: &str) {
         self.chat_log
             .push(parse_chat_line(&format!("<font color='{color}'>{text}</font>")));
@@ -2963,13 +2998,14 @@ impl FurcadiaApp {
         // `lastport` in the account XML is a portrait slot, not a `pp<id>` file ID.
         // The server's `]&` directive supplies the real file ID for custom portraits.
         let name_key = shortname_key(name);
+        let app = furcadia_client::parse_color_code(colors);
         if let Some(pid) = self
             .player_portrait_ids
             .iter()
             .find(|(known_name, _)| shortname_key(known_name) == name_key)
             .map(|(_, pid)| *pid)
         {
-            if let Some(tex) = self.custom_portrait_texture(ctx, pid) {
+            if let Some(tex) = self.custom_portrait_texture(ctx, pid, &app) {
                 return Some(tex);
             }
         }
@@ -3003,21 +3039,73 @@ impl FurcadiaApp {
     }
 
     /// Portrait for the logged-in character (live appearance, falling back to account colors).
-    fn custom_portrait_texture(&mut self, ctx: &egui::Context, pid: u32) -> Option<TextureHandle> {
-        if let Some(tex) = self.custom_portrait_textures.get(&pid) {
+    fn custom_portrait_texture(
+        &mut self,
+        ctx: &egui::Context,
+        pid: u32,
+        appearance: &AvatarAppearance,
+    ) -> Option<TextureHandle> {
+        let remappable = self.remappable_portraits.contains(&pid);
+        let key = if remappable {
+            format!("custom_portrait_{pid}:{:?}", appearance.color_key)
+        } else {
+            format!("custom_portrait_{pid}")
+        };
+        if let Some(tex) = self.custom_portrait_textures.get(&key) {
             return Some(tex.clone());
         }
         if let Some(Some((w, h, pixels))) = self.custom_portrait_rgba.get(&pid) {
-            let img = ColorImage::from_rgba_unmultiplied([*w, *h], pixels);
+            let pixels = if remappable {
+                RemapLuts::from_appearance(appearance).apply_rgba(pixels)
+            } else {
+                pixels.clone()
+            };
+            let img = ColorImage::from_rgba_unmultiplied([*w, *h], &pixels);
             let tex = ctx.load_texture(
-                format!("custom_portrait_{pid}"),
+                key.clone(),
                 img,
                 TextureOptions::LINEAR,
             );
-            self.custom_portrait_textures.insert(pid, tex.clone());
+            self.custom_portrait_textures.insert(key, tex.clone());
             return Some(tex);
         }
         None
+    }
+
+    fn current_player_badge_textures(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> HashMap<String, TextureHandle> {
+        let avatars: Vec<_> = self
+            .world
+            .avatars
+            .values()
+            .filter_map(|av| {
+                let (species, gender) = self.world.resolved_avatar_species_gender(av)?;
+                Some((shortname_key(&av.name), species, gender, av.appearance.clone()))
+            })
+            .collect();
+        let mut textures = HashMap::new();
+        for (name, species, gender, appearance) in avatars {
+            if name.is_empty() {
+                continue;
+            }
+            let (file_id, obj_id) = self.resolve_species_spec(species as usize);
+            let cache_id = self.ensure_species_cache(file_id);
+            if let Some(cache) = self.species_caches.get_mut(&cache_id) {
+                if let Some(tex) = cache.get_or_load_portrait_tex(
+                    ctx,
+                    &self.palette,
+                    &appearance,
+                    obj_id,
+                    gender,
+                    35,
+                ) {
+                    textures.insert(name, tex);
+                }
+            }
+        }
+        textures
     }
 
     fn self_custom_portrait_id(&self) -> Option<u32> {
@@ -3038,23 +3126,29 @@ impl FurcadiaApp {
     }
 
     fn self_portrait(&mut self, ctx: &egui::Context) -> Option<TextureHandle> {
-        if let Some(pid) = self.self_custom_portrait_id() {
-            if let Some(tex) = self.custom_portrait_texture(ctx, pid) {
-                return Some(tex);
-            }
-        }
         let live = self
             .world
             .self_uid
             .and_then(|uid| self.world.avatars.get(&uid))
             .map(|a| a.appearance.clone());
         if let Some(app) = live {
+            if let Some(pid) = self.self_custom_portrait_id() {
+                if let Some(tex) = self.custom_portrait_texture(ctx, pid, &app) {
+                    return Some(tex);
+                }
+            }
             let key = format!("self:{}:{}:{:?}", app.species_id, app.gender, app.color_key);
             return self.portrait_for_appearance(ctx, &app, key);
         }
         let (id, colors) = self
             .selected_character()
             .map(|c| (c.id.clone(), c.colors.clone()))?;
+        if let Some(pid) = self.self_custom_portrait_id() {
+            let app = furcadia_client::parse_color_code(&colors);
+            if let Some(tex) = self.custom_portrait_texture(ctx, pid, &app) {
+                return Some(tex);
+            }
+        }
         self.character_portrait(ctx, &id, &colors)
     }
 
@@ -3944,8 +4038,9 @@ impl FurcadiaApp {
                         }
                     }
                 }
-                NetToUi::PortraitDownloaded { portrait_id, rgba } => {
+                NetToUi::PortraitDownloaded { portrait_id, rgba, remappable } => {
                     self.pending_portrait_downloads.remove(&portrait_id);
+                    if remappable { self.remappable_portraits.insert(portrait_id); }
                     self.custom_portrait_rgba.insert(portrait_id, rgba);
                 }
                 NetToUi::ChatImageDownloaded { url, rgba } => {
@@ -4127,9 +4222,8 @@ impl FurcadiaApp {
                 for av in self.world.avatars.values() {
                     let key = shortname_key(&av.name);
                     if !key.is_empty() {
-                        if let Some(color) = accent_color_for_appearance(&av.appearance) {
-                            self.player_accent_colors.insert(key, color);
-                        }
+                        self.player_badge_colors
+                            .insert(key, name_badge_chat_color(Some(av.uid) == self.world.self_uid));
                     }
                     if Some(av.uid) != self.world.self_uid && self.pounce.contains(&av.name) {
                         visible_names.push(av.name.clone());
@@ -4230,9 +4324,8 @@ impl FurcadiaApp {
                             if let Some(av) = self.world.avatars.get(&uid) {
                                 let key = shortname_key(&av.name);
                                 if !key.is_empty() {
-                                    if let Some(color) = accent_color_for_appearance(&av.appearance) {
-                                        self.player_accent_colors.insert(key, color);
-                                    }
+                                    self.player_badge_colors
+                                        .insert(key, name_badge_chat_color(Some(uid) == self.world.self_uid));
                                 }
                             }
                         }
@@ -4360,9 +4453,12 @@ impl FurcadiaApp {
     }
 
     fn send_chat_input(&mut self) {
-        let raw = self.chat_input.trim().to_owned();
+        let mut raw = self.chat_input.trim().to_owned();
         if raw.is_empty() || !self.is_connected {
             return;
+        }
+        if self.autocorrect && !raw.starts_with(['/', '`']) {
+            raw = autocorrect_common_words(&raw);
         }
         self.last_sent_msg = raw.clone();
         self.chat_input.clear();
@@ -5028,10 +5124,38 @@ impl FurcadiaApp {
                                 )
                                 .clicked()
                             {
-                                if let Ok(exe) = std::env::current_exe() {
-                                    let _ = std::process::Command::new(exe).spawn();
+                                let launched = std::env::current_exe().and_then(|exe| {
+                                    std::process::Command::new(exe)
+                                        .stdin(std::process::Stdio::null())
+                                        .stdout(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .spawn()
+                                });
+                                match launched {
+                                    Ok(mut child) => {
+                                        // Give the new process a moment to initialize. If it
+                                        // exits immediately, keep this window open and show why.
+                                        thread::sleep(Duration::from_millis(600));
+                                        match child.try_wait() {
+                                            Ok(None) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                                            Ok(Some(status)) => {
+                                                self.update_install_state = UpdateInstallState::Failed(
+                                                    format!("The updated client exited during startup ({status})."),
+                                                );
+                                            }
+                                            Err(err) => {
+                                                self.update_install_state = UpdateInstallState::Failed(
+                                                    format!("Could not verify the updated client started: {err}"),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        self.update_install_state = UpdateInstallState::Failed(
+                                            format!("Could not restart the client: {err}"),
+                                        );
+                                    }
                                 }
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
                             if ui.button("Close").clicked() {
                                 self.update_popup_open = false;
@@ -5136,6 +5260,23 @@ impl FurcadiaApp {
                                 self.save_config();
                             }
                         });
+                        ui.horizontal(|ui| {
+                            ui.label("Chat text size:");
+                            if ui.add(egui::Slider::new(&mut self.chat_font_size, 9..=28).suffix(" px")).changed() {
+                                self.save_config();
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Chat text color:");
+                            if ui.color_edit_button_srgba(&mut self.chat_text_color).changed() { self.save_config(); }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Typed text color:");
+                            if ui.color_edit_button_srgba(&mut self.input_text_color).changed() { self.save_config(); }
+                        });
+                        if ui.checkbox(&mut self.autocorrect, "Auto-correct common typing mistakes when sending").changed() {
+                            self.save_config();
+                        }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.label("Left-panel portrait size:");
@@ -6524,6 +6665,11 @@ impl FurcadiaApp {
             .filter(|w| w.detached)
             .map(|w| w.peer.clone())
             .collect();
+        let player_badges = if detached_peers.is_empty() {
+            HashMap::new()
+        } else {
+            self.current_player_badge_textures(ctx)
+        };
 
         for peer in detached_peers {
             let vp_id = egui::ViewportId::from_hash_of(("furc_whisper", &peer));
@@ -6585,7 +6731,8 @@ impl FurcadiaApp {
                                             &self.smiley_textures,
                                             &self.desctag_textures,
                                             &self.chat_img_textures,
-                                            &self.player_accent_colors,
+                                            &self.player_badge_colors,
+                                            &player_badges,
                                         );
                                     }
                                 });
@@ -8128,7 +8275,10 @@ impl FurcadiaApp {
 
         let chat_frame = egui::Frame::none()
             .fill(eff_bg)
-            .stroke(Stroke::new(1.5_f32, GOLD_DIM))
+            .stroke(Stroke::new(
+                if self.is_connected { 1.5_f32 } else { 2.5_f32 },
+                if self.is_connected { GOLD_DIM } else { Color32::from_rgb(225, 55, 65) },
+            ))
             .inner_margin(8.0);
 
         if self.limit_view_range {
@@ -8139,7 +8289,10 @@ impl FurcadiaApp {
                 .frame(
                     egui::Frame::none()
                         .fill(Color32::BLACK)
-                        .stroke(Stroke::new(1.5_f32, accent)),
+                        .stroke(Stroke::new(
+                            if self.is_connected { 1.5_f32 } else { 2.5_f32 },
+                            if self.is_connected { accent } else { Color32::from_rgb(225, 55, 65) },
+                        )),
                 )
                 .show(ctx, |ui| {
                     self.render_isometric_world(ui);
@@ -8161,7 +8314,10 @@ impl FurcadiaApp {
                 .frame(
                     egui::Frame::none()
                         .fill(self.theme.bg())
-                        .stroke(Stroke::new(2.0_f32, accent)),
+                        .stroke(Stroke::new(
+                            if self.is_connected { 2.0_f32 } else { 2.5_f32 },
+                            if self.is_connected { accent } else { Color32::from_rgb(225, 55, 65) },
+                        )),
                 )
                 .show(ctx, |ui| {
                     self.render_isometric_world(ui);
@@ -8256,6 +8412,36 @@ impl FurcadiaApp {
 
     fn render_chat_panel_contents(&mut self, ui: &mut egui::Ui) {
         let accent = self.theme.accent();
+        let mut chat_style = (**ui.style()).clone();
+        let body_family = chat_style.text_styles[&egui::TextStyle::Body].family.clone();
+        chat_style.text_styles.insert(
+            egui::TextStyle::Body,
+            FontId::new(self.chat_font_size as f32, body_family),
+        );
+        chat_style.visuals.override_text_color = Some(self.chat_text_color);
+        ui.set_style(chat_style);
+        if !self.is_connected {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(74, 24, 32))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(225, 70, 80)))
+                .rounding(4.0)
+                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let title = if self.connecting_stage == "Reconnecting..." {
+                            "Reconnecting to Furcadia…"
+                        } else {
+                            "Disconnected from Furcadia"
+                        };
+                        ui.label(RichText::new(title).strong().color(Color32::WHITE));
+                        if self.connecting_stage != "Reconnecting..."
+                            && ui.button("Reconnect").clicked()
+                        {
+                            self.reconnect_active_character();
+                        }
+                    });
+                });
+        }
                 // Chat + Whisper Tabs bar (horizontally scrollable when many whispers are open)
                 let mut close_peer: Option<String> = None;
                 ui.horizontal(|ui| {
@@ -8606,6 +8792,7 @@ impl FurcadiaApp {
                         &self.chat_input,
                         (input_w - 12.0).max(60.0),
                         &self.spell_misspelled,
+                        self.input_text_color,
                     );
                     ui.fonts(|f| f.layout_job(job)).size().y
                 };
@@ -8613,6 +8800,7 @@ impl FurcadiaApp {
                 let available_h = (total_avail_h - input_h - spelling_h - 18.0).max(min_chat_h);
                 let active_peer = self.active_chat_tab.clone();
                 let mut chat_action: Option<ChatClickAction> = None;
+                let player_badges = self.current_player_badge_textures(ui.ctx());
                 egui::ScrollArea::vertical()
                     .id_salt(("chat_scroll", active_peer.as_deref().unwrap_or("main")))
                     .auto_shrink([false, false])
@@ -8651,7 +8839,8 @@ impl FurcadiaApp {
                                             &self.smiley_textures,
                                             &self.desctag_textures,
                                             &self.chat_img_textures,
-                                            &self.player_accent_colors,
+                                            &self.player_badge_colors,
+                                            &player_badges,
                                         );
                                     }
                                 }
@@ -8665,7 +8854,8 @@ impl FurcadiaApp {
                                     &self.smiley_textures,
                                     &self.desctag_textures,
                                     &self.chat_img_textures,
-                                    &self.player_accent_colors,
+                                    &self.player_badge_colors,
+                                    &player_badges,
                                 );
                             }
                         }
@@ -8743,12 +8933,14 @@ impl FurcadiaApp {
                     let enter = ui.memory(|m| m.has_focus(chat_input_id))
                         && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                     let misspelled_snapshot = self.spell_misspelled.clone();
+                    let input_text_color = self.input_text_color;
                     let mut layouter = move |ui: &egui::Ui, text: &str, wrap_width: f32| {
                         let job = build_spellcheck_layout_job(
                             ui,
                             text,
                             wrap_width,
                             &misspelled_snapshot,
+                            input_text_color,
                         );
                         ui.fonts(|f| f.layout_job(job))
                     };
@@ -10041,7 +10233,7 @@ impl FurcadiaApp {
                     let port_size = Vec2::splat(self.portrait_size);
                     let custom_tex = snapshot
                         .portrait_id
-                        .and_then(|pid| self.custom_portrait_texture(ctx, pid));
+                        .and_then(|pid| self.custom_portrait_texture(ctx, pid, &snapshot.info.appearance));
                     if let Some(ref tex) = custom_tex.or(portrait_tex) {
                         let resp = ui.image(egui::load::SizedTexture::new(tex.id(), port_size));
                         if let Some(pid) = snapshot.portrait_id {
@@ -11366,19 +11558,14 @@ fn split_inline_chat_codes(s: &str) -> Vec<InlineChatPart<'_>> {
     parts
 }
 
-fn accent_color_for_appearance(appearance: &furcadia_client::AvatarAppearance) -> Option<Color32> {
-    let luts = RemapLuts::from_appearance(appearance);
-    let lut = luts.channels[7].as_ref()?;
-    let [mut r, mut g, mut b] = lut[160];
-    // Keep very dark accent colors legible against the dark chat background.
-    let luma = (r as u16 * 3 + g as u16 * 6 + b as u16) / 10;
-    if luma < 110 {
-        let lift = (110 - luma) as u8;
-        r = r.saturating_add(lift);
-        g = g.saturating_add(lift);
-        b = b.saturating_add(lift);
+fn name_badge_chat_color(is_self: bool) -> Color32 {
+    if is_self {
+        // Match the olive fill used by the local player's map name badge.
+        Color32::from_rgb(0xc6, 0xc7, 0x7c)
+    } else {
+        // Match the blue fill used by other players' map name badges.
+        Color32::from_rgb(119, 170, 209)
     }
-    Some(Color32::from_rgb(r, g, b))
 }
 
 fn render_chat_line(
@@ -11388,7 +11575,8 @@ fn render_chat_line(
     smileys: &[Option<TextureHandle>],
     desctags: &[Option<TextureHandle>],
     chat_imgs: &HashMap<String, Option<TextureHandle>>,
-    player_accent_colors: &HashMap<String, Color32>,
+    player_badge_colors: &HashMap<String, Color32>,
+    player_badges: &HashMap<String, TextureHandle>,
 ) {
     let has_name_link = line.spans.iter().any(|s| {
         matches!(
@@ -11414,8 +11602,19 @@ fn render_chat_line(
         })
     };
 
+    let speaker_badge = chat_line_speaker_key(line).and_then(|key| player_badges.get(&key));
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
+        if let Some(badge) = speaker_badge {
+            let tex_size = badge.size_vec2();
+            let height = (ui.text_style_height(&egui::TextStyle::Body) * 0.9).clamp(10.0, 16.0);
+            let width = if tex_size.y > 0.0 {
+                (tex_size.x * height / tex_size.y).clamp(12.0, 22.0)
+            } else {
+                height
+            };
+            ui.image((badge.id(), Vec2::new(width, height)));
+        }
         for span in &line.spans {
             match span {
                 ChatSpan::Image { src, alt } => {
@@ -11468,15 +11667,16 @@ fn render_chat_line(
                         if let Some(short) = url.strip_prefix("name://") {
                             let key = shortname_key(short);
                             let disp_key = shortname_key(text);
-                            if let Some(&acc_col) = player_accent_colors
+                            if let Some(&acc_col) = player_badge_colors
                                 .get(&key)
-                                .or_else(|| player_accent_colors.get(&disp_key))
+                                .or_else(|| player_badge_colors.get(&disp_key))
                             {
                                 rt = rt.color(acc_col);
                             }
                             let resp = ui
                                 .add(egui::Label::new(rt).sense(egui::Sense::click()))
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(format!("{text}\nPlayer: {short}"));
                             if resp.clicked() || resp.secondary_clicked() {
                                 let pos = resp
                                     .interact_pointer_pos()
@@ -11490,7 +11690,8 @@ fn render_chat_line(
                         } else if lower.starts_with("furc://") {
                             let resp = ui
                                 .add(egui::Label::new(rt).sense(egui::Sense::click()))
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(format!("{text}\n{url}"));
                             if resp.clicked() {
                                 *action_out = Some(ChatClickAction::EnterDreamUrl(url.clone()));
                             }
@@ -11498,12 +11699,14 @@ fn render_chat_line(
                             let cmd = url[10..].trim_start_matches('/').to_owned();
                             let resp = ui
                                 .add(egui::Label::new(rt).sense(egui::Sense::click()))
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(format!("{text}\nCommand: {cmd}"));
                             if resp.clicked() {
                                 *action_out = Some(ChatClickAction::SendCommand(cmd));
                             }
                         } else {
-                            ui.hyperlink_to(rt, url);
+                            ui.hyperlink_to(rt, url)
+                                .on_hover_text(format!("{text}\n{url}"));
                         }
                     } else if fallback_peer
                         .as_deref()
@@ -11511,12 +11714,13 @@ fn render_chat_line(
                     {
                         let peer = fallback_peer.as_deref().unwrap_or_default();
                         let key = shortname_key(peer);
-                        if let Some(&acc_col) = player_accent_colors.get(&key) {
+                        if let Some(&acc_col) = player_badge_colors.get(&key) {
                             rt = rt.color(acc_col);
                         }
                         let resp = ui
                             .add(egui::Label::new(rt.underline()).sense(egui::Sense::click()))
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!("{peer}\nPlayer profile and actions"));
                         if resp.clicked() || resp.secondary_clicked() {
                             let pos = resp
                                 .interact_pointer_pos()
@@ -11575,6 +11779,51 @@ fn render_chat_line(
             }
         }
     });
+}
+
+fn chat_line_speaker_key(line: &ChatLine) -> Option<String> {
+    line.spans.iter().find_map(|span| match span {
+        ChatSpan::Text { style, .. } => style
+            .link
+            .as_deref()
+            .and_then(|url| url.strip_prefix("name://"))
+            .map(shortname_key),
+        _ => None,
+    })
+}
+
+fn rgb_from_packed(rgb: u32) -> Color32 {
+    Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+fn packed_from_rgb(color: Color32) -> u32 {
+    (u32::from(color.r()) << 16) | (u32::from(color.g()) << 8) | u32::from(color.b())
+}
+
+fn autocorrect_common_words(text: &str) -> String {
+    const WORDS: &[(&str, &str)] = &[
+        ("teh", "the"), ("adn", "and"), ("taht", "that"), ("hte", "the"),
+        ("thier", "their"), ("wierd", "weird"), ("recieve", "receive"),
+        ("beleive", "believe"), ("becuase", "because"), ("dont", "don't"),
+        ("doesnt", "doesn't"), ("cant", "can't"), ("wont", "won't"),
+        ("im", "I'm"), ("youre", "you're"), ("thats", "that's"),
+    ];
+    text.split_inclusive(char::is_whitespace)
+        .map(|part| {
+            let start = part.find(|c: char| c.is_ascii_alphabetic() || c == '\'').unwrap_or(part.len());
+            let end = part.rfind(|c: char| c.is_ascii_alphabetic() || c == '\'').map_or(start, |i| i + 1);
+            if start >= end { return part.to_owned(); }
+            let word = &part[start..end];
+            let Some((_, replacement)) = WORDS.iter().find(|(wrong, _)| word.eq_ignore_ascii_case(wrong)) else { return part.to_owned(); };
+            let replacement = if word.chars().all(|c| !c.is_ascii_lowercase()) {
+                replacement.to_ascii_uppercase()
+            } else if word.chars().next().is_some_and(char::is_uppercase) {
+                let mut chars = replacement.chars();
+                chars.next().map(char::to_uppercase).into_iter().flatten().chain(chars).collect()
+            } else { (*replacement).to_owned() };
+            format!("{}{}{}", &part[..start], replacement, &part[end..])
+        })
+        .collect()
 }
 
 fn map_chat_color(name: &str) -> Color32 {
@@ -12046,11 +12295,11 @@ fn build_spellcheck_layout_job(
     text: &str,
     wrap_width: f32,
     misspelled: &[MisspelledWord],
+    text_color: Color32,
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width;
     let font_id = egui::TextStyle::Body.resolve(ui.style());
-    let text_color = ui.visuals().text_color();
     let base_fmt = egui::TextFormat {
         font_id: font_id.clone(),
         color: text_color,
@@ -12212,6 +12461,8 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
     let mut login_deadline: Option<Instant> = None;
     let mut last_server_notice: Option<String> = None;
     let mut account_retry: Option<(u64, String, String, String)> = None;
+    let mut last_server_activity = Instant::now();
+    let mut heartbeat_sent: Option<Instant> = None;
 
     loop {
         while let Ok(cmd) = rx.try_recv() {
@@ -12252,6 +12503,8 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                     pending_desc = updated_desc;
                     pending_colors = colors;
                     login_deadline = None;
+                    last_server_activity = Instant::now();
+                    heartbeat_sent = None;
                     last_server_notice = None;
                     account_retry = None;
 
@@ -12566,8 +12819,9 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                             }
                             Some(bytes)
                         });
+                        let remappable = raw.as_ref().is_some_and(|bytes| bytes.starts_with(b"FPRT"));
                         let rgba = raw.and_then(|bytes| decode_furcadia_portrait(&bytes));
-                        let _ = dl_tx.send(NetToUi::PortraitDownloaded { portrait_id, rgba });
+                        let _ = dl_tx.send(NetToUi::PortraitDownloaded { portrait_id, rgba, remappable });
                         dl_ctx.request_repaint();
                     });
                 }
@@ -12647,6 +12901,8 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
         if let Some(cl) = client.as_mut() {
             match cl.poll_message() {
                 Ok(Some(msg)) => {
+                    last_server_activity = Instant::now();
+                    heartbeat_sent = None;
                     if awaiting_login_ack {
                         match &msg {
                             ServerMessage::LoginAck => {
@@ -12703,6 +12959,27 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                             error: err_msg,
                         });
                         ctx.request_repaint();
+                    } else if !awaiting_login_ack {
+                        if let Some(sent) = heartbeat_sent {
+                            if sent.elapsed() >= Duration::from_secs(12) {
+                                client = None;
+                                let _ = tx.send(NetToUi::Connected { seq: active_seq, connected: false });
+                                let _ = tx.send(NetToUi::Status("Connection lost (server stopped responding to keepalive).".into()));
+                                ctx.request_repaint();
+                            }
+                        } else if last_server_activity.elapsed() >= Duration::from_secs(30) {
+                            let probe_sent = client.as_mut().is_some_and(|cl| {
+                                cl.send_command(&ClientCommand::Raw("time".into())).is_ok()
+                            });
+                            if !probe_sent {
+                                    client = None;
+                                    let _ = tx.send(NetToUi::Connected { seq: active_seq, connected: false });
+                                    let _ = tx.send(NetToUi::Status("Connection lost while checking server response.".into()));
+                            } else {
+                                heartbeat_sent = Some(Instant::now());
+                            }
+                            ctx.request_repaint();
+                        }
                     }
                 }
                 Err(err) => {
