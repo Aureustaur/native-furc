@@ -1,0 +1,8 @@
+/target/
+/dist/
+/Furcadia Windows/
+*.log
+*.tmp
+*.deb
+*.pkg.tar.zst
+.DS_Store

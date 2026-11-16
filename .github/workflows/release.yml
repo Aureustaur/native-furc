@@ -1,0 +1,128 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
+      - name: Run tests
+        run: cargo test --all-targets
+      - name: Build .deb package
+        run: |
+          chmod +x packaging/debian/build-deb.sh
+          sed -i 's/cargo build --release --offline --bins/cargo build --release --locked --bins/' packaging/debian/build-deb.sh
+          ./packaging/debian/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-package
+          path: dist/*.deb
+
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Arch build tools
+        run: |
+          pacman -Syu --noconfirm base-devel rust cargo git libx11 libxcb libxkbcommon libglvnd curl bzip2 unzip
+      - name: Build Arch package
+        run: |
+          useradd -m builder
+          mkdir -p /tmp/archbuild/src
+          cp -r "$GITHUB_WORKSPACE" /tmp/archbuild/src/native-furcadia-1.0.0
+          cp packaging/arch/PKGBUILD /tmp/archbuild/PKGBUILD
+          chown -R builder:builder /tmp/archbuild
+          su - builder -c 'cd /tmp/archbuild && PKGDEST=/tmp/archbuild makepkg -e --noconfirm'
+          mkdir -p dist
+          cp /tmp/archbuild/*.pkg.tar.zst dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: dist/*.pkg.tar.zst
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Windows binaries
+        run: cargo build --release --locked --bins
+      - name: Build Windows installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc packaging/windows/installer.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/FurcadiaNative-Setup-*.exe
+
+  release:
+    needs: [build-deb, build-arch, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Furcadia Native Client ${{ github.ref_name }}"
+          body: |
+            ## Furcadia Native Client ${{ github.ref_name }}
+
+            A native, lightweight Rust client for Furcadia supporting Linux and Windows.
+
+            ### Highlights
+            - Fast native GUI (`furc-gui`) built with `eframe` / `egui` and CLI (`furc-cli`)
+            - Modern dream rendering, custom portraits, desctags, and avatar/digo support
+            - Multi-character tabs, drag-to-reorder player/whisper tabs, and accent-colored chat/emotes
+            - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
+            - Integrated Start Menu / Desktop launcher icons and in-app About page
+
+            ### Installation
+
+            #### Windows
+            1. Download `FurcadiaNative-Setup-1.0.0-x86_64.exe` from the assets below.
+            2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
+
+            #### Debian / Ubuntu / Linux Mint
+            ```sh
+            sudo apt install ./furcadia-native_1.0.0_amd64.deb
+            ```
+            Or double-click the `.deb` file to install via your graphical package manager.
+
+            #### Arch Linux / Manjaro / EndeavourOS
+            Download the `.pkg.tar.zst` asset and install with:
+            ```sh
+            sudo pacman -U furcadia-native-1.0.0-1-x86_64.pkg.tar.zst
+            ```
+            Or build from source with `PKGBUILD`:
+            ```sh
+            git clone https://github.com/morganlowe/native-furcadia.git
+            cd native-furcadia/packaging/arch
+            makepkg -si
+            ```
+          files: |
+            artifacts/debian-package/*.deb
+            artifacts/arch-package/*.pkg.tar.zst
+            artifacts/windows-installer/*.exe

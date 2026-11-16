@@ -1,0 +1,200 @@
+//! Per-character chat and whisper log persistence and retention management.
+
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Returns `~/.local/share/furcadia-native/logs` (respecting `XDG_DATA_HOME`).
+pub fn default_logs_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    Some(base.join("furcadia-native").join("logs"))
+}
+
+fn sanitize_segment(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | ' ' => c,
+            _ => '_',
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "Unknown".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Converts a `SystemTime` into `(year, month, day, hour, minute, second)` in UTC.
+pub fn system_time_to_ymd_hms(t: SystemTime) -> (i32, u32, u32, u32, u32, u32) {
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400) as u32;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+
+    // Howard Hinnant's civil-from-days algorithm.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = (y + if m <= 2 { 1 } else { 0 }) as i32;
+    (year, m as u32, d as u32, hour, min, sec)
+}
+
+fn append_line_to(path: &Path, line: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(f, "{line}")
+}
+
+/// Appends a timestamped line to `<logs_dir>/<character>/YYYY-MM-DD.txt`.
+pub fn append_chat_log(base_dir: &Path, character: &str, text: &str) -> io::Result<()> {
+    let (y, m, d, hh, mm, ss) = system_time_to_ymd_hms(SystemTime::now());
+    let char_dir = sanitize_segment(character);
+    let file = base_dir
+        .join(char_dir)
+        .join(format!("{y:04}-{m:02}-{d:02}.txt"));
+    append_line_to(&file, &format!("[{hh:02}:{mm:02}:{ss:02}] {text}"))
+}
+
+/// Appends a timestamped line to `<logs_dir>/<character>/whispers/<peer>.txt`.
+pub fn append_whisper_log(
+    base_dir: &Path,
+    character: &str,
+    peer: &str,
+    text: &str,
+) -> io::Result<()> {
+    let (y, m, d, hh, mm, ss) = system_time_to_ymd_hms(SystemTime::now());
+    let char_dir = sanitize_segment(character);
+    let peer_file = sanitize_segment(peer);
+    let file = base_dir
+        .join(char_dir)
+        .join("whispers")
+        .join(format!("{peer_file}.txt"));
+    append_line_to(
+        &file,
+        &format!("[{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}] {text}"),
+    )
+}
+
+/// Removes log files older than `retention_days` (no-op when `retention_days == 0`).
+pub fn prune_old_logs(base_dir: &Path, retention_days: u32) -> usize {
+    if retention_days == 0 || !base_dir.is_dir() {
+        return 0;
+    }
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400))
+        .unwrap_or(UNIX_EPOCH);
+    let mut removed = 0usize;
+    let mut stack = vec![base_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log"))
+            {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if modified < cutoff && fs::remove_file(&path).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    removed
+}
+
+/// Lists all character log folders under `base_dir` (sorted).
+pub fn list_log_characters(base_dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(base_dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Lists all `.txt`/`.log` files for a character (including `whispers/`), newest first.
+pub fn list_log_files(base_dir: &Path, character: &str) -> Vec<PathBuf> {
+    let char_dir = base_dir.join(sanitize_segment(character));
+    let mut out = Vec::new();
+    let mut stack = vec![char_dir];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log"))
+            {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out.reverse();
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn civil_date_epoch() {
+        assert_eq!(system_time_to_ymd_hms(UNIX_EPOCH), (1970, 1, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn write_and_list_logs() {
+        let tmp = std::env::temp_dir().join(format!(
+            "furc_logs_test_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        append_chat_log(&tmp, "TestHero", "Hello world!").unwrap();
+        append_whisper_log(&tmp, "TestHero", "TestFriend", "Hi there").unwrap();
+        assert_eq!(list_log_characters(&tmp), vec!["TestHero".to_owned()]);
+        let files = list_log_files(&tmp, "TestHero");
+        assert_eq!(files.len(), 2);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+}

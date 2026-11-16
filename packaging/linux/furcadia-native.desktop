@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Furcadia Native Client
+Comment=Native Furcadia client
+Exec=furc-gui
+Icon=furcadia-native
+Terminal=false
+Categories=Game;RolePlaying;
+StartupWMClass=furc-gui
