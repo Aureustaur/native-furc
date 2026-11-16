@@ -39,13 +39,16 @@ Furcadia Native Client is an independent desktop client for Furcadia, built in R
 - Use main chat, emotes, whispers, clickable links, and character-colored names.
 - Reorder character and whisper tabs, and open incoming whispers in their own tabs.
 - Keep local chat and whisper logs, with configurable logging and retention.
-- Optionally sync preferences and logs through a folder managed by Nextcloud, Google Drive, Dropbox, or another sync provider. Choose the same folder in **Settings → Logs** on each computer. Preferences load at startup, credentials remain on each device, and logs use separate per-device folders to avoid simultaneous writes to one file. Let your provider finish syncing before opening the client on another computer.
 - Follow characters with the Pounce watchlist and receive configurable notifications for pounces, whispers, and mentions.
 - Read Furcadia news and review online status from the client.
 
 ### Bring your Furcadia files with you
 
 Import maps, patches, portraits, settings, character details, Pounce lists, and logs from an existing Windows or Wine Furcadia installation. The importer searches common install and Documents locations, and you can also select a location from the client.
+
+You can also sync this client's preferences and logs between computers with Nextcloud, Google Drive for desktop, Dropbox, or another app that syncs a local folder. No special account linking is needed in Furcadia Native Client: install your provider's app, then create or choose a dedicated folder inside its local synced area, such as `Nextcloud/Furcadia Native Sync/`. In the client, open **Settings → Logs**, select that folder, and click **Use Folder**. Choose the same synced folder on each computer; on additional computers, restart the client after connecting so it loads the newest shared preferences.
+
+The client manages the contents of that folder: it creates `settings-<device>.ini` files at the top level and stores logs under `logs/<device>/` for each computer. The log viewer combines those per-device logs. Sync the whole **Furcadia Native Sync** folder, including its settings files and `logs` subfolder. Let the provider finish syncing before starting the client on another computer. Email, passwords, and auto-login credentials stay in each computer's local app settings.
 
 The client reads Fox5 and FR01 asset archives and supports Furcadia map formats V01.40 and V01.50. Proprietary game files are not included in this repository; use files from your own Furcadia installation.
 
