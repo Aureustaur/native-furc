@@ -12752,10 +12752,19 @@ fn decode_furcadia_portrait(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 }
 
 fn main() -> eframe::Result<()> {
+    let icon = image::load_from_memory(include_bytes!("../../packaging/linux/furcadia-native.png"))
+        .expect("application icon must be a valid PNG")
+        .to_rgba8();
+    let (icon_width, icon_height) = icon.dimensions();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Furcadia Native Client"),
+            .with_title("Furcadia Native Client")
+            .with_icon(egui::IconData {
+                rgba: icon.into_raw(),
+                width: icon_width,
+                height: icon_height,
+            }),
         ..Default::default()
     };
     eframe::run_native(

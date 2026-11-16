@@ -99,26 +99,25 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.7
-            - Improved Windows and Wine import for chat session HTML files and whisper logs, with character and peer names mapped into the native log folders.
-            - First-time setup now checks common Furcadia locations and offers to import existing assets, Pounce data, and logs.
+            ### What's New in v1.0.8
+            - Added the new application icon to the app window, Linux packages, and Windows installer.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.0.7-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.0.8-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.7_amd64.deb
+            sudo apt install ./furcadia-native_1.0.8_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.7-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.0.8-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

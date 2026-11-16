@@ -1,6 +1,6 @@
 # Maintainer: Morgan Lowe <https://github.com/morganlowe/native-furcadia>
 pkgname=furcadia-native
-pkgver=1.0.7
+pkgver=1.0.8
 pkgrel=1
 pkgdesc="Native Furcadia client (GUI and CLI)"
 arch=('x86_64')
@@ -22,6 +22,6 @@ package() {
   install -Dm755 "target/release/furc-gui" "$pkgdir/usr/bin/furc-gui"
   install -Dm755 "target/release/furc-cli" "$pkgdir/usr/bin/furc-cli"
   install -Dm644 "packaging/linux/furcadia-native.desktop" "$pkgdir/usr/share/applications/furcadia-native.desktop"
-  install -Dm644 "bear-built-logo.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/furcadia-native.png"
+  install -Dm644 "packaging/linux/furcadia-native.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/furcadia-native.png"
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

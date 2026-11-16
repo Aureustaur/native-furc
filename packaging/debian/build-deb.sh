@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="1.0.7"
+VERSION="1.0.8"
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 PKG_NAME="furcadia-native"
 STAGE_DIR="$ROOT_DIR/dist/${PKG_NAME}_${VERSION}_${ARCH}"
@@ -17,7 +17,7 @@ chmod 0755 "$STAGE_DIR" "$STAGE_DIR/DEBIAN" "$STAGE_DIR/usr" "$STAGE_DIR/usr/bin
 install -m 755 "$ROOT_DIR/target/release/furc-gui" "$STAGE_DIR/usr/bin/furc-gui"
 install -m 755 "$ROOT_DIR/target/release/furc-cli" "$STAGE_DIR/usr/bin/furc-cli"
 install -m 644 "$ROOT_DIR/packaging/linux/furcadia-native.desktop" "$STAGE_DIR/usr/share/applications/furcadia-native.desktop"
-install -m 644 "$ROOT_DIR/bear-built-logo.png" "$STAGE_DIR/usr/share/icons/hicolor/256x256/apps/furcadia-native.png"
+install -m 644 "$ROOT_DIR/packaging/linux/furcadia-native.png" "$STAGE_DIR/usr/share/icons/hicolor/256x256/apps/furcadia-native.png"
 
 cat > "$STAGE_DIR/DEBIAN/control" <<EOF
 Package: ${PKG_NAME}
