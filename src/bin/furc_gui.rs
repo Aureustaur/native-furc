@@ -11414,24 +11414,11 @@ fn extract_zip_archive(zip_path: &std::path::Path, dest_dir: &std::path::Path) -
 }
 
 fn decompress_bzip2(src: &[u8]) -> Option<Vec<u8>> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("bzip2")
-        .arg("-dc")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(src).ok()?;
-    }
-    let out = child.wait_with_output().ok()?;
-    if out.status.success() && !out.stdout.is_empty() {
-        Some(out.stdout)
-    } else {
-        None
-    }
+    use std::io::Read;
+    let mut decoder = bzip2_rs::DecoderReader::new(src);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).ok()?;
+    (!out.is_empty()).then_some(out)
 }
 
 /// Decodes a Furcadia custom portrait (`FPRT10`, `FPRT20`, or standard image bytes) into `(w, h, rgba)`.

@@ -99,29 +99,25 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.1
-            - Fix Windows asset, dream cache, species cache, config, and log directory resolution (`%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%`) and auto-detect standard Windows Furcadia install paths
-            - Keep background-tab whispers out of Main Chat so whispers only appear in their dedicated tabs
-            - Show the close (`×`) button on all character tabs (including the active tab)
-            - Format name-prefixed and pipe-delimited emotes consistently in whisper tabs without repeating the sender's name
-            - Clear and reload dream patch caches when switching character tabs so maps never render with another tab's patches
+            ### What's New in v1.0.2
+            - Decode `bzip2`-compressed `FR01` dream packages and portraits natively in Rust (`bzip2-rs`) instead of spawning an external `bzip2` binary, fixing dream asset extraction on Windows (e.g. `pmfurn` / FurN)
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-${{ github.ref_name }}-x86_64.exe` (strip leading `v`, e.g. `FurcadiaNative-Setup-1.0.1-x86_64.exe`) from the assets below.
+            1. Download `FurcadiaNative-Setup-1.0.2-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.1_amd64.deb
+            sudo apt install ./furcadia-native_1.0.2_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.1-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.0.2-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

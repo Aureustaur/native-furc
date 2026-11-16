@@ -18,23 +18,23 @@ Prebuilt installers and packages are available on the [Releases](https://github.
 
 ### Windows
 
-1. Download `FurcadiaNative-Setup-1.0.1-x86_64.exe` from the latest release.
+1. Download `FurcadiaNative-Setup-1.0.2-x86_64.exe` from the latest release.
 2. Run the installer to install `furc-gui` and `furc-cli`, create a **Furcadia Native Client** Start Menu entry, and register a standard Windows uninstaller.
 
 ### Debian / Ubuntu / Linux Mint
 
-Download `furcadia-native_1.0.1_amd64.deb` from the latest release and double-click it in your file manager, or install via terminal:
+Download `furcadia-native_1.0.2_amd64.deb` from the latest release and double-click it in your file manager, or install via terminal:
 
 ```sh
-sudo apt install ./furcadia-native_1.0.1_amd64.deb
+sudo apt install ./furcadia-native_1.0.2_amd64.deb
 ```
 
 ### Arch Linux
 
-Download `furcadia-native-1.0.1-1-x86_64.pkg.tar.zst` from the latest release and install with:
+Download `furcadia-native-1.0.2-1-x86_64.pkg.tar.zst` from the latest release and install with:
 
 ```sh
-sudo pacman -U furcadia-native-1.0.1-1-x86_64.pkg.tar.zst
+sudo pacman -U furcadia-native-1.0.2-1-x86_64.pkg.tar.zst
 ```
 
 Or build and install directly from the included `PKGBUILD`:

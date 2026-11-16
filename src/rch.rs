@@ -2,9 +2,8 @@
 
 use std::fmt;
 use std::fs;
-use std::io::Write;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 #[derive(Debug)]
 pub enum RchError {
@@ -129,31 +128,12 @@ fn sanitize_rel_filename(name: &str) -> Result<String, RchError> {
 }
 
 fn decompress_bzip2(payload: &[u8]) -> Result<Vec<u8>, RchError> {
-    let mut child = Command::new("bzip2")
-        .args(["-d", "-c"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let stdin = child.stdin.take();
-    let output = std::thread::scope(|s| {
-        if let Some(mut stdin) = stdin {
-            s.spawn(move || {
-                let _ = stdin.write_all(payload);
-            });
-        }
-        child.wait_with_output()
-    })?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(RchError::DecompressFailed(format!(
-            "bzip2 exited {}: {err}",
-            output.status
-        )));
-    }
-    Ok(output.stdout)
+    let mut decoder = bzip2_rs::DecoderReader::new(payload);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| RchError::DecompressFailed(format!("bzip2 decode failed: {e}")))?;
+    Ok(out)
 }
 
 #[cfg(test)]
