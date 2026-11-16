@@ -2,6 +2,8 @@
 
 A native, cross-platform client for Furcadia written in Rust (`furc-gui` and `furc-cli`). Designed for fast startup, low resource usage, and full support for modern Furcadia dreams and features on Linux and Windows.
 
+![Furcadia Native Client](furc.png)
+
 ## Features
 
 - **Native GUI and CLI**: Hardware-accelerated interface built with `eframe` / `egui`, plus a standalone `furc-cli` binary.
