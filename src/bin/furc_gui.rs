@@ -2824,20 +2824,49 @@ impl FurcadiaApp {
         &mut self,
         ctx: &egui::Context,
         id: &str,
+        name: &str,
         colors: &str,
-        last_port: Option<u32>,
     ) -> Option<TextureHandle> {
-        if let Some(pid) = last_port {
+        // `lastport` in the account XML is a portrait slot, not a `pp<id>` file ID.
+        // The server's `]&` directive supplies the real file ID for custom portraits.
+        let name_key = shortname_key(name);
+        if let Some(pid) = self
+            .player_portrait_ids
+            .iter()
+            .find(|(known_name, _)| shortname_key(known_name) == name_key)
+            .map(|(_, pid)| *pid)
+        {
             if let Some(tex) = self.custom_portrait_texture(ctx, pid) {
                 return Some(tex);
             }
-            if !self.custom_portrait_rgba.contains_key(&pid)
-                && self.pending_portrait_downloads.insert(pid)
-            {
-                let _ = self.to_net.send(UiToNet::DownloadPortrait { portrait_id: pid });
-            }
         }
         self.character_portrait(ctx, id, colors)
+    }
+
+    /// Keep the account picker in sync with the authoritative appearance received in-world.
+    fn sync_selected_character_colors(&mut self) {
+        let live = self
+            .world
+            .self_uid
+            .and_then(|uid| self.world.avatars.get(&uid))
+            .map(|avatar| (avatar.name.clone(), avatar.colors.clone()));
+        let Some((name, colors)) = live.filter(|(_, colors)| !colors.is_empty()) else {
+            return;
+        };
+        let Some(info) = self.account_info.as_mut() else {
+            return;
+        };
+        let live_key = shortname_key(&name);
+        if let Some(character) = info
+            .characters
+            .iter_mut()
+            .find(|character| shortname_key(&character.name) == live_key)
+        {
+            if character.colors != colors {
+                character.colors = colors;
+                self.char_portraits.clear();
+            }
+        }
     }
 
     /// Portrait for the logged-in character (live appearance, falling back to account colors).
@@ -3935,6 +3964,10 @@ impl FurcadiaApp {
                 self.pending_vascodagama = true;
                 self.login_ack_at = Some(Instant::now());
                 self.login_trace_remaining = 60;
+                // Furcadia's `info` response includes the character's cookie counts.
+                let _ = self
+                    .to_net
+                    .send(UiToNet::Send(ClientCommand::Raw("info".to_owned())));
                 if let Some(dir) = default_logs_dir() {
                     let _ = std::fs::create_dir_all(&dir);
                     let _ = std::fs::write(dir.join("login_trace.log"), "");
@@ -3943,6 +3976,7 @@ impl FurcadiaApp {
             ServerMessage::CharacterIdentity { uid, name } => {
                 self.world.self_uid = uid.parse().ok();
                 self.world.self_name = Some(name.clone());
+                self.sync_selected_character_colors();
                 self.push_system_line("success", &format!("Logged in as {name} (UID {uid})"));
                 let _ = self
                     .to_net
@@ -3954,6 +3988,7 @@ impl FurcadiaApp {
             }
             ServerMessage::WorldPacket { opcode, data } => {
                 self.world.apply_world_packet(opcode, &data);
+                self.sync_selected_character_colors();
                 let now = Instant::now();
                 let mut visible_names: Vec<String> = Vec::new();
                 for av in self.world.avatars.values() {
@@ -4057,6 +4092,7 @@ impl FurcadiaApp {
                     b'O' => self.world.apply_avatar_gloaming(&data),
                     b'}' => {
                         self.world.apply_self_color_bytes(&data);
+                        self.sync_selected_character_colors();
                         if let Some(uid) = self.world.self_uid {
                             if let Some(av) = self.world.avatars.get(&uid) {
                                 let key = shortname_key(&av.name);
@@ -5674,7 +5710,7 @@ impl FurcadiaApp {
                                 }
                             }
 
-                            let tiles: Vec<(usize, String, String, String, Option<u32>)> = self
+                            let tiles: Vec<(usize, String, String, String)> = self
                                 .account_info
                                 .as_ref()
                                 .map(|info| {
@@ -5682,7 +5718,7 @@ impl FurcadiaApp {
                                         .iter()
                                         .map(|&i| {
                                             let c = &info.characters[i];
-                                            (i, c.id.clone(), c.name.replace('|', " "), c.colors.clone(), c.last_port)
+                                            (i, c.id.clone(), c.name.replace('|', " "), c.colors.clone())
                                         })
                                         .collect()
                                 })
@@ -5711,9 +5747,9 @@ impl FurcadiaApp {
                                             }
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                                for (idx, id, name, colors, last_port) in &tiles {
+                                                for (idx, id, name, colors) in &tiles {
                                                     let selected = *idx == self.selected_char_idx;
-                                                    let portrait = self.account_character_portrait(ctx, id, colors, *last_port);
+                                                    let portrait = self.account_character_portrait(ctx, id, name, colors);
                                                     let tile_size = Vec2::new(112.0, 134.0);
                                                     let (rect, resp) =
                                                         ui.allocate_exact_size(tile_size, Sense::click());
@@ -5945,6 +5981,8 @@ impl FurcadiaApp {
                                 ui.add_space(16.0);
 
                                 if let Some(err) = self.connecting_error.clone() {
+                                    let suggest_web_login = err.to_ascii_lowercase().contains("id error")
+                                        || err.contains("(6)");
                                     egui::Frame::none()
                                         .fill(INPUT_PURPLE)
                                         .stroke(Stroke::new(
@@ -5960,6 +5998,20 @@ impl FurcadiaApp {
                                                 err,
                                             );
                                         });
+                                    if suggest_web_login {
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "If this ID error keeps happening, sign in to the web client once, then return here and retry.",
+                                            )
+                                            .size(12.5)
+                                            .color(Color32::LIGHT_GRAY),
+                                        );
+                                        ui.hyperlink_to(
+                                            RichText::new("Open Furcadia Web Client").color(GOLD),
+                                            "https://www.furcadia.com/fured",
+                                        );
+                                    }
                                     ui.add_space(16.0);
                                     ui.horizontal(|ui| {
                                         if ui
@@ -7667,7 +7719,10 @@ impl FurcadiaApp {
             {
                 raw_cmd = Some(">");
             }
-            if self.is_connected && move_dir.is_none() {
+            // Let the focused text editor handle arrows for caret navigation. The chat input
+            // is also a TextEdit, so this intentionally avoids sending movement while typing
+            // in chat or whisper fields.
+            if self.is_connected && move_dir.is_none() && !wants_text {
                 if !shift && i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
                     move_dir = Some(7);
                 } else if !shift && i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
@@ -9851,6 +9906,9 @@ impl FurcadiaApp {
                                     .clicked()
                                 {
                                     self.send_raw_cmd(&format!("make-cookie {}", snapshot.short_name));
+                                    // Refresh the displayed cookie count after the server handles
+                                    // the make-cookie request, including any rejection message.
+                                    self.send_raw_cmd("info");
                                     self.push_system_line(
                                         "emit",
                                         &format!("[Cookie] Offering a cookie to {display_name}..."),
@@ -12795,6 +12853,9 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_title("Furcadia Native Client")
+            // Wayland gets the window icon from the matching desktop entry,
+            // since its backend ignores per-window icon data.
+            .with_app_id("furcadia-native")
             .with_icon(egui::IconData {
                 rgba: icon.into_raw(),
                 width: icon_width,

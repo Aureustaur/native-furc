@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "furcadia-client"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "bzip2-rs",
  "eframe",

@@ -19,7 +19,7 @@ pub struct CharacterSummary {
     pub name: String,
     pub species: String,
     pub colors: String,
-    /// Last portrait/port selected for this character by the account service.
+    /// Last portrait slot selected in the account service. This is not a `pp<id>` file ID.
     pub last_port: Option<u32>,
     pub last_login: String,
     pub desc: String,
