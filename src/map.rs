@@ -515,8 +515,8 @@ mod tests {
             52, 51, 50, // x=1 NE (y=2, 1, 0)
         ];
         let walls = unpack_wall_layer(&raw, 2, 3, true);
-        assert_eq!(walls[0 * 2 + 0], 10u16 | (40u16 << 8));
-        assert_eq!(walls[2 * 2 + 0], 12u16 | (42u16 << 8));
+        assert_eq!(walls[0], 10u16 | (40u16 << 8));
+        assert_eq!(walls[4], 12u16 | (42u16 << 8));
         assert_eq!(walls[1 * 2 + 1], 21u16 | (51u16 << 8));
     }
 

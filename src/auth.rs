@@ -1,7 +1,6 @@
 //! Furcadia account authentication and character discovery via `charon.furcadia.com`.
 
 use std::fmt;
-use std::process::Command;
 
 const CLOGIN_ENDPOINTS: &[&str] = &[
     "https://charon.furcadia.com/accounts/clogin.php",
@@ -57,7 +56,7 @@ impl std::error::Error for AuthError {}
 pub fn fetch_account_characters(email: &str, password: &str) -> Result<AccountInfo, AuthError> {
     let mut last_err = None;
     for endpoint in CLOGIN_ENDPOINTS {
-        let output = Command::new("curl")
+        let output = crate::sys::command("curl")
             .arg("-sS")
             .arg("-L")
             .arg("--max-time")

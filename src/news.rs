@@ -1,6 +1,5 @@
 //! Furcadia announcements feed parser and fetcher (`http://news.furcadia.com/current`).
 
-use std::process::Command;
 
 const NEWS_URL: &str = "http://news.furcadia.com/current";
 
@@ -17,7 +16,7 @@ pub struct NewsEntry {
 
 /// Fetches and parses announcements from `http://news.furcadia.com/current`.
 pub fn fetch_news() -> Result<Vec<NewsEntry>, String> {
-    let output = Command::new("curl")
+    let output = crate::sys::command("curl")
         .arg("-sSL")
         .arg("--max-time")
         .arg("8")

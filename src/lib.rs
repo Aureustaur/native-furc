@@ -15,6 +15,7 @@ pub mod news;
 pub mod pounce;
 pub mod protocol;
 pub mod rch;
+pub mod sys;
 pub mod win_import;
 pub mod world;
 

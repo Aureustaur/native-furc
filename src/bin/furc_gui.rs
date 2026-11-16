@@ -1,4 +1,5 @@
 //! Native cross-platform GUI client for Furcadia using `eframe` / `egui`.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 #[path = "../logo.rs"]
 mod logo;
@@ -1354,6 +1355,8 @@ struct FurcadiaApp {
     update_available: Option<UpdateReleaseInfo>,
     update_popup_open: bool,
     update_rx: Option<mpsc::Receiver<UpdateCheckMsg>>,
+    cookies_collected: Option<u32>,
+    cookies_total: Option<u32>,
 }
 
 impl FurcadiaApp {
@@ -1668,6 +1671,8 @@ impl FurcadiaApp {
             update_available: None,
             update_popup_open: false,
             update_rx: None,
+            cookies_collected: None,
+            cookies_total: None,
         };
         app.apply_font_settings(&ctx);
         if app.first_setup_done && app.check_updates_on_startup {
@@ -1741,6 +1746,9 @@ impl FurcadiaApp {
             if let Some(parent) = dir.parent() {
                 candidates.push(parent.join(rel));
             }
+        }
+        if let Some(root) = &self.assets.root {
+            candidates.push(root.join(rel));
         }
         candidates.push(std::path::PathBuf::from("Furcadia Windows/program Files (x86)/Furcadia").join(rel));
         candidates.push(std::path::PathBuf::from(self.import_path_input.trim()).join(rel));
@@ -1816,6 +1824,20 @@ impl FurcadiaApp {
             return;
         };
         thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                let script = format!(
+                    "(New-Object System.Media.SoundPlayer '{}').PlaySync()",
+                    path.display().to_string().replace('\'', "''")
+                );
+                let _ = furcadia_client::sys::command("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            #[cfg(not(target_os = "windows"))]
             for (bin, args) in [
                 ("pw-play", Vec::<&str>::new()),
                 ("paplay", vec![]),
@@ -1973,6 +1995,26 @@ impl FurcadiaApp {
         let title = title.to_owned();
         let body = body.to_owned();
         thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                let esc = |s: &str| s.replace('\'', "''");
+                let script = format!(
+                    "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; \
+                     $n = New-Object System.Windows.Forms.NotifyIcon; \
+                     $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; \
+                     $n.ShowBalloonTip(5000, '{}', '{}', [System.Windows.Forms.ToolTipIcon]::None); \
+                     Start-Sleep -Seconds 6; $n.Dispose()",
+                    esc(&title),
+                    esc(&body)
+                );
+                let _ = furcadia_client::sys::command("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            #[cfg(not(target_os = "windows"))]
             let _ = std::process::Command::new("notify-send")
                 .args(["-a", "Furcadia", &title, &body])
                 .stdin(std::process::Stdio::null())
@@ -2053,11 +2095,24 @@ impl FurcadiaApp {
     }
 
     fn browse_import_directory(&mut self) {
-        let out = std::process::Command::new("zenity")
+        #[cfg(target_os = "windows")]
+        let out = furcadia_client::sys::command("powershell")
+            .args([
+                "-NoProfile",
+                "-STA",
+                "-Command",
+                "Add-Type -AssemblyName System.Windows.Forms; \
+                 $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+                 $d.Description = 'Select Furcadia Folder'; \
+                 if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }",
+            ])
+            .output();
+        #[cfg(not(target_os = "windows"))]
+        let out = furcadia_client::sys::command("zenity")
             .args(["--file-selection", "--directory", "--title=Select Furcadia Windows Folder"])
             .output()
             .or_else(|_| {
-                std::process::Command::new("kdialog")
+                furcadia_client::sys::command("kdialog")
                     .args(["--getexistingdirectory", "."])
                     .output()
             });
@@ -2208,6 +2263,8 @@ impl FurcadiaApp {
         self.chat_log = target.chat_log;
         self.whispers = target.whispers;
         self.active_chat_tab = target.active_chat_tab;
+        self.cookies_collected = None;
+        self.cookies_total = None;
         if self.current_dream_dir != target.current_dream_dir {
             self.clear_dream_patches();
             if let Some(dir) = target.current_dream_dir {
@@ -2990,7 +3047,17 @@ impl FurcadiaApp {
         x: usize,
         y: usize,
     ) -> Option<CachedSprite> {
-        let fid = resolve_floor_variant(floor_id, x, y);
+        let dream_overrides_floor = floor_id < 500
+            && self
+                .floors_cache
+                .dream_archive
+                .as_ref()
+                .is_some_and(|f| f.resolve_shape(floor_id, 0).is_some());
+        let fid = if dream_overrides_floor {
+            floor_id
+        } else {
+            resolve_floor_variant(floor_id, x, y)
+        };
         let use_legacy = !self.world.is_modern;
         if (209..=308).contains(&fid) && (use_legacy || self.floors2_cache.has_dream()) {
             if let Some(sp) = self
@@ -3674,6 +3741,13 @@ impl FurcadiaApp {
                     }
                 }
                 let plain = line.to_plain_text();
+                let (collected, total) = parse_cookie_counts(&plain);
+                if collected.is_some() {
+                    self.cookies_collected = collected;
+                }
+                if total.is_some() {
+                    self.cookies_total = total;
+                }
                 self.log_chat_line(&plain);
                 if let Some(peer) = extract_whisper_peer(&plain) {
                     self.log_whisper_line(&peer, &plain);
@@ -4168,7 +4242,7 @@ impl FurcadiaApp {
         let ctx_clone = ctx.clone();
         let current_ver = env!("CARGO_PKG_VERSION").to_owned();
         thread::spawn(move || {
-            let out = std::process::Command::new("curl")
+            let out = furcadia_client::sys::command("curl")
                 .args([
                     "-fsSL",
                     "-H",
@@ -4729,7 +4803,7 @@ impl FurcadiaApp {
                         if let Some(dir) = default_logs_dir() {
                             let _ = std::fs::create_dir_all(&dir);
                             #[cfg(target_os = "windows")]
-                            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                            let _ = furcadia_client::sys::command("explorer").arg(&dir).spawn();
                             #[cfg(not(target_os = "windows"))]
                             let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
                         }
@@ -6105,6 +6179,21 @@ impl FurcadiaApp {
                                         self.trigger_play();
                                     }
                                 });
+                                if self.cookies_collected.is_some() || self.cookies_total.is_some() {
+                                    let mut txt = String::from("🍪");
+                                    if let Some(c) = self.cookies_collected {
+                                        txt.push_str(&format!(" {c} held"));
+                                    }
+                                    if let Some(t) = self.cookies_total {
+                                        txt.push_str(&format!(" · {t} all-time"));
+                                    }
+                                    ui.label(
+                                        RichText::new(txt)
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(235, 190, 120)),
+                                    )
+                                    .on_hover_text("Cookies reported by the server (updates when the server sends cookie info)");
+                                }
                             });
                         });
 
@@ -8324,8 +8413,18 @@ impl FurcadiaApp {
             }
 
             let portal_state = portal_states.get(&(tile.x as u16, tile.y as u16)).copied();
+            let dream_overrides_item = tile.item_id == 128
+                && self
+                    .items_cache
+                    .dream_archive
+                    .as_ref()
+                    .is_some_and(|f| f.resolve_shape(tile.item_id, 0).is_some());
             let eff_item = if tile.item_id > 0 {
-                resolve_item_variant(tile.item_id, tile.x, tile.y)
+                if dream_overrides_item {
+                    tile.item_id
+                } else {
+                    resolve_item_variant(tile.item_id, tile.x, tile.y)
+                }
             } else {
                 0
             };
@@ -9116,10 +9215,16 @@ impl FurcadiaApp {
                             {
                                 if ui
                                     .small_button("🍪 Cookie")
-                                    .on_hover_text(format!("Give a cookie to {display_name}"))
+                                    .on_hover_text(format!(
+                                        "Give a cookie to {display_name} (uses one of your daily cookies; run `info` to check how many you have)"
+                                    ))
                                     .clicked()
                                 {
-                                    self.send_raw_cmd(&format!("give-cookie {}", snapshot.short_name));
+                                    self.send_raw_cmd(&format!("make-cookie {}", snapshot.short_name));
+                                    self.push_system_line(
+                                        "emit",
+                                        &format!("[Cookie] Offering a cookie to {display_name}..."),
+                                    );
                                 }
                                 ui.menu_button("🎁 Gift", |ui| {
                                     for (lbl, cmd) in [
@@ -10109,6 +10214,28 @@ fn tile_to_screen(x: f32, y: f32, tile_w: f32, tile_h: f32) -> Vec2 {
     Vec2::new(sx, sy)
 }
 
+/// Parses server cookie reports such as `Cookie bank has currently collected: 3` and
+/// `All-time Cookie total: 12`, returning `(collected, all_time_total)`.
+fn parse_cookie_counts(plain: &str) -> (Option<u32>, Option<u32>) {
+    let lower = plain.to_ascii_lowercase();
+    if !lower.contains("cookie") {
+        return (None, None);
+    }
+    let after = |needle: &str| -> Option<u32> {
+        let idx = lower.find(needle)? + needle.len();
+        let digits: String = lower[idx..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    };
+    (
+        after("currently collected:"),
+        after("all-time cookie total:"),
+    )
+}
+
 fn extract_whisper_peer(plain: &str) -> Option<String> {
     let s = plain.trim();
     if let Some(idx) = s.find(" whispers,") {
@@ -10832,7 +10959,7 @@ fn run_hunspell_check(
     if active.is_empty() {
         return Vec::new();
     }
-    let mut cmd = std::process::Command::new("hunspell");
+    let mut cmd = furcadia_client::sys::command("hunspell");
     cmd.args(["-d", &dic, "-a"]);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -11194,7 +11321,7 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                             .filter(|c| c.is_ascii_alphanumeric())
                             .collect::<String>();
                         let dl_path = dreams_dir.join(format!("{safe_name}_{suffix}.tmp"));
-                        let curl_out = std::process::Command::new("curl")
+                        let curl_out = furcadia_client::sys::command("curl")
                             .args(["-fsSL", "--max-time", "25", "-o"])
                             .arg(&dl_path)
                             .arg(&url)
@@ -11340,7 +11467,7 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                         let url = format!(
                             "https://apollo.furcadia.com/species{srv}/Avatar{avatar_id}.zip"
                         );
-                        let mut cmd = std::process::Command::new("curl");
+                        let mut cmd = furcadia_client::sys::command("curl");
                         cmd.args(["-fsSL", "--max-time", "25"]);
                         if let Some(ref existing) = if_newer_than {
                             if existing.is_file() {
@@ -11430,7 +11557,7 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                             .and_then(|p| std::fs::read(p).ok())
                             .filter(|b| !b.is_empty())
                             .or_else(|| {
-                                let out = std::process::Command::new("curl")
+                                let out = furcadia_client::sys::command("curl")
                                     .args(["-fsSL", "--max-time", "10"])
                                     .arg(&url)
                                     .output()
@@ -11794,14 +11921,14 @@ fn decompress_furcadia_lzw(src: &[u8]) -> Option<Vec<u8>> {
 
 fn extract_zip_archive(zip_path: &std::path::Path, dest_dir: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let out = std::process::Command::new("tar")
+    let out = furcadia_client::sys::command("tar")
         .arg("-xf")
         .arg(zip_path)
         .arg("-C")
         .arg(dest_dir)
         .output();
     #[cfg(not(target_os = "windows"))]
-    let out = std::process::Command::new("unzip")
+    let out = furcadia_client::sys::command("unzip")
         .args(["-oq"])
         .arg(zip_path)
         .arg("-d")
@@ -11937,6 +12064,19 @@ mod tests {
         let fallback = parse_chat_line(plain);
         let formatted = format_whisper_tab_line("Amala|Devi", "Alty Bunnie", plain, &fallback);
         assert_eq!(formatted.to_plain_text(), "Alty Bunnie shivers and waves.");
+    }
+
+    #[test]
+    fn cookie_counts_parse_server_reports() {
+        assert_eq!(
+            parse_cookie_counts("[@cookie] Cookie bank has currently collected: 7"),
+            (Some(7), None)
+        );
+        assert_eq!(
+            parse_cookie_counts("[@cookie] All-time Cookie total: 42"),
+            (None, Some(42))
+        );
+        assert_eq!(parse_cookie_counts("hello world"), (None, None));
     }
 
     #[test]
