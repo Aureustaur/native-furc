@@ -99,32 +99,26 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.6
-            - In-app **Download & Install** updater (launches Inno Setup on Windows; uses `pkexec` for `.deb` / `.pkg.tar.zst` on Linux)
-            - Configurable dice roll button in Settings (`1d6`, `1d20`, `1d100`, `2d6`, or custom) and fix `roll` command sending as spoken chat
-            - Display your custom portrait in the upper character card when loaded
-            - Rebuilt **D: DIGO** and **E: DIGO** tabs with labeled Digo Market toggles (wings, mythicals, Ferians, Nobles) and Digo magic/abilities
-            - Added **Ignore / Unignore** to player right-click menus
-            - Fixed off-screen tile culling so large trees, roofs, and dream effects poking into view render properly (including in Chat View)
-            - Auto-load previous whisper logs (in grayed font) when opening a whisper tab, plus horizontally scrollable whisper tabs and moved `↗ Pop Out` to the whisper action bar
-            - Renamed `av` counter to `Visible` and centered the Bear Built logo in the README
+            ### What's New in v1.0.7
+            - Improved Windows and Wine import for chat session HTML files and whisper logs, with character and peer names mapped into the native log folders.
+            - First-time setup now checks common Furcadia locations and offers to import existing assets, Pounce data, and logs.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.0.6-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.0.7-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.6_amd64.deb
+            sudo apt install ./furcadia-native_1.0.7_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.6-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.0.7-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

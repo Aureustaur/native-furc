@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::assets::AssetLocator;
+use crate::chat::unescape_html;
 use crate::logs::default_logs_dir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +135,112 @@ fn find_child_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Finds the Windows Furcadia `Logs` directory containing a candidate log file.
+/// Furcadia commonly stores one file per character directly in `Logs`, while
+/// some installations/tools organize files into character subdirectories.
+fn logs_root_for(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("logs"))
+        })
+        .map(Path::to_path_buf)
+}
+
+fn imported_log_destination(path: &Path, logs_root: &Path, dest_root: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(logs_root).ok()?;
+    // Flat text logs belong to the selected character's destination folder.
+    if relative.components().count() == 1 {
+        return Some(dest_root.join(path.file_name()?));
+    }
+    Some(dest_root.join(relative))
+}
+
+fn compact_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn normalize_windows_name(name: &str) -> String {
+    name.trim()
+        .trim_end_matches("_logfile")
+        .replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn whisper_peer_name(contents: &str, target_character: &str, fallback: &str) -> String {
+    let target = compact_name(target_character);
+    for line in contents.lines() {
+        let line = line.trim();
+        let without_time = if line.starts_with('(') {
+            line.find(") ").map(|idx| &line[idx + 2..]).unwrap_or(line)
+        } else if line.len() > 18 && line.as_bytes().get(2) == Some(&b'/') {
+            &line[18..]
+        } else {
+            line
+        };
+        if let Some((speaker, _)) = without_time.split_once(':') {
+            let speaker = speaker.trim();
+            if !speaker.is_empty() && compact_name(speaker) != target {
+                return speaker.to_owned();
+            }
+        }
+    }
+    normalize_windows_name(fallback)
+}
+
+fn decode_windows_log(bytes: &[u8]) -> String {
+    // Furcadia's legacy HTML logs declare ISO-8859-1; Windows commonly writes
+    // the compatible Windows-1252 punctuation bytes in that range.
+    const CP1252: [char; 32] = [
+        '€', '\u{0081}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{008d}', 'Ž',
+        '\u{008f}', '\u{0090}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ',
+        '\u{009d}', 'ž', 'Ÿ',
+    ];
+    bytes
+        .iter()
+        .map(|byte| match *byte {
+            0x80..=0x9f => CP1252[(*byte - 0x80) as usize],
+            byte => byte as char,
+        })
+        .collect()
+}
+
+fn convert_windows_html_log(contents: &str) -> String {
+    let body = contents
+        .split_once("<body")
+        .and_then(|(_, rest)| rest.split_once('>').map(|(_, body)| body))
+        .unwrap_or(contents);
+    let mut output = String::new();
+    let mut in_tag = false;
+    for ch in body.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                if in_tag {
+                    output.push('\n');
+                }
+                in_tag = false;
+            }
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+    unescape_html(&output)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn collect_windows_user_data_roots(base: &Path, out: &mut Vec<PathBuf>) {
     if let Some(users_dir) = find_child_ci(base, "users") {
         // Direct layout: `users/appdata/local/Dragon's Eye Productions`
@@ -196,10 +303,59 @@ pub fn discover_windows_companion_dirs(src: &Path) -> Vec<PathBuf> {
     roots
 }
 
+/// Finds common Windows Furcadia data locations without requiring the user to
+/// browse for them first. Results are limited to known Documents, install, and
+/// Wine-prefix paths rather than recursively scanning the whole home folder.
+pub fn discover_default_windows_furcadia_dirs() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut homes = Vec::new();
+    for var in ["HOME", "USERPROFILE"] {
+        if let Some(home) = std::env::var_os(var).map(PathBuf::from) {
+            if !homes.contains(&home) {
+                homes.push(home);
+            }
+        }
+    }
+    for home in homes {
+        for candidate in [
+            home.join("Documents/Furcadia"),
+            home.join("My Documents/Furcadia"),
+            home.join("OneDrive/Documents/Furcadia"),
+            home.join("Furcadia"),
+            home.join(".wine/drive_c/Program Files/Furcadia"),
+            home.join(".wine/drive_c/Program Files (x86)/Furcadia"),
+        ] {
+            push_unique_dir(&mut roots, candidate);
+        }
+        let wine_users = home.join(".wine/drive_c/users");
+        if let Ok(users) = fs::read_dir(&wine_users) {
+            for user in users.flatten() {
+                let user_dir = user.path();
+                push_unique_dir(&mut roots, user_dir.join("Documents/Furcadia"));
+                push_unique_dir(&mut roots, user_dir.join("My Documents/Furcadia"));
+                push_unique_dir(
+                    &mut roots,
+                    user_dir.join("AppData/Local/Dragon's Eye Productions"),
+                );
+            }
+        }
+    }
+    for var in ["LOCALAPPDATA", "APPDATA"] {
+        if let Some(base) = std::env::var_os(var).map(PathBuf::from) {
+            push_unique_dir(&mut roots, base.join("Dragon's Eye Productions"));
+        }
+    }
+    roots
+}
+
 /// Scans `src` (Windows `Program Files (x86)/Furcadia`, `Documents/Furcadia`, or Wine prefix)
 /// and any sibling `AppData/Local/Dragon's Eye Productions` / `Documents/Furcadia` folders
 /// and imports assets, Pounce watchlists, character `.ini` profiles, and chat logs.
-pub fn import_windows_furcadia_dir(src: &Path, existing_watchlist: &[String]) -> WinImportSummary {
+pub fn import_windows_furcadia_dir(
+    src: &Path,
+    existing_watchlist: &[String],
+    target_character: &str,
+) -> WinImportSummary {
     let mut summary = WinImportSummary::default();
     if !src.exists() {
         summary
@@ -220,10 +376,11 @@ pub fn import_windows_furcadia_dir(src: &Path, existing_watchlist: &[String]) ->
         .into_iter()
         .map(|p| (p, 0))
         .collect();
-    let logs_dest = default_logs_dir().map(|d| d.join("imported"));
+    let logs_dest =
+        default_logs_dir().map(|d| d.join(crate::logs::sanitize_segment(target_character)));
 
     while let Some((dir, depth)) = stack.pop() {
-        if depth > 5 {
+        if depth > 12 {
             continue;
         }
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -257,18 +414,74 @@ pub fn import_windows_furcadia_dir(src: &Path, existing_watchlist: &[String]) ->
                         summary.characters_found.push(ch);
                     }
                 }
-            } else if (lower.ends_with(".txt") || lower.ends_with(".log"))
-                && path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.eq_ignore_ascii_case("logs"))
-            {
-                if let Some(dest_dir) = &logs_dest {
-                    if fs::create_dir_all(dest_dir).is_ok()
-                        && fs::copy(&path, dest_dir.join(fname)).is_ok()
-                    {
-                        summary.logs_copied += 1;
+            } else if lower.ends_with(".txt") || lower.ends_with(".log") {
+                if let (Some(dest_root), Some(logs_root)) = (&logs_dest, logs_root_for(&path)) {
+                    let is_flat_whisper = path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case("whispers"));
+                    let dest_path = if is_flat_whisper {
+                        let bytes = fs::read(&path).ok();
+                        let peer = bytes
+                            .as_deref()
+                            .map(decode_windows_log)
+                            .map(|contents| {
+                                whisper_peer_name(
+                                    &contents,
+                                    target_character,
+                                    path.file_stem().and_then(|s| s.to_str()).unwrap_or(fname),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                normalize_windows_name(
+                                    path.file_stem().and_then(|s| s.to_str()).unwrap_or(fname),
+                                )
+                            });
+                        Some(dest_root.join("whispers").join(format!("{peer}.txt")))
+                    } else {
+                        imported_log_destination(&path, &logs_root, dest_root)
+                    };
+                    if let Some(dest_path) = dest_path {
+                        if let Some(parent) = dest_path.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        if fs::copy(&path, dest_path).is_ok() {
+                            summary.logs_copied += 1;
+                        }
+                    }
+                }
+            } else if lower.ends_with(".html") {
+                if let (Some(dest_root), Some(logs_root)) = (&logs_dest, logs_root_for(&path)) {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        if let Some((character, suffix)) = stem.rsplit_once("_logfile") {
+                            if !character.is_empty() && suffix.len() >= 8 {
+                                if let Ok(bytes) = fs::read(&path) {
+                                    let converted =
+                                        convert_windows_html_log(&decode_windows_log(&bytes));
+                                    let dest = dest_root
+                                        .join(crate::logs::sanitize_segment(
+                                            &normalize_windows_name(character),
+                                        ))
+                                        .join(format!("{stem}.txt"));
+                                    if let Some(parent) = dest.parent() {
+                                        let _ = fs::create_dir_all(parent);
+                                    }
+                                    if fs::write(dest, converted).is_ok() {
+                                        summary.logs_copied += 1;
+                                    }
+                                }
+                            }
+                        } else if let Some(dest) =
+                            imported_log_destination(&path, &logs_root, dest_root)
+                        {
+                            if let Some(parent) = dest.parent() {
+                                let _ = fs::create_dir_all(parent);
+                            }
+                            if fs::copy(&path, dest).is_ok() {
+                                summary.logs_copied += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -295,7 +508,10 @@ mod tests {
         let existing = vec!["Gemeinhardt".to_owned()];
         let text = "FurcadiaOn\t1.00\nShowOffline\t0\nWindowPos\t1\t2\t3\t4\t0\nFurre\tGemeinhardt\t\t1\t1\t0\nFurre\tHeavy Rain\t\t1\t1\t0\nFurre\tViolet Paws \t\t1\t0\t1\n";
         let added = parse_pounce_file_contents(text, &existing);
-        assert_eq!(added, vec!["Heavy Rain".to_owned(), "Violet Paws".to_owned()]);
+        assert_eq!(
+            added,
+            vec!["Heavy Rain".to_owned(), "Violet Paws".to_owned()]
+        );
     }
 
     #[test]

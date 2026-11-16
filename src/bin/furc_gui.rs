@@ -20,7 +20,7 @@ use furcadia_client::{
         list_log_files, load_whisper_log, prune_old_logs,
     },
     parse_chat_line, unescape_html,
-    win_import::import_windows_furcadia_dir,
+    win_import::{discover_default_windows_furcadia_dirs, import_windows_furcadia_dir},
     AccountInfo, AssetLocator, Avatar, AvatarAppearance, ChatLine, ChatSpan, CharacterSummary,
     ClientCommand, ClientConfig, ConnectionConfig, FoxArchive, FoxAvatarShape, FoxFrame, FoxLayer,
     FurcadiaClient, FurcadiaMap, LookedPlayerInfo, NewsEntry, OnlineStatus, Palette, PounceEvent,
@@ -1295,6 +1295,7 @@ struct FurcadiaApp {
     show_debug_packets: bool,
     show_avatar_names: bool,
     import_path_input: String,
+    import_source_detected: bool,
 
     watch_input: String,
     pounce: PounceMonitor,
@@ -1430,6 +1431,12 @@ impl FurcadiaApp {
 
         let cfg = ClientConfig::load_default();
         let assets = AssetLocator::discover();
+        let discovered_import_dirs = discover_default_windows_furcadia_dirs();
+        let import_source_detected = !discovered_import_dirs.is_empty();
+        let import_path_input = discovered_import_dirs
+            .first()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "Furcadia Windows/program Files (x86)/Furcadia".to_owned());
         let palette = assets.load_default_palette().unwrap_or_default();
         let floors_cache =
             FoxSpriteCache::load_with_legacy(&assets, "floors.fox", Some("floors.fox"), "floor");
@@ -1619,7 +1626,8 @@ impl FurcadiaApp {
             afk_active: false,
             show_debug_packets: cfg.show_debug_packets,
             show_avatar_names: cfg.show_avatar_names,
-            import_path_input: "Furcadia Windows/program Files (x86)/Furcadia".to_owned(),
+            import_path_input,
+            import_source_detected,
             watch_input: String::new(),
             pounce,
             pounce_visible: cfg.pounce_visible,
@@ -2097,6 +2105,9 @@ impl FurcadiaApp {
             .self_name
             .as_deref()
             .or_else(|| self.selected_character().map(|c| c.name.as_str()))
+            .or_else(|| {
+                (!self.saved_character.trim().is_empty()).then_some(self.saved_character.as_str())
+            })
             .unwrap_or("Unknown")
             .to_owned()
     }
@@ -2132,7 +2143,7 @@ impl FurcadiaApp {
     fn run_windows_import(&mut self) {
         let src = std::path::PathBuf::from(self.import_path_input.trim());
         let existing: Vec<String> = self.pounce.entries().map(|e| e.name.clone()).collect();
-        let summary = import_windows_furcadia_dir(&src, &existing);
+        let summary = import_windows_furcadia_dir(&src, &existing, &self.active_character_name());
         if summary.assets_copied > 0 {
             self.assets = AssetLocator::discover();
             self.fonts_configured = false;
@@ -4654,35 +4665,59 @@ impl FurcadiaApp {
                 );
 
                 ui.add_space(10.0);
-                ui.label(RichText::new("Local Furcadia Assets").strong().color(accent));
+                ui.label(RichText::new("Import Existing Furcadia Data").strong().color(accent));
+                ui.label(
+                    RichText::new(
+                        "This imports available patches/assets, your Pounce watchlist, and chat and whisper logs. It also scans character INI files. The app checks Documents/Furcadia, My Documents/Furcadia, OneDrive/Documents/Furcadia, common Furcadia install folders, and Wine Documents/AppData folders.",
+                    )
+                    .size(11.5)
+                    .color(Color32::LIGHT_GRAY),
+                );
                 if let Some(root) = &self.assets.root {
                     ui.colored_label(
                         Color32::from_rgb(130, 225, 145),
-                        format!("Detected assets: {}", root.display()),
+                        format!("Local assets found: {}", root.display()),
+                    );
+                }
+                if self.import_source_detected {
+                    ui.colored_label(
+                        Color32::from_rgb(130, 225, 145),
+                        format!("Existing Furcadia data found: {}", self.import_path_input),
                     );
                 } else {
                     ui.label(
                         RichText::new(
-                            "No local Furcadia installation detected yet. You can import maps/patches from Windows Furcadia below or later in Settings.",
+                            "No Furcadia data found in the usual Documents or Wine folders. Choose your Windows Furcadia folder to import existing files.",
                         )
                         .size(11.5)
                         .color(Color32::LIGHT_GRAY),
                     );
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.import_path_input)
-                                .desired_width(240.0),
-                        );
-                        if ui.button("Browse...").clicked() {
-                            self.browse_import_directory();
-                        }
-                        if ui.button("Import").clicked() {
-                            self.run_windows_import();
-                        }
-                    });
-                    if let Some(report) = &self.import_report {
-                        ui.colored_label(Color32::from_rgb(130, 225, 145), report);
+                }
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.import_path_input)
+                            .desired_width(270.0),
+                    );
+                    if ui.button("Browse...").clicked() {
+                        self.browse_import_directory();
                     }
+                });
+                ui.horizontal(|ui| {
+                    let import_path_exists = std::path::Path::new(self.import_path_input.trim()).is_dir();
+                    if ui
+                        .add_enabled(import_path_exists, egui::Button::new("Yes, import now"))
+                        .clicked()
+                    {
+                        self.run_windows_import();
+                    }
+                    if ui.button("Not now").clicked() {
+                        self.import_report = Some(
+                            "You can import later from Settings → Import Windows Furcadia & Pounce Data.".to_owned(),
+                        );
+                    }
+                });
+                if let Some(report) = &self.import_report {
+                    ui.colored_label(Color32::from_rgb(130, 225, 145), report);
                 }
 
                 ui.add_space(12.0);

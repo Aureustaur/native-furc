@@ -18,7 +18,7 @@ pub fn default_logs_dir() -> Option<PathBuf> {
     Some(base.join("furcadia-native").join("logs"))
 }
 
-fn sanitize_segment(raw: &str) -> String {
+pub(crate) fn sanitize_segment(raw: &str) -> String {
     let cleaned: String = raw
         .trim()
         .chars()
