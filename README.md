@@ -1,13 +1,25 @@
 <div align="center">
-  <img src="native-icon.png" alt="Furcadia Native Client icon" width="112" />
+  <img src="native-icon.png" alt="Furcadia Native Client icon" width="96" />
   <h1>Furcadia Native Client</h1>
-  <p>A native Rust client for exploring Furcadia dreams, chatting, and keeping up with the people you know.</p>
+  <p><strong>A native desktop client for exploring Furcadia dreams, chatting, and keeping up with the people you know.</strong></p>
   <p>
-    <a href="https://github.com/morganlowe/native-furcadia/releases">Download the latest release</a>
+    <img src="https://img.shields.io/github/v/release/morganlowe/native-furcadia?label=Version&style=flat-square" alt="Latest release" />
+    <img src="https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-blue?style=flat-square" alt="CC BY-NC-SA 4.0 license" />
+    <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey?style=flat-square" alt="Linux and Windows" />
+    <img src="https://img.shields.io/badge/Stack-Rust%20%7C%20egui-orange?style=flat-square&logo=rust&logoColor=white" alt="Built with Rust and egui" />
+  </p>
+  <p>
+    <a href="https://github.com/morganlowe/native-furcadia/releases">Releases</a>
     ·
-    <a href="https://github.com/morganlowe/native-furcadia/issues">Report an issue</a>
+    <a href="https://github.com/morganlowe/native-furcadia/issues">Report a Bug</a>
+    ·
+    <a href="https://github.com/morganlowe/native-furcadia/issues">Request a Feature</a>
+    ·
+    <a href="https://github.com/morganlowe/native-furcadia/security">Security</a>
   </p>
 </div>
+
+---
 
 ![Furcadia Native Client in a dream](furc.png)
 
