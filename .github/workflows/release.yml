@@ -100,29 +100,36 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.10
-            - Keep character picker colors in sync with the live appearance and resolve custom portraits using server-provided portrait IDs.
-            - Add an official web client recovery link for the Furcadia ID error, while retaining native retry.
-            - Keep arrow keys in focused text fields for caret navigation instead of moving the character.
-            - Fix the Linux Wayland window icon by matching the app ID to the installed desktop entry.
-            - Refresh cookie counts after login and after offering a cookie.
+            ### What's New in v1.0.11
+            - Sync preferences and logs through a folder managed by Nextcloud, Google Drive, Dropbox, or another file sync provider.
+            - Keep login credentials on each computer and store logs in separate per-device folders to avoid write conflicts.
+            - Combine per-device logs in the Log Viewer and copy existing logs when enabling or disabling sync.
+
+            ### Set up folder sync
+            1. Install and sign in to your preferred sync provider on each computer.
+            2. On the first computer, open **Settings → Logs**, choose a dedicated folder inside your provider's synced area, and select **Use Folder**.
+            3. Wait for the provider to finish syncing the folder and its `settings-<device>.ini` file.
+            4. On each other computer, open **Settings → Logs**, choose that same synced folder, and select **Use Folder**.
+            5. Restart the client on those computers to load the newest shared preferences.
+
+            The client creates `logs/<device>/` for each computer. Preferences are selected from the newest settings snapshot at startup. Let the provider finish syncing before launching the client on another computer. Passwords, email addresses, and auto-login credentials remain local to each computer.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.0.10-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.0.11-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.10_amd64.deb
+            sudo apt install ./furcadia-native_1.0.11_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.10-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.0.11-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

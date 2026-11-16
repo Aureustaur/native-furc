@@ -39,6 +39,7 @@ Furcadia Native Client is an independent desktop client for Furcadia, built in R
 - Use main chat, emotes, whispers, clickable links, and character-colored names.
 - Reorder character and whisper tabs, and open incoming whispers in their own tabs.
 - Keep local chat and whisper logs, with configurable logging and retention.
+- Optionally sync preferences and logs through a folder managed by Nextcloud, Google Drive, Dropbox, or another sync provider. Choose the same folder in **Settings → Logs** on each computer. Preferences load at startup, credentials remain on each device, and logs use separate per-device folders to avoid simultaneous writes to one file. Let your provider finish syncing before opening the client on another computer.
 - Follow characters with the Pounce watchlist and receive configurable notifications for pounces, whispers, and mentions.
 - Read Furcadia news and review online status from the client.
 

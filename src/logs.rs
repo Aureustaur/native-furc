@@ -5,8 +5,15 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Returns `~/.local/share/furcadia-native/logs` (or Windows `%LOCALAPPDATA%\furcadia-native\logs`).
-pub fn default_logs_dir() -> Option<PathBuf> {
+/// Returns the shared logs root, or the normal per-user logs folder when sync is disabled.
+pub fn default_logs_root() -> Option<PathBuf> {
+    if let Some(config_path) = crate::config::ClientConfig::default_path() {
+        if let Ok(config) = crate::config::ClientConfig::load(&config_path) {
+            if !config.sync_folder.trim().is_empty() {
+                return Some(PathBuf::from(config.sync_folder).join("logs"));
+            }
+        }
+    }
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
@@ -16,6 +23,54 @@ pub fn default_logs_dir() -> Option<PathBuf> {
             std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("AppData/Local"))
         })?;
     Some(base.join("furcadia-native").join("logs"))
+}
+
+/// Returns this device's log folder. Synced installs write beneath a unique device directory.
+pub fn default_logs_dir() -> Option<PathBuf> {
+    let root = default_logs_root()?;
+    if let Some(config_path) = crate::config::ClientConfig::default_path() {
+        if let Ok(config) = crate::config::ClientConfig::load(&config_path) {
+            if !config.sync_folder.trim().is_empty() {
+                let device = if config.sync_device_id.trim().is_empty() {
+                    "device-unknown"
+                } else {
+                    config.sync_device_id.trim()
+                };
+                return Some(root.join(device));
+            }
+        }
+    }
+    Some(root)
+}
+
+/// Copies existing logs into a new destination without replacing cloud-synced files.
+pub fn copy_logs_if_missing(source: &Path, destination: &Path) -> io::Result<usize> {
+    if source == destination || destination.starts_with(source) || source.starts_with(destination) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source and destination log directories overlap",
+        ));
+    }
+    if !source.is_dir() {
+        return Ok(0);
+    }
+    let mut copied = 0;
+    let mut stack = vec![(source.to_path_buf(), destination.to_path_buf())];
+    while let Some((src, dst)) = stack.pop() {
+        fs::create_dir_all(&dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                stack.push((src_path, dst_path));
+            } else if !dst_path.exists() {
+                fs::copy(src_path, dst_path)?;
+                copied += 1;
+            }
+        }
+    }
+    Ok(copied)
 }
 
 pub(crate) fn sanitize_segment(raw: &str) -> String {
@@ -109,38 +164,31 @@ pub fn load_whisper_log(
     if max_lines == 0 {
         return Vec::new();
     }
-    let whispers_dir = base_dir.join(sanitize_segment(character)).join("whispers");
     let peer_file = sanitize_segment(peer);
-    let exact = whispers_dir.join(format!("{peer_file}.txt"));
-    let path = if exact.is_file() {
-        exact
-    } else if let Ok(entries) = fs::read_dir(&whispers_dir) {
-        let target_stem = peer_file.to_ascii_lowercase();
-        let found = entries.flatten().map(|e| e.path()).find(|p| {
-            p.is_file()
-                && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
-                && p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.to_ascii_lowercase() == target_stem)
-        });
-        match found {
-            Some(p) => p,
-            None => return Vec::new(),
+    let mut lines = Vec::new();
+    for char_dir in character_log_dirs(base_dir, character) {
+        let whispers_dir = char_dir.join("whispers");
+        if let Ok(entries) = fs::read_dir(whispers_dir) {
+            for path in entries.flatten().map(|e| e.path()).filter(|p| {
+                p.is_file()
+                    && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+                    && p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.eq_ignore_ascii_case(&peer_file))
+            }) {
+                if let Ok(bytes) = fs::read(path) {
+                    lines.extend(
+                        String::from_utf8_lossy(&bytes)
+                            .lines()
+                            .map(str::trim_end)
+                            .filter(|l| !l.is_empty())
+                            .map(ToOwned::to_owned),
+                    );
+                }
+            }
         }
-    } else {
-        return Vec::new();
-    };
-
-    let Ok(bytes) = fs::read(&path) else {
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(&bytes);
-    let mut lines: Vec<String> = text
-        .lines()
-        .map(str::trim_end)
-        .filter(|l| !l.is_empty())
-        .map(str::to_owned)
-        .collect();
+    }
+    lines.sort();
     if lines.len() > max_lines {
         lines.drain(..lines.len() - max_lines);
     }
@@ -188,20 +236,43 @@ pub fn list_log_characters(base_dir: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(base_dir) else {
         return Vec::new();
     };
-    let mut out: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
+    let entries: Vec<_> = entries.flatten().collect();
+    let is_synced_root = entries.iter().any(|e| {
+        e.file_name().to_string_lossy().starts_with("settings-")
+            && e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("ini"))
+    });
+    let mut out = Vec::new();
+    if is_synced_root {
+        for device_dir in entries.iter().filter(|e| e.path().is_dir()) {
+            if let Ok(chars) = fs::read_dir(device_dir.path()) {
+                out.extend(
+                    chars
+                        .flatten()
+                        .filter(|e| e.path().is_dir())
+                        .filter_map(|e| e.file_name().into_string().ok()),
+                );
+            }
+        }
+    } else {
+        out.extend(
+            entries
+                .iter()
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok()),
+        );
+    }
     out.sort();
+    out.dedup();
     out
 }
 
 /// Lists all `.txt`/`.log` files for a character (including `whispers/`), newest first.
 pub fn list_log_files(base_dir: &Path, character: &str) -> Vec<PathBuf> {
-    let char_dir = base_dir.join(sanitize_segment(character));
     let mut out = Vec::new();
-    let mut stack = vec![char_dir];
+    let mut stack = character_log_dirs(base_dir, character);
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -222,6 +293,32 @@ pub fn list_log_files(base_dir: &Path, character: &str) -> Vec<PathBuf> {
     out.sort();
     out.reverse();
     out
+}
+
+fn character_log_dirs(base_dir: &Path, character: &str) -> Vec<PathBuf> {
+    let name = sanitize_segment(character);
+    let Ok(entries) = fs::read_dir(base_dir) else {
+        return Vec::new();
+    };
+    let entries: Vec<_> = entries.flatten().collect();
+    let is_synced_root = entries.iter().any(|e| {
+        e.file_name().to_string_lossy().starts_with("settings-")
+            && e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("ini"))
+    });
+    if is_synced_root {
+        entries
+            .iter()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.path().join(&name))
+            .filter(|p| p.is_dir())
+            .collect()
+    } else {
+        let path = base_dir.join(name);
+        path.is_dir().then_some(path).into_iter().collect()
+    }
 }
 
 #[cfg(test)]

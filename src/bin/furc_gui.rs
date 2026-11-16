@@ -16,7 +16,7 @@ use eframe::egui::{
 use furcadia_client::{
     decode_fsh_sprites, extract_fr01_to_dir, fetch_account_characters, fetch_news, is_fr01,
     logs::{
-        append_chat_log, append_whisper_log, default_logs_dir, list_log_characters,
+        append_chat_log, append_whisper_log, default_logs_dir, default_logs_root, list_log_characters,
         list_log_files, load_whisper_log, prune_old_logs,
     },
     parse_chat_line, unescape_html,
@@ -1373,6 +1373,10 @@ struct FurcadiaApp {
     applied_font_family: String,
     applied_font_size: u16,
     settings_open: bool,
+    sync_folder: String,
+    sync_folder_input: String,
+    sync_folder_message: Option<String>,
+    sync_device_id: String,
     log_viewer_open: bool,
     log_viewer_char: String,
     log_viewer_files: Vec<std::path::PathBuf>,
@@ -1699,6 +1703,10 @@ impl FurcadiaApp {
             applied_font_family: String::new(),
             applied_font_size: 0,
             settings_open: false,
+            sync_folder: cfg.sync_folder.clone(),
+            sync_folder_input: cfg.sync_folder.clone(),
+            sync_folder_message: None,
+            sync_device_id: cfg.sync_device_id.clone(),
             log_viewer_open: false,
             log_viewer_char: String::new(),
             log_viewer_files: Vec::new(),
@@ -1758,6 +1766,10 @@ impl FurcadiaApp {
     }
 
     fn save_config(&self) {
+        let _ = self.current_config().save_default();
+    }
+
+    fn current_config(&self) -> ClientConfig {
         let character = self
             .selected_character()
             .map(|c| c.name.clone())
@@ -1769,7 +1781,7 @@ impl FurcadiaApp {
             DreamTheme::KitterMagic => "KitterMagic",
             DreamTheme::FerianWylde => "FerianWylde",
         };
-        let cfg = ClientConfig {
+        ClientConfig {
             email: self.email.clone(),
             character,
             password: self.password.clone(),
@@ -1811,8 +1823,129 @@ impl FurcadiaApp {
             } else {
                 self.dice_roll.trim().to_owned()
             },
+            sync_folder: self.sync_folder.clone(),
+            sync_device_id: self.sync_device_id.clone(),
+            sync_updated_at: 0,
+        }
+    }
+
+    fn apply_sync_folder(&mut self) {
+        let requested = self.sync_folder_input.trim().to_owned();
+        let old_logs = default_logs_dir();
+        let mut cfg = self.current_config();
+
+        if requested.is_empty() {
+            cfg.sync_folder.clear();
+            if let Err(err) = cfg.save_local_default() {
+                self.sync_folder_message = Some(format!("Could not save settings: {err}"));
+            } else {
+                self.sync_folder.clear();
+                self.sync_folder_input.clear();
+                self.sync_folder_message = Some("Folder sync is turned off.".to_owned());
+                if let (Some(source), Some(destination)) = (old_logs, default_logs_dir()) {
+                    if source != destination {
+                        if let Err(err) =
+                            furcadia_client::logs::copy_logs_if_missing(&source, &destination)
+                        {
+                            self.sync_folder_message = Some(format!(
+                                "Sync is off, but some cloud logs could not be copied locally: {err}"
+                            ));
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        let requested_folder = expand_user_path(&requested);
+        if let Err(err) = std::fs::create_dir_all(&requested_folder) {
+            self.sync_folder_message = Some(format!("Could not open that folder: {err}"));
+            return;
+        }
+        let folder = match std::fs::canonicalize(&requested_folder) {
+            Ok(path) => path,
+            Err(err) => {
+                self.sync_folder_message = Some(format!("Could not resolve that folder: {err}"));
+                return;
+            }
         };
-        let _ = cfg.save_default();
+        if let Some(old) = old_logs.as_ref() {
+            let same_as_active = self.sync_folder_path() == Some(folder.clone());
+            if !same_as_active && (folder.starts_with(old) || old.starts_with(&folder)) {
+                self.sync_folder_message = Some(
+                    "Choose a dedicated cloud folder outside Furcadia's existing data folders."
+                        .to_owned(),
+                );
+                return;
+            }
+        }
+
+        cfg.sync_folder = folder.to_string_lossy().into_owned();
+        let has_shared_settings = cfg.has_shared_settings();
+        if let Err(err) = cfg.save_local_default() {
+            self.sync_folder_message = Some(format!("Could not save sync folder: {err}"));
+            return;
+        }
+        self.sync_folder = cfg.sync_folder.clone();
+        self.sync_folder_input = cfg.sync_folder.clone();
+
+        let mut message = if has_shared_settings {
+            "Connected. Restart Furcadia Native Client to load the newest synced settings."
+                .to_owned()
+        } else {
+            match cfg.save_default() {
+                Ok(()) => "Sync folder initialized with this computer's settings.".to_owned(),
+                Err(err) => format!("Folder selected, but settings could not be synced: {err}"),
+            }
+        };
+
+        if let (Some(source), Some(destination)) = (old_logs, default_logs_dir()) {
+            if source != destination {
+                match furcadia_client::logs::copy_logs_if_missing(&source, &destination) {
+                    Ok(count) if count > 0 => {
+                        message.push_str(&format!(" Copied {count} existing log files."));
+                    }
+                    Ok(_) => {}
+                    Err(err) => message.push_str(&format!(" Existing logs were not copied: {err}.")),
+                }
+            }
+        }
+        message.push_str(" Each device writes to its own logs folder; login credentials stay local.");
+        self.sync_folder_message = Some(message);
+    }
+
+    fn sync_folder_path(&self) -> Option<std::path::PathBuf> {
+        let value = self.sync_folder.trim();
+        (!value.is_empty()).then(|| std::path::PathBuf::from(value))
+    }
+
+    fn browse_sync_folder(&mut self) {
+        #[cfg(target_os = "windows")]
+        let out = furcadia_client::sys::command("powershell")
+            .args([
+                "-NoProfile",
+                "-STA",
+                "-Command",
+                "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Select a cloud-synced Furcadia folder'; if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }",
+            ])
+            .output();
+        #[cfg(not(target_os = "windows"))]
+        let out = furcadia_client::sys::command("zenity")
+            .args(["--file-selection", "--directory", "--title=Select a cloud-synced Furcadia folder"])
+            .output()
+            .or_else(|_| {
+                furcadia_client::sys::command("kdialog")
+                    .args(["--getexistingdirectory", "."])
+                    .output()
+            });
+        if let Ok(output) = out {
+            if output.status.success() {
+                let picked = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if !picked.is_empty() {
+                    self.sync_folder_input = picked;
+                }
+            }
+        }
     }
 
     fn find_extra_asset(&self, rel: &str) -> Option<std::path::PathBuf> {
@@ -2215,7 +2348,7 @@ impl FurcadiaApp {
 
     fn refresh_log_viewer_files(&mut self) {
         self.log_viewer_files.clear();
-        if let Some(dir) = default_logs_dir() {
+        if let Some(dir) = default_logs_root() {
             let chars = list_log_characters(&dir);
             if !chars.is_empty() && !chars.iter().any(|c| c == &self.log_viewer_char) {
                 self.log_viewer_char = chars[0].clone();
@@ -3850,7 +3983,7 @@ impl FurcadiaApp {
             return idx;
         }
         let mut session = WhisperSession::new(trimmed.to_owned());
-        if let Some(dir) = default_logs_dir() {
+        if let Some(dir) = default_logs_root() {
             session.history_lines =
                 load_whisper_log(&dir, &self.active_character_name(), trimmed, 200);
         }
@@ -5236,13 +5369,70 @@ impl FurcadiaApp {
                                 }
                             }
                         });
-                        if let Some(dir) = default_logs_dir() {
+                        if let Some(dir) = default_logs_root() {
                             ui.label(
                                 RichText::new(format!("Log directory: {}", dir.display()))
                                     .size(11.0)
                                     .color(Color32::GRAY),
                             );
                         }
+                        ui.separator();
+                        ui.label(RichText::new("Sync with a cloud folder").strong().color(accent));
+                        ui.label(
+                            RichText::new(
+                                "Use a folder already synced by Nextcloud, Google Drive, Dropbox, or another provider. Choose the same cloud folder on each computer.",
+                            )
+                            .size(11.5)
+                            .color(Color32::LIGHT_GRAY),
+                        );
+                        ui.label(
+                            RichText::new("The app creates settings-<device>.ini and logs/<device>/ inside this folder.")
+                                .size(11.0)
+                                .color(Color32::GRAY),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.sync_folder_input)
+                                    .hint_text("Path to a dedicated cloud-synced folder")
+                                    .desired_width((ui.available_width() - 142.0).max(120.0)),
+                            );
+                            if ui.button("Browse...").clicked() {
+                                self.browse_sync_folder();
+                            }
+                            if ui.button("Use Folder").clicked() {
+                                self.apply_sync_folder();
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Turn Off Sync").clicked() {
+                                self.sync_folder_input.clear();
+                                self.apply_sync_folder();
+                            }
+                            if !self.sync_folder.is_empty() {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Active: {}",
+                                        self.sync_folder
+                                    ))
+                                    .size(10.5)
+                                    .color(Color32::GRAY),
+                                );
+                            }
+                        });
+                        if let Some(message) = &self.sync_folder_message {
+                            ui.label(
+                                RichText::new(message)
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(180, 220, 180)),
+                            );
+                        }
+                        ui.label(
+                            RichText::new(
+                                "Set this folder on the first computer, wait for the provider to sync it, then choose that same cloud folder on each other computer and restart. The newest settings snapshot loads at startup. Login credentials stay local; per-device logs are combined in the Log Viewer.",
+                            )
+                            .size(11.0)
+                            .color(Color32::LIGHT_GRAY),
+                        );
                         if ui.button("Open Log Viewer").clicked() {
                             self.open_log_viewer();
                         }
@@ -5300,7 +5490,7 @@ impl FurcadiaApp {
                         self.refresh_log_viewer_files();
                     }
                     if ui.button("Open Logs Folder").clicked() {
-                        if let Some(dir) = default_logs_dir() {
+                        if let Some(dir) = default_logs_root() {
                             let _ = std::fs::create_dir_all(&dir);
                             #[cfg(target_os = "windows")]
                             let _ = furcadia_client::sys::command("explorer").arg(&dir).spawn();
@@ -5311,7 +5501,7 @@ impl FurcadiaApp {
                 });
                 ui.separator();
 
-                let chars = default_logs_dir()
+                let chars = default_logs_root()
                     .map(|d| list_log_characters(&d))
                     .unwrap_or_default();
                 if chars.is_empty() {
@@ -11540,8 +11730,19 @@ fn normalize_main_map_id(lower: &str) -> Option<&'static str> {
 }
 
 fn custom_dictionary_path() -> Option<std::path::PathBuf> {
-    default_logs_dir()
+    default_logs_root()
         .and_then(|d| d.parent().map(|p| p.join("custom_dictionary.txt")))
+}
+
+fn expand_user_path(raw: &str) -> std::path::PathBuf {
+    let value = raw.trim();
+    if value == "~" || value.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let suffix = value.strip_prefix("~/").unwrap_or("");
+            return std::path::PathBuf::from(home).join(suffix);
+        }
+    }
+    std::path::PathBuf::from(value)
 }
 
 fn load_custom_dictionary() -> std::collections::HashSet<String> {

@@ -3,6 +3,15 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn new_sync_device_id() -> String {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("device-{stamp:x}-{:x}", std::process::id())
+}
 
 /// Persisted login, logging, notification, font, tray, and Pounce preferences.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +53,12 @@ pub struct ClientConfig {
     pub check_updates_on_startup: bool,
     pub first_setup_done: bool,
     pub dice_roll: String,
+    /// Local path to a folder managed by a cloud sync client; never copied into shared settings.
+    pub sync_folder: String,
+    /// Per-installation identifier used to keep log writes separate across devices.
+    pub sync_device_id: String,
+    /// Timestamp of this device's last synced preferences snapshot.
+    pub sync_updated_at: u64,
 }
 
 impl Default for ClientConfig {
@@ -86,6 +101,9 @@ impl Default for ClientConfig {
             check_updates_on_startup: true,
             first_setup_done: false,
             dice_roll: "1d6".to_owned(),
+            sync_folder: String::new(),
+            sync_device_id: String::new(),
+            sync_updated_at: 0,
         }
     }
 }
@@ -105,16 +123,151 @@ impl ClientConfig {
     }
 
     pub fn load_default() -> Self {
-        Self::default_path()
-            .and_then(|p| Self::load(&p).ok())
-            .unwrap_or_default()
+        let path = Self::default_path();
+        let mut cfg = path
+            .as_ref()
+            .and_then(|p| Self::load(p).ok())
+            .unwrap_or_default();
+        if cfg.sync_device_id.is_empty() {
+            cfg.sync_device_id = new_sync_device_id();
+            if let Some(path) = path.as_ref() {
+                let _ = cfg.save(path);
+            }
+        }
+        if let Some(folder) = cfg.sync_folder_path() {
+            let mut newest: Option<Self> = None;
+            if let Ok(entries) = fs::read_dir(folder) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                        n.starts_with("settings-") && n.ends_with(".ini")
+                    }) {
+                        if let Ok(shared) = Self::load(&path) {
+                            if shared.sync_updated_at > 0
+                                && newest
+                                    .as_ref()
+                                    .is_none_or(|old| shared.sync_updated_at >= old.sync_updated_at)
+                            {
+                                newest = Some(shared);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(shared) = newest {
+                cfg.apply_shared_settings(&shared);
+            }
+        }
+        cfg
     }
 
     pub fn save_default(&self) -> io::Result<()> {
         let Some(path) = Self::default_path() else {
             return Ok(());
         };
+        self.save(&path)?;
+        self.save_shared_settings()
+    }
+
+    pub fn save_local_default(&self) -> io::Result<()> {
+        let Some(path) = Self::default_path() else {
+            return Ok(());
+        };
         self.save(&path)
+    }
+
+    pub fn shared_settings_path(&self) -> Option<PathBuf> {
+        let folder = self.sync_folder_path()?;
+        let id: String = self
+            .sync_device_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        (!id.is_empty()).then(|| folder.join(format!("settings-{id}.ini")))
+    }
+
+    pub fn sync_folder_path(&self) -> Option<PathBuf> {
+        let folder = self.sync_folder.trim();
+        (!folder.is_empty()).then(|| PathBuf::from(folder))
+    }
+
+    pub fn has_shared_settings(&self) -> bool {
+        self.sync_folder_path().is_some_and(|folder| {
+            fs::read_dir(folder)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|entry| {
+                    let path = entry.path();
+                    let is_snapshot = entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("settings-")
+                        && path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("ini"));
+                    is_snapshot
+                        && Self::load(&path)
+                            .is_ok_and(|snapshot| snapshot.sync_updated_at > 0)
+                })
+        })
+    }
+
+    fn save_shared_settings(&self) -> io::Result<()> {
+        let Some(path) = self.shared_settings_path() else {
+            return Ok(());
+        };
+        let mut shared = self.clone();
+        shared.email.clear();
+        shared.password.clear();
+        shared.remember_email = false;
+        shared.remember_password = false;
+        shared.auto_login = false;
+        shared.sync_folder.clear();
+        shared.sync_device_id.clear();
+        shared.sync_updated_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        shared.save(&path)
+    }
+
+    fn apply_shared_settings(&mut self, shared: &Self) {
+        self.character = shared.character.clone();
+        self.watchlist = shared.watchlist.clone();
+        self.logging_enabled = shared.logging_enabled;
+        self.log_whispers = shared.log_whispers;
+        self.log_retention_days = shared.log_retention_days;
+        self.notify_enabled = shared.notify_enabled;
+        self.notify_whisper = shared.notify_whisper;
+        self.notify_pounce = shared.notify_pounce;
+        self.notify_mention = shared.notify_mention;
+        self.notify_only_unfocused = shared.notify_only_unfocused;
+        self.sound_enabled = shared.sound_enabled;
+        self.music_enabled = shared.music_enabled;
+        self.minimize_to_tray = shared.minimize_to_tray;
+        self.close_to_tray = shared.close_to_tray;
+        self.font_family = shared.font_family.clone();
+        self.font_size = shared.font_size;
+        self.anim_mode = shared.anim_mode.clone();
+        self.theme = shared.theme.clone();
+        self.show_avatar_names = shared.show_avatar_names;
+        self.pounce_visible = shared.pounce_visible;
+        self.pounce_detached = shared.pounce_detached;
+        self.pounce_show_offline = shared.pounce_show_offline;
+        self.show_debug_packets = shared.show_debug_packets;
+        self.whisper_open_tab_on_incoming = shared.whisper_open_tab_on_incoming;
+        self.whisper_emote_in_whisper = shared.whisper_emote_in_whisper;
+        self.dream_bookmarks = shared.dream_bookmarks.clone();
+        self.limit_view_range = shared.limit_view_range;
+        self.allow_dream_skins = shared.allow_dream_skins;
+        self.portrait_size = shared.portrait_size;
+        self.check_updates_on_startup = shared.check_updates_on_startup;
+        self.first_setup_done = shared.first_setup_done;
+        self.dice_roll = shared.dice_roll.clone();
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
@@ -127,7 +280,16 @@ impl ClientConfig {
             fs::create_dir_all(parent)?;
         }
         let body = self.serialize();
-        fs::write(path, body)?;
+        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+        fs::write(&temp_path, body)?;
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        if let Err(err) = fs::rename(&temp_path, path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(err);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -241,6 +403,9 @@ impl ClientConfig {
                             cfg.dice_roll = d.to_owned();
                         }
                     }
+                    "sync_folder" => cfg.sync_folder = v.trim().to_owned(),
+                    "sync_device_id" => cfg.sync_device_id = v.trim().to_owned(),
+                    "sync_updated_at" => cfg.sync_updated_at = v.trim().parse().unwrap_or(0),
                     _ => {}
                 }
             }
@@ -266,7 +431,7 @@ impl ClientConfig {
             ""
         };
         format!(
-            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\n",
+            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
@@ -303,7 +468,10 @@ impl ClientConfig {
             self.portrait_size,
             self.check_updates_on_startup,
             self.first_setup_done,
-            self.dice_roll
+            self.dice_roll,
+            self.sync_folder,
+            self.sync_device_id,
+            self.sync_updated_at
         )
     }
 }
@@ -352,6 +520,9 @@ mod tests {
             check_updates_on_startup: false,
             first_setup_done: true,
             dice_roll: "1d100".into(),
+            sync_folder: String::new(),
+            sync_device_id: String::new(),
+            sync_updated_at: 0,
         };
         let serialized = cfg.serialize();
         assert_eq!(ClientConfig::parse(&serialized), cfg);
