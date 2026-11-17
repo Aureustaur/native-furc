@@ -177,7 +177,9 @@ pub fn load_whisper_log(
         if let Ok(entries) = fs::read_dir(whispers_dir) {
             for path in entries.flatten().map(|e| e.path()).filter(|p| {
                 p.is_file()
-                    && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+                    && p.extension().is_some_and(|e| {
+                        e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log")
+                    })
                     && p.file_stem()
                         .and_then(|s| s.to_str())
                         .is_some_and(|s| s.eq_ignore_ascii_case(&peer_file))
@@ -243,36 +245,50 @@ pub fn list_log_characters(base_dir: &Path) -> Vec<String> {
         return Vec::new();
     };
     let entries: Vec<_> = entries.flatten().collect();
-    let is_synced_root = entries.iter().any(|e| {
-        e.file_name().to_string_lossy().starts_with("settings-")
-            && e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("ini"))
-    });
     let mut out = Vec::new();
-    if is_synced_root {
-        for device_dir in entries.iter().filter(|e| e.path().is_dir()) {
-            if let Ok(chars) = fs::read_dir(device_dir.path()) {
-                out.extend(
-                    chars
-                        .flatten()
-                        .filter(|e| e.path().is_dir())
-                        .filter_map(|e| e.file_name().into_string().ok()),
-                );
-            }
+    out.extend(
+        entries
+            .iter()
+            .filter(|e| e.path().is_dir() && looks_like_character_log_dir(&e.path()))
+            .filter_map(|e| e.file_name().into_string().ok()),
+    );
+    // Synced logs live under `<root>/<device>/<character>`. Discover that
+    // layout from the files themselves so a missing settings snapshot cannot
+    // hide whisper history imported before sync was initialized.
+    for device_dir in entries.iter().filter(|e| e.path().is_dir()) {
+        if let Ok(chars) = fs::read_dir(device_dir.path()) {
+            out.extend(
+                chars
+                    .flatten()
+                    .filter(|e| e.path().is_dir() && looks_like_character_log_dir(&e.path()))
+                    .filter_map(|e| e.file_name().into_string().ok()),
+            );
         }
-    } else {
-        out.extend(
-            entries
-                .iter()
-                .filter(|e| e.path().is_dir())
-                .filter_map(|e| e.file_name().into_string().ok()),
-        );
     }
     out.sort();
     out.dedup();
     out
+}
+
+fn looks_like_character_log_dir(path: &Path) -> bool {
+    if path
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("whispers"))
+    {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let child = entry.path();
+        (child.is_dir() && child.file_name().is_some_and(|n| n.eq_ignore_ascii_case("whispers")))
+            || (child.is_file()
+                && child
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log")))
+    })
 }
 
 /// Lists all `.txt`/`.log` files for a character (including `whispers/`), newest first.
@@ -307,24 +323,18 @@ fn character_log_dirs(base_dir: &Path, character: &str) -> Vec<PathBuf> {
         return Vec::new();
     };
     let entries: Vec<_> = entries.flatten().collect();
-    let is_synced_root = entries.iter().any(|e| {
-        e.file_name().to_string_lossy().starts_with("settings-")
-            && e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("ini"))
-    });
-    if is_synced_root {
-        entries
-            .iter()
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.path().join(&name))
-            .filter(|p| p.is_dir())
-            .collect()
-    } else {
-        let path = base_dir.join(name);
-        path.is_dir().then_some(path).into_iter().collect()
+    let mut dirs = Vec::new();
+    let direct = base_dir.join(&name);
+    if direct.is_dir() {
+        dirs.push(direct);
     }
+    for device_dir in entries.iter().filter(|e| e.path().is_dir()) {
+        let path = device_dir.path().join(&name);
+        if path.is_dir() && !dirs.contains(&path) {
+            dirs.push(path);
+        }
+    }
+    dirs
 }
 
 #[cfg(test)]

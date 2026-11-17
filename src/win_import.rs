@@ -454,7 +454,26 @@ pub fn import_windows_furcadia_dir(
             } else if lower.ends_with(".html") {
                 if let (Some(dest_root), Some(logs_root)) = (&logs_dest, logs_root_for(&path)) {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Some((character, suffix)) = stem.rsplit_once("_logfile") {
+                        let is_flat_whisper = path
+                            .parent()
+                            .and_then(Path::file_name)
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.eq_ignore_ascii_case("whispers"));
+                        if is_flat_whisper {
+                            if let Ok(bytes) = fs::read(&path) {
+                                let converted = convert_windows_html_log(&decode_windows_log(&bytes));
+                                let peer = whisper_peer_name(&converted, target_character, stem);
+                                let dest = dest_root
+                                    .join("whispers")
+                                    .join(format!("{}.txt", crate::logs::sanitize_segment(&peer)));
+                                if let Some(parent) = dest.parent() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+                                if fs::write(dest, converted).is_ok() {
+                                    summary.logs_copied += 1;
+                                }
+                            }
+                        } else if let Some((character, suffix)) = stem.rsplit_once("_logfile") {
                             if !character.is_empty() && suffix.len() >= 8 {
                                 if let Ok(bytes) = fs::read(&path) {
                                     let converted =

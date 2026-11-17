@@ -207,8 +207,8 @@ pub fn parse_color_code(raw: &str) -> AvatarAppearance {
 
 /// Remap target 256-entry RGB gradient LUTs indexed by green channel `G`.
 pub struct RemapLuts {
-    /// Mapped LUT per green channel `0..=15` (`None` -> grayscale fallback `[R, R, R]`).
-    pub channels: [Option<[[u8; 3]; 256]>; 16],
+    /// Mapped LUT per green channel `0..=47` (`None` -> grayscale fallback `[R, R, R]`).
+    pub channels: [Option<[[u8; 3]; 256]>; 48],
 }
 
 impl RemapLuts {
@@ -239,7 +239,7 @@ impl RemapLuts {
             build_3stop_lut(mid)
         };
 
-        let mut channels: [Option<[[u8; 3]; 256]>; 16] = std::array::from_fn(|_| None);
+        let mut channels: [Option<[[u8; 3]; 256]>; 48] = std::array::from_fn(|_| None);
         // Channel mapping verbatim from 0x52908c..0x5291f3:
         channels[15] = Some(fur_lut(app.fur));          // Fur      -> G=15 (0x8c)
         channels[4] = Some(fur_lut(app.markings));      // Markings -> G=4  (0x60)
@@ -253,6 +253,19 @@ impl RemapLuts {
         channels[12] = Some(clothes_lut(app.trousers)); // Trousers -> G=12 (0x80)
         channels[10] = Some(fur_lut(app.wings));        // Wings    -> G=10 (0x78)
         channels[7] = Some(clothes_lut(app.accent));    // Accent   -> G=7  (0x6c)
+
+        // FOX5 defines three remap bands that blend between appearance slots. Each channel
+        // is one step farther toward the destination color, with the last channel reaching it.
+        let fur = fur_lut(app.fur);
+        let markings = fur_lut(app.markings);
+        let hair = hair_lut(app.hair);
+        for step in 1..=8 {
+            channels[15 + step] = Some(blend_luts(&fur, &markings, step, 8));
+            channels[23 + step] = Some(blend_luts(&fur, &hair, step, 8));
+        }
+        for step in 1..=16 {
+            channels[31 + step] = Some(blend_luts(&markings, &hair, step, 16));
+        }
         Self { channels }
     }
 
@@ -288,6 +301,23 @@ impl RemapLuts {
         }
         out
     }
+}
+
+fn blend_luts(
+    from: &[[u8; 3]; 256],
+    to: &[[u8; 3]; 256],
+    step: usize,
+    steps: usize,
+) -> [[u8; 3]; 256] {
+    let mut blended = [[0u8; 3]; 256];
+    for shade in 0..256 {
+        for channel in 0..3 {
+            let a = from[shade][channel] as usize;
+            let b = to[shade][channel] as usize;
+            blended[shade][channel] = ((a * (steps - step) + b * step + steps / 2) / steps) as u8;
+        }
+    }
+    blended
 }
 
 fn build_8stop_lut(stops8: &[[u8; 3]; 8]) -> [[u8; 3]; 256] {

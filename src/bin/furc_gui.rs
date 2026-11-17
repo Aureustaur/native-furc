@@ -251,15 +251,49 @@ fn render_whisper_history_lines(
     ui: &mut egui::Ui,
     history_lines: &[String],
     has_live_lines: bool,
+    self_name: &str,
+    peer: &str,
+    action_out: &mut Option<ChatClickAction>,
+    smileys: &[Option<TextureHandle>],
+    desctags: &[Option<TextureHandle>],
+    chat_imgs: &HashMap<String, Option<TextureHandle>>,
+    player_badge_colors: &HashMap<String, Color32>,
+    player_badges: &HashMap<String, TextureHandle>,
+    self_name_key: &str,
 ) {
     if history_lines.is_empty() {
         return;
     }
     let log_color = Color32::from_rgb(142, 145, 160);
     for line in history_lines {
-        ui.add(
-            egui::Label::new(RichText::new(line).size(12.5).color(log_color)).wrap(),
-        );
+        let mut parts = line.splitn(3, ' ');
+        let date = parts.next().unwrap_or_default();
+        let time = parts.next().unwrap_or_default();
+        let message = parts.next();
+        if let Some(message) = message {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("{date} {time}"))
+                        .size(12.5)
+                        .color(log_color),
+                );
+                let parsed = parse_chat_line(message);
+                let formatted = format_whisper_tab_line(self_name, peer, message, &parsed);
+                render_chat_line(
+                    ui,
+                    &formatted,
+                    action_out,
+                    smileys,
+                    desctags,
+                    chat_imgs,
+                    player_badge_colors,
+                    player_badges,
+                    self_name_key,
+                );
+            });
+        } else {
+            ui.add(egui::Label::new(RichText::new(line).size(12.5).color(log_color)).wrap());
+        }
     }
     if has_live_lines {
         ui.label(
@@ -435,6 +469,16 @@ fn render_player_menu_buttons(
 
 fn wire_player_name(name: &str) -> String {
     name.trim().replace(' ', "|")
+}
+
+fn sanitized_log_character_name(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | ' ' => c,
+            _ => '_',
+        })
+        .collect()
 }
 
 fn shortname_key(name: &str) -> String {
@@ -1091,10 +1135,20 @@ impl FoxSpriteCache {
         let try_ids: &[u16] = if obj_id == 0 { &[0] } else { &[obj_id, 0] };
 
         for &try_id in try_ids {
-            for (is_dream, maybe_fox) in [
-                (true, self.dream_archive.as_mut()),
-                (false, self.default_archive.as_mut()),
-            ] {
+            let archives = if purpose == 4 {
+                // A dream patch may provide a non-remappable placeholder portrait.
+                // Prefer the canonical species portrait so avatar colors can map.
+                [
+                    (false, self.default_archive.as_mut()),
+                    (true, self.dream_archive.as_mut()),
+                ]
+            } else {
+                [
+                    (true, self.dream_archive.as_mut()),
+                    (false, self.default_archive.as_mut()),
+                ]
+            };
+            for (is_dream, maybe_fox) in archives {
                 let Some(fox) = maybe_fox else {
                     continue;
                 };
@@ -1238,6 +1292,8 @@ struct BackgroundSession {
     chat_log: Vec<ChatLine>,
     whispers: Vec<WhisperSession>,
     active_chat_tab: Option<String>,
+    main_chat_draft: String,
+    pending_whisper_echoes: Vec<(String, String, Instant)>,
     current_dream_dir: Option<std::path::PathBuf>,
     cam_offset: Vec2,
     unread_count: usize,
@@ -1273,6 +1329,7 @@ struct FurcadiaApp {
     connected_at: Option<Instant>,
 
     chat_input: String,
+    main_chat_draft: String,
     spell_seq: u64,
     spell_dirty_at: Option<Instant>,
     spell_misspelled: Vec<MisspelledWord>,
@@ -1283,7 +1340,6 @@ struct FurcadiaApp {
     active_chat_tab: Option<String>,
     focus_chat_input: bool,
     dragging_whisper_tab: Option<usize>,
-    new_whisper_input: String,
     active_char_tab_pos: usize,
     dragging_char_tab: Option<usize>,
 
@@ -1346,6 +1402,8 @@ struct FurcadiaApp {
     pending_dream_modern: Option<bool>,
     pending_dream_name: Option<String>,
     looked_player: Option<LookedPlayerCard>,
+    pending_glook_target: Option<(String, Instant)>,
+    recent_portrait_target: Option<(String, Instant)>,
     hovered_avatar_uid: Option<u32>,
     context_menu_avatar: Option<ContextMenuTarget>,
 
@@ -1406,9 +1464,11 @@ struct FurcadiaApp {
     last_sent_msg: String,
     last_whisper_target: String,
     last_received_whisper_from: String,
+    pending_whisper_echoes: Vec<(String, String, Instant)>,
     saved_character: String,
     whisper_open_tab_on_incoming: bool,
     whisper_emote_in_whisper: bool,
+    last_dice_roll_at: Option<Instant>,
     settings_tab: usize,
     dream_bookmarks: Vec<String>,
     limit_view_range: bool,
@@ -1608,6 +1668,7 @@ impl FurcadiaApp {
             connecting_error: None,
             connected_at: None,
             chat_input: String::new(),
+            main_chat_draft: String::new(),
             spell_seq: 0,
             spell_dirty_at: None,
             spell_misspelled: Vec::new(),
@@ -1620,7 +1681,6 @@ impl FurcadiaApp {
             active_chat_tab: None,
             focus_chat_input: false,
             dragging_whisper_tab: None,
-            new_whisper_input: String::new(),
             active_char_tab_pos: 0,
             dragging_char_tab: None,
             sidebar_tab: SidebarTab::Move,
@@ -1685,6 +1745,8 @@ impl FurcadiaApp {
             pending_dream_modern: None,
             pending_dream_name: None,
             looked_player: None,
+            pending_glook_target: None,
+            recent_portrait_target: None,
             hovered_avatar_uid: None,
             context_menu_avatar: None,
             cam_offset: Vec2::ZERO,
@@ -1741,9 +1803,11 @@ impl FurcadiaApp {
             last_sent_msg: String::new(),
             last_whisper_target: String::new(),
             last_received_whisper_from: String::new(),
+            pending_whisper_echoes: Vec::new(),
             saved_character: cfg.character.clone(),
             whisper_open_tab_on_incoming: cfg.whisper_open_tab_on_incoming,
             whisper_emote_in_whisper: cfg.whisper_emote_in_whisper,
+            last_dice_roll_at: None,
             settings_tab: 0,
             dream_bookmarks: cfg.dream_bookmarks.clone(),
             limit_view_range: cfg.limit_view_range,
@@ -2249,6 +2313,10 @@ impl FurcadiaApp {
     }
 
     fn active_character_name(&self) -> String {
+        self.active_character_wire_name().replace('|', " ")
+    }
+
+    fn active_character_wire_name(&self) -> String {
         self.world
             .self_name
             .as_deref()
@@ -2265,7 +2333,7 @@ impl FurcadiaApp {
             return;
         }
         if let Some(dir) = default_logs_dir() {
-            let _ = append_chat_log(&dir, &self.active_character_name(), text);
+            let _ = append_chat_log(&dir, &self.active_character_wire_name(), text);
         }
     }
 
@@ -2274,7 +2342,7 @@ impl FurcadiaApp {
             return;
         }
         if let Some(dir) = default_logs_dir() {
-            let _ = append_whisper_log(&dir, &self.active_character_name(), peer, text);
+            let _ = append_whisper_log(&dir, &self.active_character_wire_name(), peer, text);
         }
     }
 
@@ -2356,7 +2424,7 @@ impl FurcadiaApp {
     fn open_log_viewer(&mut self) {
         self.log_viewer_open = true;
         if self.log_viewer_char.is_empty() {
-            self.log_viewer_char = self.active_character_name();
+            self.log_viewer_char = self.active_character_wire_name();
         }
         self.refresh_log_viewer_files();
     }
@@ -2366,7 +2434,13 @@ impl FurcadiaApp {
         if let Some(dir) = default_logs_root() {
             let chars = list_log_characters(&dir);
             if !chars.is_empty() && !chars.iter().any(|c| c == &self.log_viewer_char) {
-                self.log_viewer_char = chars[0].clone();
+                let wire_folder = sanitized_log_character_name(&self.active_character_wire_name());
+                let display_folder = sanitized_log_character_name(&self.active_character_name());
+                self.log_viewer_char = chars
+                    .iter()
+                    .find(|c| **c == wire_folder || **c == display_folder)
+                    .cloned()
+                    .unwrap_or_else(|| chars[0].clone());
             }
             if !self.log_viewer_char.is_empty() {
                 self.log_viewer_files = list_log_files(&dir, &self.log_viewer_char);
@@ -2387,6 +2461,7 @@ impl FurcadiaApp {
     }
 
     fn suspend_active_session_to_bg(&mut self, ctx: &egui::Context) {
+        self.save_active_chat_draft();
         let (new_to_net, net_rx) = mpsc::channel::<UiToNet>();
         let (net_tx, new_from_net) = mpsc::channel::<NetToUi>();
         let net_ctx = ctx.clone();
@@ -2398,6 +2473,9 @@ impl FurcadiaApp {
         let old_chat = std::mem::take(&mut self.chat_log);
         let old_whispers = std::mem::take(&mut self.whispers);
         let old_tab = self.active_chat_tab.take();
+        let old_main_chat_draft = std::mem::take(&mut self.main_chat_draft);
+        let old_pending_whisper_echoes = std::mem::take(&mut self.pending_whisper_echoes);
+        self.chat_input.clear();
         let old_dream_dir = self.current_dream_dir.take();
         let old_status = std::mem::replace(&mut self.status_text, "Disconnected".to_owned());
         let old_connected = std::mem::replace(&mut self.is_connected, false);
@@ -2406,7 +2484,8 @@ impl FurcadiaApp {
             .self_name
             .clone()
             .or_else(|| self.selected_character().map(|c| c.name.clone()))
-            .unwrap_or_else(|| "Character".to_owned());
+            .unwrap_or_else(|| "Character".to_owned())
+            .replace('|', " ");
 
         let insert_at = self.active_char_tab_pos.min(self.bg_sessions.len());
         self.bg_sessions.insert(
@@ -2420,6 +2499,8 @@ impl FurcadiaApp {
                 chat_log: old_chat,
                 whispers: old_whispers,
                 active_chat_tab: old_tab,
+                main_chat_draft: old_main_chat_draft,
+                pending_whisper_echoes: old_pending_whisper_echoes,
                 current_dream_dir: old_dream_dir,
                 cam_offset: old_cam,
                 unread_count: 0,
@@ -2487,9 +2568,16 @@ impl FurcadiaApp {
         self.is_connected = target.is_connected;
         self.status_text = target.status_text;
         self.world = target.world;
+        self.refresh_player_badge_colors();
         self.chat_log = target.chat_log;
         self.whispers = target.whispers;
         self.active_chat_tab = target.active_chat_tab;
+        self.main_chat_draft = target.main_chat_draft;
+        self.pending_whisper_echoes = target.pending_whisper_echoes;
+        self.load_active_chat_draft();
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_dirty_at = None;
+        self.spell_misspelled.clear();
         self.cookies_collected = None;
         self.cookies_total = None;
         if self.current_dream_dir != target.current_dream_dir {
@@ -2502,6 +2590,7 @@ impl FurcadiaApp {
         self.to_net = target.to_net;
         self.from_net = target.from_net;
         self.looked_player = None;
+        self.recent_portrait_target = None;
         self.context_menu_avatar = None;
         self.screen = AppScreen::InGame;
     }
@@ -2526,7 +2615,16 @@ impl FurcadiaApp {
                     NetToUi::Message(ServerMessage::Text(t)) => {
                         let line = parse_chat_line(&t);
                         let plain = line.to_plain_text();
-                        if let Some(peer) = extract_whisper_peer(&plain) {
+                        let peer = if let Some(peer) = extract_whisper_peer(&plain) {
+                            Some(peer)
+                        } else {
+                            match_pending_whisper_echo(
+                                &plain,
+                                &sess.char_name,
+                                &mut sess.pending_whisper_echoes,
+                            )
+                        };
+                        if let Some(peer) = peer {
                             sess.unread_count += 1;
                             let formatted =
                                 format_whisper_tab_line(&sess.char_name, &peer, &plain, &line);
@@ -2561,7 +2659,7 @@ impl FurcadiaApp {
                     NetToUi::Message(ServerMessage::CharacterIdentity { uid, name }) => {
                         sess.world.self_uid = uid.parse().ok();
                         sess.world.self_name = Some(name.clone());
-                        sess.char_name = name;
+                        sess.char_name = name.replace('|', " ");
                     }
                     _ => {}
                 }
@@ -2609,11 +2707,13 @@ impl FurcadiaApp {
         self.login_trace_remaining = 0;
         self.pending_dream_modern = None;
         self.looked_player = None;
+        self.recent_portrait_target = None;
         self.hovered_avatar_uid = None;
         self.context_menu_avatar = None;
         self.cam_offset = Vec2::ZERO;
         self.live_desc_input = unescape_html(&ch.desc);
         self.chat_log.clear();
+        self.pending_whisper_echoes.clear();
         self.is_connected = false;
         self.connected_at = None;
         self.connect_seq = self.connect_seq.wrapping_add(1);
@@ -2643,7 +2743,8 @@ impl FurcadiaApp {
         if self.is_connected || self.connecting_stage == "Reconnecting..." {
             return;
         }
-        let character = self.active_character_name();
+        self.pending_whisper_echoes.clear();
+        let character = self.active_character_wire_name();
         self.connect_seq = self.connect_seq.wrapping_add(1);
         self.connecting_error = None;
         self.connecting_stage = "Reconnecting...".to_owned();
@@ -2984,7 +3085,11 @@ impl FurcadiaApp {
             return None;
         }
         let app = furcadia_client::parse_color_code(colors);
-        self.portrait_for_appearance(ctx, &app, format!("char:{id}:{colors}"))
+        self.portrait_for_appearance(
+            ctx,
+            &app,
+            format!("char:{id}:{colors}:{}:{}:{:?}", app.species_id, app.gender, app.color_key),
+        )
     }
 
     /// Prefer the character's saved custom port when the account response has one.
@@ -3082,13 +3187,30 @@ impl FurcadiaApp {
             .values()
             .filter_map(|av| {
                 let (species, gender) = self.world.resolved_avatar_species_gender(av)?;
-                Some((shortname_key(&av.name), species, gender, av.appearance.clone()))
+                Some((
+                    shortname_key(&av.name),
+                    av.name.clone(),
+                    species,
+                    gender,
+                    av.appearance.clone(),
+                ))
             })
             .collect();
         let mut textures = HashMap::new();
-        for (name, species, gender, appearance) in avatars {
+        for (name, display_name, species, gender, appearance) in avatars {
             if name.is_empty() {
                 continue;
+            }
+            let custom_pid = self
+                .player_portrait_ids
+                .iter()
+                .find(|(known_name, _)| shortname_key(known_name) == name)
+                .map(|(_, pid)| *pid);
+            if let Some(pid) = custom_pid {
+                if let Some(tex) = self.custom_portrait_texture(ctx, pid, &appearance) {
+                    textures.insert(name, tex);
+                    continue;
+                }
             }
             let (file_id, obj_id) = self.resolve_species_spec(species as usize);
             let cache_id = self.ensure_species_cache(file_id);
@@ -3101,11 +3223,31 @@ impl FurcadiaApp {
                     gender,
                     35,
                 ) {
-                    textures.insert(name, tex);
+                    textures.insert(shortname_key(&display_name), tex);
                 }
             }
         }
         textures
+    }
+
+    fn refresh_player_badge_colors(&mut self) {
+        self.player_badge_colors.clear();
+        if let Some(self_name) = self.world.self_name.as_deref() {
+            let key = shortname_key(self_name);
+            if !key.is_empty() {
+                self.player_badge_colors
+                    .insert(key, name_badge_chat_color(true));
+            }
+        }
+        for avatar in self.world.avatars.values() {
+            let key = shortname_key(&avatar.name);
+            if !key.is_empty() {
+                self.player_badge_colors.insert(
+                    key,
+                    name_badge_chat_color(Some(avatar.uid) == self.world.self_uid),
+                );
+            }
+        }
     }
 
     fn self_custom_portrait_id(&self) -> Option<u32> {
@@ -3195,49 +3337,60 @@ impl FurcadiaApp {
         }
     }
 
-    /// Parses `]&` (`PortraitSolveRequest`) which may contain `<id>`, `<id> pp<id>`, `<id> <name>`, or `<name> <id>`.
+    /// Parses Furcadia's `]&<character-id> pp<portrait-file-id>` portrait directive.
     fn handle_portrait_directive(&mut self, raw: &str) {
-        let mut pid: Option<u32> = None;
-        let mut name_parts: Vec<&str> = Vec::new();
-        for tok in raw.split_whitespace() {
-            if pid.is_none() {
-                if let Ok(id) = tok.parse::<u32>() {
-                    if id > 0 {
-                        pid = Some(id);
-                        continue;
-                    }
-                }
-            }
-            if tok.len() > 2
-                && tok[..2].eq_ignore_ascii_case("pp")
-                && tok[2..].bytes().all(|b| b.is_ascii_digit())
-            {
-                if pid.is_none() {
-                    if let Ok(id) = tok[2..].parse::<u32>() {
-                        if id > 0 {
-                            pid = Some(id);
-                        }
-                    }
-                }
-                continue;
-            }
-            name_parts.push(tok);
-        }
+        let (character_id, pid, name_parts) = parse_portrait_directive(raw);
         let Some(pid) = pid else {
             return;
         };
-        let target_name = if name_parts.is_empty() {
-            self.looked_player.as_ref().map(|c| c.short_name.clone())
-        } else {
-            Some(wire_player_name(&name_parts.join(" ")))
-        };
+        let pending_target = self
+            .pending_glook_target
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() <= Duration::from_secs(3))
+            .map(|(name, _)| name.clone());
+        let recent_target = self
+            .recent_portrait_target
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() <= Duration::from_secs(3))
+            .map(|(name, _)| name.clone());
+        let target_name = name_parts
+            .filter(|name| !name.is_empty())
+            .or(pending_target.clone())
+            .or(recent_target.clone())
+            .or_else(|| {
+                character_id
+                    .and_then(|uid| self.world.avatars.get(&uid))
+                    .map(|avatar| wire_player_name(&avatar.name))
+            })
+            .or_else(|| {
+                character_id
+                    .filter(|uid| Some(*uid) == self.world.self_uid)
+                    .and_then(|_| self.world.self_name.as_deref())
+                    .map(wire_player_name)
+            });
         if let Some(ref name) = target_name {
-            self.player_portrait_ids.insert(name.clone(), pid);
+            self.player_portrait_ids
+                .insert(shortname_key(name), pid);
         }
         if let Some(card) = self.looked_player.as_mut() {
-            if target_name.as_deref().is_none_or(|n| n.eq_ignore_ascii_case(&card.short_name)) {
+            if target_name
+                .as_deref()
+                .is_some_and(|n| shortname_key(n) == shortname_key(&card.short_name))
+            {
                 card.portrait_id = Some(pid);
             }
+        }
+        if pending_target
+            .as_deref()
+            .is_some_and(|n| target_name.as_deref().is_some_and(|t| shortname_key(n) == shortname_key(t)))
+        {
+            self.pending_glook_target = None;
+        }
+        if recent_target
+            .as_deref()
+            .is_some_and(|n| target_name.as_deref().is_some_and(|t| shortname_key(n) == shortname_key(t)))
+        {
+            self.recent_portrait_target = None;
         }
         if !self.custom_portrait_rgba.contains_key(&pid)
             && self.pending_portrait_downloads.insert(pid)
@@ -4063,6 +4216,65 @@ impl FurcadiaApp {
         }
     }
 
+    fn save_active_chat_draft(&mut self) {
+        if let Some(peer) = self.active_chat_tab.as_deref() {
+            if let Some(whisper) = self
+                .whispers
+                .iter_mut()
+                .find(|w| w.peer.eq_ignore_ascii_case(peer))
+            {
+                whisper.input.clone_from(&self.chat_input);
+            }
+        } else {
+            self.main_chat_draft.clone_from(&self.chat_input);
+        }
+    }
+
+    fn track_pending_whisper_echo(&mut self, target: &str, message: &str) {
+        let now = Instant::now();
+        let max_age = std::time::Duration::from_secs(30);
+        self.pending_whisper_echoes
+            .retain(|(_, _, sent_at)| now.duration_since(*sent_at) < max_age);
+        self.pending_whisper_echoes.push((
+            target.replace('|', " "),
+            normalize_whisper_body(message),
+            now,
+        ));
+        if self.pending_whisper_echoes.len() > 16 {
+            self.pending_whisper_echoes.remove(0);
+        }
+    }
+
+    fn load_active_chat_draft(&mut self) {
+        self.chat_input = self
+            .active_chat_tab
+            .as_deref()
+            .and_then(|peer| {
+                self.whispers
+                    .iter()
+                    .find(|w| w.peer.eq_ignore_ascii_case(peer))
+                    .map(|w| w.input.clone())
+            })
+            .unwrap_or_else(|| self.main_chat_draft.clone());
+    }
+
+    fn switch_chat_tab(&mut self, target: Option<String>) {
+        let same_tab = match (self.active_chat_tab.as_deref(), target.as_deref()) {
+            (None, None) => true,
+            (Some(active), Some(next)) => active.eq_ignore_ascii_case(next),
+            _ => false,
+        };
+        if same_tab {
+            return;
+        }
+        self.save_active_chat_draft();
+        self.active_chat_tab = target;
+        self.load_active_chat_draft();
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_dirty_at = None;
+        self.spell_misspelled.clear();
+    }
+
     fn open_whisper_tab(&mut self, peer: &str, focus: bool) -> usize {
         let trimmed = peer.trim();
         if let Some(idx) = self
@@ -4072,20 +4284,26 @@ impl FurcadiaApp {
         {
             if focus {
                 self.whispers[idx].unread = 0;
-                self.active_chat_tab = Some(self.whispers[idx].peer.clone());
+                self.switch_chat_tab(Some(self.whispers[idx].peer.clone()));
                 self.focus_chat_input = true;
             }
             return idx;
         }
         let mut session = WhisperSession::new(trimmed.to_owned());
         if let Some(dir) = default_logs_root() {
-            session.history_lines =
-                load_whisper_log(&dir, &self.active_character_name(), trimmed, 200);
+            let wire_name = self.active_character_wire_name();
+            session.history_lines = load_whisper_log(&dir, &wire_name, trimmed, 200);
+            if session.history_lines.is_empty() {
+                let display_name = self.active_character_name();
+                if display_name != wire_name {
+                    session.history_lines = load_whisper_log(&dir, &display_name, trimmed, 200);
+                }
+            }
         }
         self.whispers.push(session);
         let idx = self.whispers.len() - 1;
         if focus {
-            self.active_chat_tab = Some(self.whispers[idx].peer.clone());
+            self.switch_chat_tab(Some(self.whispers[idx].peer.clone()));
             self.focus_chat_input = true;
         }
         idx
@@ -4147,8 +4365,16 @@ impl FurcadiaApp {
                 if total.is_some() {
                     self.cookies_total = total;
                 }
-                self.log_chat_line(&plain);
-                if let Some(peer) = extract_whisper_peer(&plain) {
+                let peer = if let Some(peer) = extract_whisper_peer(&plain) {
+                    Some(peer)
+                } else {
+                    match_pending_whisper_echo(
+                        &plain,
+                        &self.active_character_name(),
+                        &mut self.pending_whisper_echoes,
+                    )
+                };
+                if let Some(peer) = peer {
                     self.log_whisper_line(&peer, &plain);
                     let self_name = self.active_character_name();
                     let formatted = format_whisper_tab_line(&self_name, &peer, &plain, &line);
@@ -4182,6 +4408,7 @@ impl FurcadiaApp {
                     if self.active_chat_tab.is_some() {
                         self.main_chat_unread += 1;
                     }
+                    self.log_chat_line(&plain);
                     self.chat_log.push(line);
                 }
             }
@@ -4204,8 +4431,12 @@ impl FurcadiaApp {
             ServerMessage::CharacterIdentity { uid, name } => {
                 self.world.self_uid = uid.parse().ok();
                 self.world.self_name = Some(name.clone());
+                self.refresh_player_badge_colors();
                 self.sync_selected_character_colors();
-                self.push_system_line("success", &format!("Logged in as {name} (UID {uid})"));
+                self.push_system_line(
+                    "success",
+                    &format!("Logged in as {} (UID {uid})", name.replace('|', " ")),
+                );
                 let _ = self
                     .to_net
                     .send(UiToNet::Send(ClientCommand::Raw("pounceInit".to_owned())));
@@ -4217,14 +4448,10 @@ impl FurcadiaApp {
             ServerMessage::WorldPacket { opcode, data } => {
                 self.world.apply_world_packet(opcode, &data);
                 self.sync_selected_character_colors();
+                self.refresh_player_badge_colors();
                 let now = Instant::now();
                 let mut visible_names: Vec<String> = Vec::new();
                 for av in self.world.avatars.values() {
-                    let key = shortname_key(&av.name);
-                    if !key.is_empty() {
-                        self.player_badge_colors
-                            .insert(key, name_badge_chat_color(Some(av.uid) == self.world.self_uid));
-                    }
                     if Some(av.uid) != self.world.self_uid && self.pounce.contains(&av.name) {
                         visible_names.push(av.name.clone());
                     }
@@ -4334,7 +4561,21 @@ impl FurcadiaApp {
                     b'f' => {
                         if let Some(info) = WorldState::parse_looked_player_bytes(&data) {
                             let short_name = wire_player_name(&info.name);
-                            let portrait_id = self.player_portrait_ids.get(&short_name).copied();
+                            self.recent_portrait_target =
+                                Some((short_name.clone(), Instant::now()));
+                            if self
+                                .pending_glook_target
+                                .as_ref()
+                                .is_some_and(|(target, _)| {
+                                    shortname_key(target) != shortname_key(&short_name)
+                                })
+                            {
+                                self.pending_glook_target = None;
+                            }
+                            let portrait_id = self
+                                .player_portrait_ids
+                                .get(&shortname_key(&short_name))
+                                .copied();
                             self.looked_player = Some(LookedPlayerCard {
                                 info,
                                 short_name,
@@ -4462,6 +4703,7 @@ impl FurcadiaApp {
         }
         self.last_sent_msg = raw.clone();
         self.chat_input.clear();
+        self.save_active_chat_draft();
         self.spell_misspelled.clear();
         self.spell_dirty_at = None;
 
@@ -4555,6 +4797,25 @@ impl FurcadiaApp {
         } else {
             ClientCommand::Say(raw)
         };
+
+        if let ClientCommand::Whisper { target, message } = &cmd {
+            self.track_pending_whisper_echo(target, message);
+        }
+        let glook_target = match &cmd {
+            ClientCommand::Glook(target) => Some(target.clone()),
+            ClientCommand::Raw(raw) => {
+                let mut parts = raw.trim().splitn(2, char::is_whitespace);
+                parts
+                    .next()
+                    .filter(|verb| verb.eq_ignore_ascii_case("glook"))
+                    .and_then(|_| parts.next())
+                    .map(wire_player_name)
+            }
+            _ => None,
+        };
+        if let Some(target) = glook_target {
+            self.pending_glook_target = Some((target, Instant::now()));
+        }
 
         let _ = self.to_net.send(UiToNet::Send(cmd));
     }
@@ -6438,6 +6699,18 @@ impl FurcadiaApp {
         }
     }
 
+    fn request_player_look(&mut self, target: &str) {
+        if !self.is_connected {
+            return;
+        }
+        let target = wire_player_name(target);
+        if target.is_empty() {
+            return;
+        }
+        self.pending_glook_target = Some((target.clone(), Instant::now()));
+        let _ = self.to_net.send(UiToNet::Send(ClientCommand::Glook(target)));
+    }
+
     fn render_pounce_contents(&mut self, ui: &mut egui::Ui, is_detached: bool) {
         let accent = self.theme.accent();
         ui.horizontal(|ui| {
@@ -6587,7 +6860,7 @@ impl FurcadiaApp {
             }
         }
         if let Some(name) = to_glook {
-            let _ = self.to_net.send(UiToNet::Send(ClientCommand::Glook(name)));
+            self.request_player_look(&name);
         }
         if let Some(name) = to_whisper {
             self.open_whisper_tab(&name, true);
@@ -6642,6 +6915,8 @@ impl FurcadiaApp {
     }
 
     fn render_detached_viewports(&mut self, ctx: &egui::Context) {
+        let self_name = self.active_character_name();
+        let self_name_key = shortname_key(&self_name);
         if self.pounce_detached {
             let pounce_id = egui::ViewportId::from_hash_of("furc_pounce_viewport");
             let builder = egui::ViewportBuilder::default()
@@ -6722,6 +6997,15 @@ impl FurcadiaApp {
                                         ui,
                                         &w.history_lines,
                                         !w.lines.is_empty(),
+                                        &self_name,
+                                        &w.peer,
+                                        &mut chat_action,
+                                        &self.smiley_textures,
+                                        &self.desctag_textures,
+                                        &self.chat_img_textures,
+                                        &self.player_badge_colors,
+                                        &player_badges,
+                                        &self_name_key,
                                     );
                                     for line in &w.lines {
                                         render_chat_line(
@@ -6733,6 +7017,7 @@ impl FurcadiaApp {
                                             &self.chat_img_textures,
                                             &self.player_badge_colors,
                                             &player_badges,
+                                            &self_name_key,
                                         );
                                     }
                                 });
@@ -6762,6 +7047,7 @@ impl FurcadiaApp {
             }
             if let Some(msg) = send_msg {
                 if self.is_connected {
+                    self.track_pending_whisper_echo(&peer, &msg);
                     let _ = self.to_net.send(UiToNet::Send(ClientCommand::Whisper {
                         target: wire_player_name(&peer),
                         message: msg,
@@ -6775,8 +7061,8 @@ impl FurcadiaApp {
                     .find(|w| w.peer.eq_ignore_ascii_case(&peer))
                 {
                     w.detached = false;
-                    self.active_chat_tab = Some(w.peer.clone());
                 }
+                self.switch_chat_tab(Some(peer.clone()));
             } else if close_win {
                 self.whispers
                     .retain(|w| !w.peer.eq_ignore_ascii_case(&peer));
@@ -7363,8 +7649,7 @@ impl FurcadiaApp {
                                     && !wire.is_empty()
                                     && self.is_connected
                                 {
-                                    let _ =
-                                        self.to_net.send(UiToNet::Send(ClientCommand::Glook(wire)));
+                                    self.request_player_look(&wire);
                                 }
                             });
                             ui.add_space(6.0);
@@ -8166,9 +8451,9 @@ impl FurcadiaApp {
         }
         if switch_chat_tab {
             if self.active_chat_tab.is_some() {
-                self.active_chat_tab = None;
+                self.switch_chat_tab(None);
             } else if let Some(w) = self.whispers.iter().find(|w| !w.detached) {
-                self.active_chat_tab = Some(w.peer.clone());
+                self.switch_chat_tab(Some(w.peer.clone()));
             }
         }
         if toggle_font {
@@ -8333,7 +8618,7 @@ impl FurcadiaApp {
             .any(|e| e.name.eq_ignore_ascii_case(peer) || wire_player_name(&e.name).eq_ignore_ascii_case(&wire));
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("👁 Look").on_hover_text(format!("Look at {peer}")).clicked() {
-                self.send_raw_cmd(&format!("glook {wire}"));
+                self.request_player_look(&wire);
                 self.focus_chat_input = true;
             }
             if ui.small_button("➡ Join").on_hover_text(format!("Join {peer}")).clicked() {
@@ -8403,7 +8688,7 @@ impl FurcadiaApp {
                     .is_some_and(|a| a.eq_ignore_ascii_case(peer))
                 {
                     self.main_chat_unread = 0;
-                    self.active_chat_tab = None;
+                    self.switch_chat_tab(None);
                     self.focus_chat_input = true;
                 }
             }
@@ -8444,11 +8729,14 @@ impl FurcadiaApp {
         }
                 // Chat + Whisper Tabs bar (horizontally scrollable when many whispers are open)
                 let mut close_peer: Option<String> = None;
-                ui.horizontal(|ui| {
-                    let tabs_max_w = (ui.available_width() - 178.0).max(120.0);
-                    ui.allocate_ui(Vec2::new(tabs_max_w, 26.0), |ui| {
+                let tabs_max_w = ui.available_width().max(0.0);
+                ui.scope(|ui| {
+                    // Use a solid scrollbar so it gets its own strip below the tabs.
+                    ui.spacing_mut().scroll.floating = false;
+                    ui.allocate_ui(Vec2::new(tabs_max_w, 34.0), |ui| {
                         egui::ScrollArea::horizontal()
                             .id_salt("whisper_tabs_scroll")
+                            .auto_shrink([false, false])
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
                             )
@@ -8479,11 +8767,12 @@ impl FurcadiaApp {
                                     };
                                     if main_clicked {
                                         self.main_chat_unread = 0;
-                                        self.active_chat_tab = None;
+                                        self.switch_chat_tab(None);
                                         self.focus_chat_input = true;
                                     }
 
                                     let mut whisper_tab_rects: Vec<(usize, Rect)> = Vec::new();
+                                    let mut activate_peer: Option<String> = None;
                                     for (idx, w) in self.whispers.iter_mut().enumerate() {
                                         if w.detached {
                                             continue;
@@ -8534,7 +8823,7 @@ impl FurcadiaApp {
                                                 self.dragging_whisper_tab = Some(idx);
                                             } else if resp.clicked() {
                                                 w.unread = 0;
-                                                self.active_chat_tab = Some(w.peer.clone());
+                                                activate_peer = Some(w.peer.clone());
                                                 self.focus_chat_input = true;
                                             }
                                             whisper_tab_rects.push((idx, resp.rect));
@@ -8546,6 +8835,9 @@ impl FurcadiaApp {
                                                 close_peer = Some(w.peer.clone());
                                             }
                                         });
+                                    }
+                                    if let Some(peer) = activate_peer {
+                                        self.switch_chat_tab(Some(peer));
                                     }
                                     if !ui.input(|i| i.pointer.any_down()) {
                                         self.dragging_whisper_tab = None;
@@ -8568,43 +8860,20 @@ impl FurcadiaApp {
                                 });
                             });
                     });
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("+ Whisper").clicked()
-                            && !self.new_whisper_input.trim().is_empty()
-                        {
-                            let p = self.new_whisper_input.trim().to_owned();
-                            self.new_whisper_input.clear();
-                            self.open_whisper_tab(&p, true);
-                        }
-                        let wh_resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.new_whisper_input)
-                                .hint_text("Player...")
-                                .desired_width(95.0),
-                        );
-                        if wh_resp.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            && !self.new_whisper_input.trim().is_empty()
-                        {
-                            let p = self.new_whisper_input.trim().to_owned();
-                            self.new_whisper_input.clear();
-                            self.open_whisper_tab(&p, true);
-                        }
-                    });
                 });
 
                 if let Some(peer) = close_peer {
-                    self.whispers
-                        .retain(|w| !w.peer.eq_ignore_ascii_case(&peer));
                     if self
                         .active_chat_tab
                         .as_deref()
                         .is_some_and(|a| a.eq_ignore_ascii_case(&peer))
                     {
+                        self.switch_chat_tab(None);
                         self.main_chat_unread = 0;
-                        self.active_chat_tab = None;
                         self.focus_chat_input = true;
                     }
+                    self.whispers
+                        .retain(|w| !w.peer.eq_ignore_ascii_case(&peer));
                 }
 
                 ui.separator();
@@ -8647,12 +8916,21 @@ impl FurcadiaApp {
                     } else {
                         self.dice_roll.trim()
                     };
-                    if ui
-                        .small_button(format!("🎲 {dice}"))
-                        .on_hover_text(format!("Roll {dice} (configurable in Settings → Whispers & Chat)"))
-                        .clicked()
-                        && self.is_connected
-                    {
+                    let dice_ready = self
+                        .last_dice_roll_at
+                        .is_none_or(|at| at.elapsed() >= Duration::from_secs(3));
+                    let dice_button = ui
+                        .add_enabled(
+                            self.is_connected && dice_ready,
+                            egui::Button::new(format!("🎲 {dice}")),
+                        )
+                        .on_hover_text(if dice_ready {
+                            format!("Roll {dice} (configurable in Settings → Whispers & Chat)")
+                        } else {
+                            "Wait a few seconds between dice rolls".to_owned()
+                        });
+                    if dice_button.clicked() {
+                        self.last_dice_roll_at = Some(Instant::now());
                         let _ = self.to_net.send(UiToNet::Send(ClientCommand::Say(format!(
                             "roll {dice}"
                         ))));
@@ -8799,6 +9077,8 @@ impl FurcadiaApp {
                 let input_h = (typed_h + 12.0).clamp(line_h + 12.0, max_input_h);
                 let available_h = (total_avail_h - input_h - spelling_h - 18.0).max(min_chat_h);
                 let active_peer = self.active_chat_tab.clone();
+                let self_name = self.active_character_name();
+                let self_name_key = shortname_key(&self_name);
                 let mut chat_action: Option<ChatClickAction> = None;
                 let player_badges = self.current_player_badge_textures(ui.ctx());
                 egui::ScrollArea::vertical()
@@ -8830,6 +9110,15 @@ impl FurcadiaApp {
                                         ui,
                                         &w.history_lines,
                                         !w.lines.is_empty(),
+                                        &self_name,
+                                        &w.peer,
+                                        &mut chat_action,
+                                        &self.smiley_textures,
+                                        &self.desctag_textures,
+                                        &self.chat_img_textures,
+                                        &self.player_badge_colors,
+                                        &player_badges,
+                                        &self_name_key,
                                     );
                                     for line in &w.lines {
                                         render_chat_line(
@@ -8841,6 +9130,7 @@ impl FurcadiaApp {
                                             &self.chat_img_textures,
                                             &self.player_badge_colors,
                                             &player_badges,
+                                            &self_name_key,
                                         );
                                     }
                                 }
@@ -8856,6 +9146,7 @@ impl FurcadiaApp {
                                     &self.chat_img_textures,
                                     &self.player_badge_colors,
                                     &player_badges,
+                                    &self_name_key,
                                 );
                             }
                         }
@@ -8921,12 +9212,10 @@ impl FurcadiaApp {
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let hint = if let Some(peer) = &self.active_chat_tab {
-                        format!("Whisper to {peer}... (or `cmd)")
-                    } else {
-                        "Say something, :emote, `cmd, /wh <name> <msg>, /onln <name>, /glook <name>, /who".to_owned()
-                    };
-                    let chat_input_id = ui.make_persistent_id("main_chat_input");
+                    let chat_input_id = ui.make_persistent_id((
+                        "main_chat_input",
+                        active_peer.as_deref().unwrap_or("main"),
+                    ));
                     if std::mem::take(&mut self.focus_chat_input) {
                         ui.memory_mut(|m| m.request_focus(chat_input_id));
                     }
@@ -8945,7 +9234,10 @@ impl FurcadiaApp {
                         ui.fonts(|f| f.layout_job(job))
                     };
                     let resp = egui::ScrollArea::vertical()
-                        .id_salt("main_chat_input_scroll")
+                        .id_salt((
+                            "main_chat_input_scroll",
+                            active_peer.as_deref().unwrap_or("main"),
+                        ))
                         .max_height(input_h)
                         .min_scrolled_height(input_h)
                         .show(ui, |ui| {
@@ -8953,7 +9245,7 @@ impl FurcadiaApp {
                                 egui::TextEdit::multiline(&mut self.chat_input)
                                     .id(chat_input_id)
                                     .desired_rows(1)
-                                    .hint_text(hint)
+                                    .hint_text("")
                                     .desired_width(input_w)
                                     .layouter(&mut layouter),
                             )
@@ -9898,7 +10190,7 @@ impl FurcadiaApp {
                                 self.ensure_species_cache(base_file_id);
                             }
                         }
-                        if let Some(&pid) = self.player_portrait_ids.get(&short_name) {
+                        if let Some(&pid) = self.player_portrait_ids.get(&shortname_key(&short_name)) {
                             if matches!(self.custom_portrait_rgba.get(&pid), Some(None)) {
                                 self.custom_portrait_rgba.remove(&pid);
                                 self.pending_portrait_downloads.remove(&pid);
@@ -9910,9 +10202,7 @@ impl FurcadiaApp {
                             }
                         }
                         if self.is_connected {
-                            let _ = self
-                                .to_net
-                                .send(UiToNet::Send(ClientCommand::Glook(short_name)));
+                            self.request_player_look(&short_name);
                         }
                     }
                 } else if self.is_connected {
@@ -9993,9 +10283,7 @@ impl FurcadiaApp {
         match action {
             PlayerMenuAction::Look => {
                 if self.is_connected {
-                    let _ = self
-                        .to_net
-                        .send(UiToNet::Send(ClientCommand::Glook(short_name.to_owned())));
+                    self.request_player_look(short_name);
                 }
             }
             PlayerMenuAction::Whisper => {
@@ -10057,9 +10345,7 @@ impl FurcadiaApp {
                     opened_this_frame: true,
                 });
                 if self.is_connected {
-                    let _ = self
-                        .to_net
-                        .send(UiToNet::Send(ClientCommand::Glook(short)));
+                    self.request_player_look(&short);
                 }
             }
             ChatClickAction::EnterDreamUrl(url) => {
@@ -10327,6 +10613,7 @@ impl FurcadiaApp {
         }
         if close_card {
             self.looked_player = None;
+            self.recent_portrait_target = None;
         }
     }
 
@@ -11314,20 +11601,88 @@ fn extract_whisper_peer(plain: &str) -> Option<String> {
             return Some(before);
         }
     }
-    if s.starts_with("[ You whisper ") || s.starts_with("You whisper ") {
-        if let Some(idx) = s.rfind(" to ") {
-            let after = s[idx + 4..]
-                .trim()
-                .trim_end_matches(']')
-                .trim()
-                .trim_end_matches('.')
-                .replace('|', " ");
-            if !after.is_empty() {
-                return Some(after);
-            }
+    if let Some((target, _)) = extract_outgoing_whisper_echo(s) {
+        if !target.trim().is_empty() {
+            return Some(target.trim().to_owned());
         }
     }
     None
+}
+
+fn parse_portrait_directive(raw: &str) -> (Option<u32>, Option<u32>, Option<String>) {
+    let mut character_id = None;
+    let mut portrait_id = None;
+    let mut name_parts = Vec::new();
+
+    for token in raw.split_whitespace() {
+        if let Some(id) = token
+            .get(..2)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("pp"))
+            .and_then(|_| token.get(2..))
+            .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|id| id.parse::<u32>().ok())
+            .filter(|id| *id > 0)
+        {
+            portrait_id = Some(id);
+        } else if let Ok(id) = token.parse::<u32>() {
+            if character_id.is_none() && id > 0 {
+                character_id = Some(id);
+            }
+        } else {
+            name_parts.push(token);
+        }
+    }
+
+    let name = (!name_parts.is_empty()).then(|| wire_player_name(&name_parts.join(" ")));
+    (character_id, portrait_id, name)
+}
+
+fn match_pending_whisper_echo(
+    plain: &str,
+    self_name: &str,
+    pending: &mut Vec<(String, String, Instant)>,
+) -> Option<String> {
+    let now = Instant::now();
+    let max_age = std::time::Duration::from_secs(10);
+    pending.retain(|(_, _, sent_at)| now.duration_since(*sent_at) < max_age);
+    let (speaker, body) = plain.trim().split_once(':')?;
+    if !speaker.trim().eq_ignore_ascii_case(&self_name.replace('|', " ")) {
+        return None;
+    }
+    let body = normalize_whisper_body(body);
+    let idx = pending
+        .iter()
+        .position(|(_, message, _)| message.eq_ignore_ascii_case(&body))?;
+    Some(pending.remove(idx).0)
+}
+
+fn normalize_whisper_body(message: &str) -> String {
+    parse_chat_line(message).to_plain_text().trim().to_owned()
+}
+
+fn extract_outgoing_whisper_echo(plain: &str) -> Option<(String, String)> {
+    let s = plain
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
+    let start = s.find("You whisper ")?;
+    let rest = &s[start..];
+    let to_idx = rest.rfind(" to ")?;
+    let quoted = rest[..to_idx]
+        .trim()
+        .strip_prefix("You whisper ")?
+        .trim();
+    let body = quoted
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .unwrap_or(quoted);
+    let target = rest[to_idx + 4..]
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .replace('|', " ");
+    (!target.is_empty()).then(|| (target, body.to_owned()))
 }
 
 /// Formats a whisper line for a dedicated peer whisper tab/window in regular chat style
@@ -11376,26 +11731,36 @@ fn format_whisper_tab_line(
         || lower.starts_with(&format!("{speaker_space}'"))
         || lower.starts_with(&format!("{speaker_pipe}'"));
     let escape_html = |text: &str| text.replace('&', "&amp;").replace('<', "&lt;");
+    let short_name_attr = wire_player_name(speaker)
+        .replace('&', "&amp;")
+        .replace('\'', "&#39;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let speaker_tag = format!(
+        "<name shortname='{short_name_attr}'>{}</name>",
+        escape_html(&speaker_disp)
+    );
     if let Some(emote) = trimmed.strip_prefix(':') {
         let emote_body = emote.trim_start();
         let line_html = format!(
-            "<font color='emote'>{} {}</font>",
-            escape_html(&speaker_disp),
+            "<font color='emote'>{speaker_tag} {}</font>",
             escape_html(emote_body)
         );
         parse_chat_line(&line_html)
     } else if is_name_prefixed_emote {
-        let normalized = if lower.starts_with(&speaker_pipe) && speaker_pipe != speaker_space {
-            let rest = &trimmed[speaker_pipe.len()..];
-            format!("{speaker_disp}{rest}")
+        let prefix_len = if lower.starts_with(&speaker_pipe) {
+            speaker_pipe.len()
         } else {
-            trimmed.to_owned()
+            speaker_space.len()
         };
-        parse_chat_line(&format!("<font color='emote'>{}</font>", escape_html(&normalized)))
+        parse_chat_line(&format!(
+            "<font color='emote'>{speaker_tag}{}</font>",
+            escape_html(&trimmed[prefix_len..])
+        ))
     } else {
         parse_chat_line(&format!(
-            "<name>{}</name>: {}",
-            escape_html(&speaker_disp),
+            "{speaker_tag}: {}",
             escape_html(trimmed)
         ))
     }
@@ -11526,8 +11891,28 @@ fn split_inline_chat_codes(s: &str) -> Vec<InlineChatPart<'_>> {
     let bytes = s.as_bytes();
     let mut last = 0usize;
     let mut i = 0usize;
-    while i + 2 < bytes.len() {
-        if bytes[i] == b'#' && (bytes[i + 1] == b'S' || bytes[i + 1] == b'C') {
+    while i < bytes.len() {
+        // Furcadia chat logs can contain a literal uppercase `:D` face. Keep
+        // this case-sensitive and require a token boundary so `:Decides`
+        // remains ordinary emote text instead of becoming a face plus text.
+        if bytes[i] == b':'
+            && bytes[i + 1] == b'D'
+            && (i + 2 == bytes.len() || !bytes[i + 2].is_ascii_alphabetic())
+        {
+            if i > last {
+                parts.push(InlineChatPart::Text(&s[last..i]));
+            }
+            if let Some(idx) = smiley_index_for_code('D') {
+                parts.push(InlineChatPart::Smiley { idx, code: 'D' });
+            }
+            i += 2;
+            last = i;
+            continue;
+        }
+        if i + 2 < bytes.len()
+            && bytes[i] == b'#'
+            && (bytes[i + 1] == b'S' || bytes[i + 1] == b'C')
+        {
             if let Some(ch) = s[i + 2..].chars().next() {
                 let kind = bytes[i + 1];
                 let mapped = if kind == b'S' {
@@ -11577,6 +11962,7 @@ fn render_chat_line(
     chat_imgs: &HashMap<String, Option<TextureHandle>>,
     player_badge_colors: &HashMap<String, Color32>,
     player_badges: &HashMap<String, TextureHandle>,
+    self_name_key: &str,
 ) {
     let has_name_link = line.spans.iter().any(|s| {
         matches!(
@@ -11667,12 +12053,11 @@ fn render_chat_line(
                         if let Some(short) = url.strip_prefix("name://") {
                             let key = shortname_key(short);
                             let disp_key = shortname_key(text);
-                            if let Some(&acc_col) = player_badge_colors
+                            rt = rt.color(player_badge_colors
                                 .get(&key)
                                 .or_else(|| player_badge_colors.get(&disp_key))
-                            {
-                                rt = rt.color(acc_col);
-                            }
+                                .copied()
+                                .unwrap_or_else(|| name_badge_chat_color(key == self_name_key)));
                             let resp = ui
                                 .add(egui::Label::new(rt).sense(egui::Sense::click()))
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -11714,9 +12099,10 @@ fn render_chat_line(
                     {
                         let peer = fallback_peer.as_deref().unwrap_or_default();
                         let key = shortname_key(peer);
-                        if let Some(&acc_col) = player_badge_colors.get(&key) {
-                            rt = rt.color(acc_col);
-                        }
+                        rt = rt.color(player_badge_colors
+                            .get(&key)
+                            .copied()
+                            .unwrap_or_else(|| name_badge_chat_color(key == self_name_key)));
                         let resp = ui
                             .add(egui::Label::new(rt.underline()).sense(egui::Sense::click()))
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -12802,6 +13188,11 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                     let dl_tx = tx.clone();
                     let dl_ctx = ctx.clone();
                     thread::spawn(move || {
+                        // Recolorable portrait pixels are encoded through Furcadia's
+                        // palette. A grayscale fallback destroys those channel values.
+                        let palette = AssetLocator::discover()
+                            .load_default_palette()
+                            .unwrap_or_default();
                         let cache_path = AssetLocator::species_cache_dir()
                             .map(|d| d.join(format!("pp{portrait_id}.fprt")));
                         let cached_bytes = cache_path
@@ -12819,8 +13210,10 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                             }
                             Some(bytes)
                         });
-                        let remappable = raw.as_ref().is_some_and(|bytes| bytes.starts_with(b"FPRT"));
-                        let rgba = raw.and_then(|bytes| decode_furcadia_portrait(&bytes));
+                        let decoded = raw.and_then(|bytes| decode_furcadia_portrait(&bytes, &palette));
+                        let (rgba, remappable) = decoded
+                            .map(|(w, h, rgba, remappable)| (Some((w, h, rgba)), remappable))
+                            .unwrap_or((None, false));
                         let _ = dl_tx.send(NetToUi::PortraitDownloaded { portrait_id, rgba, remappable });
                         dl_ctx.request_repaint();
                     });
@@ -13256,12 +13649,31 @@ fn decompress_bzip2(src: &[u8]) -> Option<Vec<u8>> {
     (!out.is_empty()).then_some(out)
 }
 
-/// Decodes a Furcadia custom portrait (`FPRT10`, `FPRT20`, or standard image bytes) into `(w, h, rgba)`.
-fn decode_furcadia_portrait(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+/// Recognizes Furcadia's encoded portrait remap pixels after palette expansion.
+/// The channel marker is `B == 0`, with `G` selecting a remap LUT (1..=47).
+/// Requiring a substantial cluster avoids treating a few ordinary dark-red pixels
+/// in a full-color portrait as a remapping mask.
+fn portrait_has_remap_pixels(rgba: &[u8]) -> bool {
+    let mut encoded = 0usize;
+    let mut opaque = 0usize;
+    for px in rgba.chunks_exact(4) {
+        if px[3] == 0 {
+            continue;
+        }
+        opaque += 1;
+        if px[2] == 0 && (1..48).contains(&px[1]) {
+            encoded += 1;
+        }
+    }
+    encoded >= 64 && encoded.saturating_mul(100) >= opaque.saturating_mul(5)
+}
+
+/// Decodes a Furcadia portrait (`FPRT01`, legacy wrappers, or standard image bytes).
+fn decode_furcadia_portrait(data: &[u8], palette: &Palette) -> Option<(usize, usize, Vec<u8>, bool)> {
     if let Ok(img) = image::load_from_memory(data) {
         let rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
-        return Some((w as usize, h as usize, rgba.into_raw()));
+        return Some((w as usize, h as usize, rgba.into_raw(), false));
     }
     if data.len() < 9 {
         return None;
@@ -13273,6 +13685,25 @@ fn decode_furcadia_portrait(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     if w == 0 || h == 0 {
         return None;
     }
+
+    // FPRT01 wraps a classic FSH portrait in Furcadia's inverted LZW stream.
+    // Its flags byte uses bit 0 to identify portraits designed for color remapping.
+    if header == b"FPRT01" {
+        let fsh = decompress_furcadia_lzw(&data[9..])?;
+        if let Ok(mut archive) = FoxArchive::from_bytes(fsh.clone()) {
+            if let Ok(sprite) = archive.decode_image(0, &palette) {
+                let rgba = sprite.rgba.clone();
+                let remappable = fmt & 0x01 != 0 || portrait_has_remap_pixels(&rgba);
+                return Some((sprite.width as usize, sprite.height as usize, rgba, remappable));
+            }
+        }
+        if let Some(sprite) = decode_fsh_sprites(&fsh, palette).into_iter().next() {
+            let remappable = fmt & 0x01 != 0 || portrait_has_remap_pixels(&sprite.rgba);
+            return Some((sprite.width as usize, sprite.height as usize, sprite.rgba, remappable));
+        }
+        return None;
+    }
+
     let decoded_owned;
     let pixels: &[u8] = if header == b"FPRT10" {
         decoded_owned = decompress_furcadia_lzw(&data[9..])?;
@@ -13292,9 +13723,9 @@ fn decode_furcadia_portrait(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
             pixels.to_vec()
         };
         if let Ok(mut archive) = FoxArchive::from_bytes(fox_bytes) {
-            let pal = Palette::default();
-            if let Ok(sprite) = archive.decode_image(0, &pal) {
-                return Some((sprite.width as usize, sprite.height as usize, sprite.rgba.clone()));
+            if let Ok(sprite) = archive.decode_image(0, palette) {
+                let rgba = sprite.rgba.clone();
+                return Some((sprite.width as usize, sprite.height as usize, rgba, true));
             }
         }
         return None;
@@ -13316,7 +13747,8 @@ fn decode_furcadia_portrait(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
                 rgba[d + 3] = 255;
             }
         }
-        return Some((w, h, rgba));
+        let remappable = portrait_has_remap_pixels(&rgba);
+        return Some((w, h, rgba, remappable));
     }
 
     None
@@ -13383,6 +13815,32 @@ mod tests {
         let fallback = parse_chat_line(plain);
         let formatted = format_whisper_tab_line("Amala|Devi", "Alty Bunnie", plain, &fallback);
         assert_eq!(formatted.to_plain_text(), "Alty Bunnie shivers and waves.");
+    }
+
+    #[test]
+    fn outgoing_whisper_echo_extracts_trimmed_target_and_message() {
+        let plain = r#"[ You whisper "I wanted to say hello." to Alty|Bunnie . ]"#;
+        assert_eq!(extract_whisper_peer(plain).as_deref(), Some("Alty Bunnie"));
+        assert_eq!(
+            extract_outgoing_whisper_echo(plain),
+            Some(("Alty Bunnie".to_owned(), "I wanted to say hello.".to_owned()))
+        );
+    }
+
+    #[test]
+    fn portrait_directive_uses_pp_file_id_not_character_id() {
+        assert_eq!(
+            parse_portrait_directive("43091366 pp7821"),
+            (Some(43_091_366), Some(7_821), None)
+        );
+        assert_eq!(
+            parse_portrait_directive("43091366 pp7821 Bentley|Karthorn"),
+            (
+                Some(43_091_366),
+                Some(7_821),
+                Some("Bentley|Karthorn".to_owned())
+            )
+        );
     }
 
     #[test]
@@ -13460,8 +13918,10 @@ mod tests {
         data.extend_from_slice(&[10, 20, 30, 40, 50, 60]);
         // top row (y=0 in top-down)
         data.extend_from_slice(&[100, 110, 120, 130, 140, 150]);
-        let (w, h, rgba) = decode_furcadia_portrait(&data).expect("should decode FPRT20");
+        let (w, h, rgba, remappable) = decode_furcadia_portrait(&data, &Palette::default())
+            .expect("should decode FPRT20");
         assert_eq!((w, h), (2, 2));
+        assert!(!remappable);
         // Top-left pixel should be RGB(120, 110, 100, 255)
         assert_eq!(&rgba[0..4], &[120, 110, 100, 255]);
         // Bottom-right pixel should be RGB(60, 50, 40, 255)

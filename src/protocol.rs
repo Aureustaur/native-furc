@@ -285,6 +285,12 @@ fn ensure_single_line(s: &str) -> Result<(), ProtocolError> {
     }
 }
 
+/// Furcadia treats a literal `<3` as the start of a markup tag unless the
+/// angle bracket is entity-escaped on the wire.
+fn escape_analogue_heart(text: &str) -> String {
+    text.replace("<3", "&lt;3")
+}
+
 const PW_BASE_INFO: &str = "IP=192.168.0.3 H=155d414c R=16587 D=2087772 U=8242621 T=bcgfefdfa M=1600x900 V=31.2-Final ";
 const PW_CLIENT_SALT: &str = "168356072050782049568476";
 
@@ -496,7 +502,7 @@ impl ClientCommand {
             }
             Self::Say(text) => {
                 ensure_single_line(text)?;
-                format!("\"{text}")
+                format!("\"{}", escape_analogue_heart(text))
             }
             Self::Whisper { target, message } => {
                 if target.trim().is_empty() {
@@ -504,7 +510,7 @@ impl ClientCommand {
                 }
                 ensure_single_line(target)?;
                 ensure_single_line(message)?;
-                format!("wh {target} {message}")
+                format!("wh {target} {}", escape_analogue_heart(message))
             }
             Self::Move(dir) => format!("m {dir}"),
             Self::OnlineCheck(name) => {

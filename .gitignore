@@ -1,4 +1,5 @@
 /target/
+/android/target/
 /dist/
 /Furcadia Windows/
 *.log

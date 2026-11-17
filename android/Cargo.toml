@@ -1,0 +1,29 @@
+[package]
+name = "furcadia-android"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[package.metadata.android]
+package = "org.furcadia.native"
+apk_name = "furcadia-native"
+build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
+
+[package.metadata.android.application]
+label = "Furcadia Native"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[package.metadata.android.sdk]
+min_sdk_version = 23
+target_sdk_version = 35
+
+[dependencies]
+android_logger = "0.13"
+eframe = { version = "0.30", default-features = false, features = ["android-native-activity", "default_fonts", "glow"] }
+log = "0.4"
+winit = { version = "0.30", features = ["android-native-activity"] }
