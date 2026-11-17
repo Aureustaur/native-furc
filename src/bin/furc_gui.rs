@@ -429,6 +429,7 @@ fn render_player_menu_buttons(
             ("Use", "use"),
             ("Wings", "wings"),
             ("Costume", "costume"),
+            ("Eat Cookie", "eat-cookie"),
         ] {
             item(ui, label, PlayerMenuAction::Raw(cmd));
         }
@@ -5029,6 +5030,15 @@ impl FurcadiaApp {
                 | "desctags"
                 | "dreamurl"
                 | "buy-cookie"
+                | "make-cookie"
+                | "make-secret"
+                | "give-cookie"
+                | "secret-cookie"
+                | "eat-cookie"
+                | "cookies-reject"
+                | "cookies-accept"
+                | "cookies-off"
+                | "cookies-on"
                 | "liedown"
                 | "listgroups"
                 | "listf"
@@ -10732,22 +10742,35 @@ Light: {} | Amb: {} | Elev: {:?}",
                             if self.is_connected
                                 && !display_name.eq_ignore_ascii_case(&self.active_character_name())
                             {
-                                if ui
-                                    .small_button("🍪 Cookie")
-                                    .on_hover_text(format!(
-                                        "Give a cookie to {display_name} (uses one of your daily cookies; run `info` to check how many you have)"
-                                    ))
-                                    .clicked()
-                                {
-                                    self.send_raw_cmd(&format!("make-cookie {}", snapshot.short_name));
-                                    // Refresh the displayed cookie count after the server handles
-                                    // the make-cookie request, including any rejection message.
-                                    self.send_raw_cmd("info");
-                                    self.push_system_line(
-                                        "emit",
-                                        &format!("[Cookie] Offering a cookie to {display_name}..."),
-                                    );
-                                }
+                                ui.menu_button("🍪 Cookie", |ui| {
+                                    for (lbl, cmd, tip) in [
+                                        (
+                                            "🍪 Make Cookie (Daily)",
+                                            "make-cookie",
+                                            "Bake a new daily cookie for this player (requires 15 min login time)",
+                                        ),
+                                        (
+                                            "🤲 Give Held Cookie",
+                                            "give-cookie",
+                                            "Give one of the cookies currently in your description",
+                                        ),
+                                        (
+                                            "🤫 Make Secret Cookie",
+                                            "make-secret",
+                                            "Bake a daily cookie without alerting others in the room",
+                                        ),
+                                        (
+                                            "🤫 Give Secret Cookie",
+                                            "secret-cookie",
+                                            "Give a held cookie from your description without alerting others",
+                                        ),
+                                    ] {
+                                        if ui.button(lbl).on_hover_text(tip).clicked() {
+                                            self.send_raw_cmd(&format!("{cmd} {}", snapshot.short_name));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
                                 ui.menu_button("🎁 Gift", |ui| {
                                     for (lbl, cmd) in [
                                         ("✋ Give Held Item", "give"),
@@ -11722,8 +11745,17 @@ fn parse_cookie_counts(plain: &str) -> (Option<u32>, Option<u32>) {
             .collect();
         digits.parse().ok()
     };
+    let collected = after("currently collected:").or_else(|| {
+        let idx = lower.find("item: cookies (")? + "item: cookies (".len();
+        let digits: String = lower[idx..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    });
     (
-        after("currently collected:"),
+        collected,
         after("all-time cookie total:"),
     )
 }
