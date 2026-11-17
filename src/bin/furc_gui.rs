@@ -11714,6 +11714,16 @@ fn format_whisper_tab_line(
                 .and_then(|q| q.strip_suffix('"'))
                 .unwrap_or(quoted);
             (peer, inner)
+        } else if let Some(quoted) = after.strip_prefix('"') {
+            // Some emote whispers arrive without Furcadia's usual `to you`
+            // suffix. Recover the quoted body instead of displaying the raw
+            // server wrapper as a normal chat line.
+            let inner = quoted
+                .rfind('"')
+                .map(|end| &quoted[..end])
+                .unwrap_or(quoted)
+                .trim();
+            (peer, inner)
         } else {
             return fallback.clone();
         }

@@ -21,7 +21,7 @@
 
 ---
 
-![Furcadia Native Client in a dream](furc.png)
+![Furcadia Native Client with fictional demo names, sample chat, and four whisper tabs](mockups/demo-chat-screenshot-reference-v2.png)
 
 Furcadia Native Client is an independent desktop client for Furcadia, built in Rust with an `egui` interface. It includes a graphical client for everyday play, a command-line client for terminal workflows, and a reusable library for Furcadia networking and asset formats. The project targets Linux and Windows and is designed to use Furcadia data already present on your system.
 

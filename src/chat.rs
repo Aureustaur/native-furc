@@ -148,6 +148,79 @@ fn push_text(spans: &mut Vec<ChatSpan>, text: &str, style: &ChatStyle) {
     if text.is_empty() {
         return;
     }
+    if style.link.is_none() {
+        let mut cursor = 0usize;
+        let mut search = 0usize;
+        while search < text.len() {
+            let Some((start, prefix_len)) = find_plain_url(&text[search..]) else {
+                break;
+            };
+            let start = search + start;
+            let url_start = start;
+            let mut end = url_start + prefix_len;
+            while end < text.len() {
+                let ch = text[end..].chars().next().unwrap();
+                if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\'') {
+                    break;
+                }
+                end += ch.len_utf8();
+            }
+            let mut url_end = end;
+            while url_end > url_start {
+                let ch = text[..url_end].chars().next_back().unwrap();
+                if matches!(ch, '.' | ',' | '!' | '?' | ';' | ':' | ')' | ']' | '}') {
+                    url_end -= ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if url_end == url_start {
+                search = end.max(url_start + prefix_len);
+                continue;
+            }
+            push_plain_text(spans, &text[cursor..url_start], style);
+            let url = &text[url_start..url_end];
+            let mut link_style = style.clone();
+            link_style.link = Some(url.to_owned());
+            push_plain_text(spans, url, &link_style);
+            cursor = url_end;
+            search = url_end;
+        }
+        if cursor == 0 {
+            push_plain_text(spans, text, style);
+        } else {
+            push_plain_text(spans, &text[cursor..], style);
+        }
+        return;
+    }
+    push_plain_text(spans, text, style);
+}
+
+fn find_plain_url(text: &str) -> Option<(usize, usize)> {
+    for (idx, _) in text.char_indices() {
+        let prefix_len = if text[idx..].get(..8).is_some_and(|p| p.eq_ignore_ascii_case("https://")) {
+            8
+        } else if text[idx..].get(..7).is_some_and(|p| p.eq_ignore_ascii_case("http://")) {
+            7
+        } else {
+            continue;
+        };
+        let boundary_ok = idx == 0
+            || !text[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '@');
+        if boundary_ok {
+            return Some((idx, prefix_len));
+        }
+    }
+    None
+}
+
+fn push_plain_text(spans: &mut Vec<ChatSpan>, text: &str, style: &ChatStyle) {
+    if text.is_empty() {
+        return;
+    }
     if let Some(ChatSpan::Text {
         text: prev,
         style: prev_style,
