@@ -60,10 +60,8 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--timeout-secs" => {
                 let raw = iter.next().ok_or("--timeout-secs requires a value")?;
-                args.timeout_secs = Some(
-                    raw.parse()
-                        .map_err(|_| format!("invalid timeout: {raw}"))?,
-                );
+                args.timeout_secs =
+                    Some(raw.parse().map_err(|_| format!("invalid timeout: {raw}"))?);
             }
             "--watch" => {
                 let names = iter.next().ok_or("--watch requires a value")?;
@@ -136,6 +134,7 @@ fn main() {
     };
 
     println!("Connecting to {}:{}...", config.host, config.port);
+    eprintln!("SECURITY NOTICE: game traffic will use legacy TLS without certificate verification; an active attacker could impersonate the server.");
     let mut client = match FurcadiaClient::connect(&config) {
         Ok(c) => c,
         Err(err) => {
@@ -151,6 +150,18 @@ fn main() {
                 println!("<- {msg:?}");
             }
             println!("Handshake complete: {:?}", client.state());
+            match client.enable_tls(std::time::Duration::from_secs(12)) {
+                Ok(pre_tls) => {
+                    for msg in pre_tls {
+                        println!("<- {msg:?}");
+                    }
+                    println!("TLS encryption established; server certificate was not verified.");
+                }
+                Err(err) => {
+                    eprintln!("Secure connection failed; refusing to send credentials: {err}");
+                    std::process::exit(1);
+                }
+            }
         }
         Err(err) => {
             eprintln!("Handshake failed: {err}");
@@ -265,7 +276,10 @@ fn main() {
                             Some(PounceEvent::WentOffline(n)) => {
                                 println!("[pounce] {n} went OFFLINE.");
                             }
-                            Some(PounceEvent::Checked { name: n, online: st }) => {
+                            Some(PounceEvent::Checked {
+                                name: n,
+                                online: st,
+                            }) => {
                                 let label = if st { "ONLINE" } else { "offline" };
                                 println!("[pounce] {n} is {label}");
                             }

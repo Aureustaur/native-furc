@@ -1,13 +1,11 @@
 //! TCP client and login state machine for the Furcadia protocol.
 
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
-use crate::protocol::{
-    ClientCommand, ProtocolError, ServerMessage, DEFAULT_HOST, DEFAULT_PORT,
-};
+use crate::protocol::{ClientCommand, ProtocolError, ServerMessage, DEFAULT_HOST, DEFAULT_PORT};
 
 /// Configuration for connecting to a Furcadia game server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +56,10 @@ impl fmt::Display for ClientError {
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::Protocol(err) => write!(f, "protocol error: {err}"),
             Self::InvalidState { expected, actual } => {
-                write!(f, "invalid session state: expected {expected}, got {actual:?}")
+                write!(
+                    f,
+                    "invalid session state: expected {expected}, got {actual:?}"
+                )
             }
             Self::Timeout(msg) => write!(f, "connection timed out: {msg}"),
             Self::Disconnected => write!(f, "server closed the connection"),
@@ -90,10 +91,54 @@ impl From<ProtocolError> for ClientError {
 
 /// Synchronous, line-framed TCP client for Furcadia.
 pub struct FurcadiaClient {
-    reader: BufReader<TcpStream>,
-    writer: TcpStream,
+    reader: BufReader<ConnectionStream>,
+    host: String,
+    read_timeout: Option<Duration>,
     state: SessionState,
     byte_buf: Vec<u8>,
+}
+
+enum ConnectionStream {
+    Empty,
+    Plain(TcpStream),
+    Tls(openssl::ssl::SslStream<TcpStream>),
+}
+
+impl Read for ConnectionStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Empty => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "connection is closed",
+            )),
+            Self::Plain(stream) => stream.read(buf),
+            Self::Tls(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for ConnectionStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Empty => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "connection is closed",
+            )),
+            Self::Plain(stream) => stream.write(buf),
+            Self::Tls(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Empty => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "connection is closed",
+            )),
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
 }
 
 impl FurcadiaClient {
@@ -108,14 +153,102 @@ impl FurcadiaClient {
 
         let stream = TcpStream::connect_timeout(&addr, config.connect_timeout)?;
         stream.set_read_timeout(config.read_timeout)?;
-        let writer = stream.try_clone()?;
-
         Ok(Self {
-            reader: BufReader::new(stream),
-            writer,
+            reader: BufReader::new(ConnectionStream::Plain(stream)),
+            host: config.host.clone(),
+            read_timeout: config.read_timeout,
             state: SessionState::AwaitingDragonroar,
             byte_buf: Vec::with_capacity(512),
         })
+    }
+
+    /// Requests Furcadia's STARTTLS upgrade. Uses legacy compatibility settings
+    /// because the game server currently presents an expired certificate and
+    /// requires a 1024-bit DHE exchange. The caller must warn the user clearly.
+    pub fn enable_tls(&mut self, timeout: Duration) -> Result<Vec<ServerMessage>, ClientError> {
+        if !matches!(self.state, SessionState::Handshaked { .. }) {
+            return Err(ClientError::InvalidState {
+                expected: "Handshaked",
+                actual: self.state.clone(),
+            });
+        }
+        self.reader.get_mut().write_all(b"starttls\n")?;
+        self.reader.get_mut().flush()?;
+
+        let deadline = Instant::now() + timeout;
+        let mut pending = Vec::new();
+        loop {
+            if Instant::now() >= deadline {
+                return Err(ClientError::Timeout("timed out negotiating TLS".into()));
+            }
+            match self.reader.read_until(b'\n', &mut self.byte_buf) {
+                Ok(0) => return Err(ClientError::Disconnected),
+                Ok(_) => {
+                    let msg = ServerMessage::parse_bytes(&self.byte_buf);
+                    self.byte_buf.clear();
+                    match &msg {
+                        ServerMessage::Extended {
+                            code: Some('S'),
+                            payload,
+                        } if payload.starts_with('1') => break,
+                        ServerMessage::Extended {
+                            code: Some('S'),
+                            payload,
+                        } => {
+                            return Err(ClientError::Io(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                format!("server refused TLS (status {payload})"),
+                            )));
+                        }
+                        _ => pending.push(msg),
+                    }
+                }
+                Err(err)
+                    if err.kind() == io::ErrorKind::WouldBlock
+                        || err.kind() == io::ErrorKind::TimedOut =>
+                {
+                    continue
+                }
+                Err(err) => return Err(ClientError::Io(err)),
+            }
+        }
+
+        if !self.reader.buffer().is_empty() {
+            return Err(ClientError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected plaintext buffered after TLS readiness response",
+            )));
+        }
+        let reader = std::mem::replace(&mut self.reader, BufReader::new(ConnectionStream::Empty));
+        let stream = match reader.into_inner() {
+            ConnectionStream::Plain(stream) => stream,
+            ConnectionStream::Tls(_) | ConnectionStream::Empty => {
+                return Err(ClientError::InvalidState {
+                    expected: "plain connection",
+                    actual: self.state.clone(),
+                })
+            }
+        };
+
+        let stream = stream;
+        stream.set_read_timeout(Some(timeout))?;
+        let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())
+            .map_err(tls_error)?;
+        builder
+            .set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
+            .map_err(tls_error)?;
+        builder
+            .set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
+            .map_err(tls_error)?;
+        builder
+            .set_cipher_list("DEFAULT:@SECLEVEL=0")
+            .map_err(tls_error)?;
+        builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
+        let connector = builder.build();
+        let tls_stream = connector.connect(&self.host, stream).map_err(tls_error)?;
+        tls_stream.get_ref().set_read_timeout(self.read_timeout)?;
+        self.reader = BufReader::new(ConnectionStream::Tls(tls_stream));
+        Ok(pending)
     }
 
     /// Returns the current session state.
@@ -224,8 +357,8 @@ impl FurcadiaClient {
     /// Encodes and writes a `ClientCommand` to the server socket.
     pub fn send_command(&mut self, cmd: &ClientCommand) -> Result<(), ClientError> {
         let encoded = cmd.encode()?;
-        self.writer.write_all(encoded.as_bytes())?;
-        self.writer.flush()?;
+        self.reader.get_mut().write_all(encoded.as_bytes())?;
+        self.reader.get_mut().flush()?;
         Ok(())
     }
 
@@ -286,6 +419,13 @@ impl FurcadiaClient {
     }
 }
 
+fn tls_error(error: impl std::fmt::Display) -> ClientError {
+    ClientError::Io(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("legacy TLS handshake failed: {error}"),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,7 +439,8 @@ mod tests {
 
         let server = thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
-            conn.write_all(b"(Connecting...\nDragonroar V00013\n").unwrap();
+            conn.write_all(b"(Connecting...\nDragonroar V00013\n")
+                .unwrap();
             conn.flush().unwrap();
 
             let mut reader = BufReader::new(conn.try_clone().unwrap());

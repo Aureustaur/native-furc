@@ -1,6 +1,8 @@
 //! Furcadia account authentication and character discovery via `charon.furcadia.com`.
 
 use std::fmt;
+use std::io::Write;
+use std::process::Stdio;
 
 const CLOGIN_ENDPOINTS: &[&str] = &[
     "https://charon.furcadia.com/accounts/clogin.php",
@@ -58,9 +60,20 @@ impl std::error::Error for AuthError {}
 pub fn fetch_account_characters(email: &str, password: &str) -> Result<AccountInfo, AuthError> {
     let mut last_err = None;
     for endpoint in CLOGIN_ENDPOINTS {
+        // Keep credentials out of curl's argv: process listings can expose arguments
+        // to other local users while the child process is running.
+        let body = format!(
+            "k={}&v={}&u={}&p={}",
+            form_url_encode(CLIENT_KEY),
+            form_url_encode(CLIENT_VERSION),
+            form_url_encode(email),
+            form_url_encode(password),
+        );
         let output = crate::sys::command("curl")
             .arg("-sS")
             .arg("-L")
+            .arg("--proto-redir")
+            .arg("=https")
             .arg("--max-time")
             .arg("10")
             .arg("-w")
@@ -68,15 +81,18 @@ pub fn fetch_account_characters(email: &str, password: &str) -> Result<AccountIn
             .arg("-X")
             .arg("POST")
             .arg(endpoint)
-            .arg("--data-urlencode")
-            .arg(format!("k={CLIENT_KEY}"))
-            .arg("--data-urlencode")
-            .arg(format!("v={CLIENT_VERSION}"))
-            .arg("--data-urlencode")
-            .arg(format!("u={email}"))
-            .arg("--data-urlencode")
-            .arg(format!("p={password}"))
-            .output();
+            .arg("--data-binary")
+            .arg("@-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(body.as_bytes())?;
+                }
+                child.wait_with_output()
+            });
 
         match output {
             Ok(out) if out.status.success() => {
@@ -111,6 +127,20 @@ pub fn fetch_account_characters(email: &str, password: &str) -> Result<AccountIn
     }
 
     Err(last_err.unwrap_or_else(|| AuthError::Transport("no auth endpoints available".into())))
+}
+
+fn form_url_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from_digit((byte >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+            encoded.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap().to_ascii_uppercase());
+        }
+    }
+    encoded
 }
 
 /// Parses the XML response from `clogin.php`.

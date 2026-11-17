@@ -1750,7 +1750,7 @@ impl FurcadiaApp {
             hovered_avatar_uid: None,
             context_menu_avatar: None,
             cam_offset: Vec2::ZERO,
-            zoom: 1.25,
+            zoom: if cfg.limit_view_range { 1.0 } else { 1.25 },
             to_net,
             from_net,
             bg_sessions: Vec::new(),
@@ -3201,17 +3201,8 @@ impl FurcadiaApp {
             if name.is_empty() {
                 continue;
             }
-            let custom_pid = self
-                .player_portrait_ids
-                .iter()
-                .find(|(known_name, _)| shortname_key(known_name) == name)
-                .map(|(_, pid)| *pid);
-            if let Some(pid) = custom_pid {
-                if let Some(tex) = self.custom_portrait_texture(ctx, pid, &appearance) {
-                    textures.insert(name, tex);
-                    continue;
-                }
-            }
+            // Chat tags are the species/gender FOX marker (purpose 35).
+            // Custom portraits belong in profile cards, not in the tag slot.
             let (file_id, obj_id) = self.resolve_species_spec(species as usize);
             let cache_id = self.ensure_species_cache(file_id);
             if let Some(cache) = self.species_caches.get_mut(&cache_id) {
@@ -4423,6 +4414,11 @@ impl FurcadiaApp {
                 let _ = self
                     .to_net
                     .send(UiToNet::Send(ClientCommand::Raw("info".to_owned())));
+                // Begin loading Pounce data as soon as the game session accepts
+                // the character. The Pounce panel itself is only rendered in-game.
+                let _ = self
+                    .to_net
+                    .send(UiToNet::Send(ClientCommand::Raw("pounceInit".to_owned())));
                 if let Some(dir) = default_logs_dir() {
                     let _ = std::fs::create_dir_all(&dir);
                     let _ = std::fs::write(dir.join("login_trace.log"), "");
@@ -4437,9 +4433,6 @@ impl FurcadiaApp {
                     "success",
                     &format!("Logged in as {} (UID {uid})", name.replace('|', " ")),
                 );
-                let _ = self
-                    .to_net
-                    .send(UiToNet::Send(ClientCommand::Raw("pounceInit".to_owned())));
             }
             ServerMessage::MapName(_name) => {
                 // `]m<name>` is the server's legacy area label (e.g. "arco 99"), not a dream/map
@@ -5574,10 +5567,11 @@ impl FurcadiaApp {
                         if ui
                             .checkbox(
                                 &mut self.limit_view_range,
-                                "Limit map view to Furcadia speech/sight range",
+                                "Furcadia Default mode (1× 624 × 352 view; more room for chat)",
                             )
                             .changed()
                         {
+                            self.zoom = if self.limit_view_range { 1.0 } else { 1.25 };
                             self.save_config();
                         }
                         if ui
@@ -6080,6 +6074,12 @@ impl FurcadiaApp {
                             );
                             let enter_pressed = (email_resp.lost_focus() || pass_resp.lost_focus())
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                            ui.add_space(8.0);
+                            ui.colored_label(
+                                Color32::from_rgb(255, 190, 90),
+                                "Connection warning: game traffic uses legacy TLS. Furcadia's server certificate is expired and is not verified, so an active attacker could impersonate the server and capture your password.",
+                            );
 
                             ui.add_space(16.0);
                             let login_btn = egui::Button::new(
@@ -7330,6 +7330,9 @@ impl FurcadiaApp {
                                         self.trigger_play();
                                     }
                                 });
+                                if ui.small_button("🖼 Change Portrait").clicked() {
+                                    self.send_raw_cmd("portrchng");
+                                }
                                 if self.cookies_collected.is_some() || self.cookies_total.is_some() {
                                     let mut txt = String::from("🍪");
                                     if let Some(c) = self.cookies_collected {
@@ -7348,29 +7351,6 @@ impl FurcadiaApp {
                             });
                         });
 
-                        ui.add_space(4.0);
-                        let name = self
-                            .world
-                            .self_name
-                            .as_deref()
-                            .or_else(|| self.selected_character().map(|c| c.name.as_str()))
-                            .unwrap_or("Adventurer");
-                        egui::Frame::none()
-                            .fill(Color32::from_rgb(56, 42, 102))
-                            .stroke(Stroke::new(1.0_f32, GOLD_DIM))
-                            .rounding(10.0)
-                            .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.vertical_centered(|ui| {
-                                    ui.label(
-                                        RichText::new(name)
-                                            .size(13.5)
-                                            .strong()
-                                            .color(Color32::WHITE),
-                                    );
-                                });
-                            });
                     });
 
                 ui.add_space(6.0);
@@ -7757,9 +7737,6 @@ impl FurcadiaApp {
                                 if ui.button("🏷 Desctags").on_hover_text("List/toggle desctags (`desctags)").clicked() {
                                     self.send_raw_cmd("desctags");
                                 }
-                                if ui.button("🖼 Cycle Portrait").on_hover_text("Cycle custom portraits (`portrchng)").clicked() {
-                                    self.send_raw_cmd("portrchng");
-                                }
                                 if ui.button("💎 Digo Market").on_hover_text("Open Digo Market in browser").clicked() {
                                     ctx.open_url(egui::OpenUrl::new_tab(
                                         "https://www.furcadia.com/digo/",
@@ -7959,12 +7936,6 @@ impl FurcadiaApp {
                             ui.label(RichText::new("✦ MISC & TOOLS").strong().color(accent));
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
-                                if ui
-                                    .add(egui::Button::new("🖼 Change Portrait").min_size(Vec2::new(112.0, 26.0)))
-                                    .clicked()
-                                {
-                                    ctx.open_url(egui::OpenUrl::new_tab("https://www.furcadia.com/fured"));
-                                }
                                 if ui
                                     .add(egui::Button::new("📜 View Log").min_size(Vec2::new(112.0, 26.0)))
                                     .clicked()
@@ -8519,17 +8490,6 @@ impl FurcadiaApp {
                         self.show_avatar_names = !self.show_avatar_names;
                         self.save_config();
                     }
-                    if ui
-                        .selectable_label(self.limit_view_range, "Chat View")
-                        .on_hover_text("Limit map to Furcadia chat/sight distance (624x352)")
-                        .clicked()
-                    {
-                        self.limit_view_range = !self.limit_view_range;
-                        if self.limit_view_range && self.zoom < 0.95 {
-                            self.zoom = 0.95;
-                        }
-                        self.save_config();
-                    }
                     ui.label(
                         RichText::new(format!("{} Visible", self.last_visible_avatar_count))
                             .size(11.0)
@@ -8555,6 +8515,27 @@ impl FurcadiaApp {
                     if ui.small_button("Settings").on_hover_text("Open Settings").clicked() {
                         self.settings_open = !self.settings_open;
                     }
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let map_size_label = if self.limit_view_range {
+                                "Map Size: Default"
+                            } else {
+                                "Map Size: Expanded"
+                            };
+                            if ui
+                                .selectable_label(self.limit_view_range, map_size_label)
+                                .on_hover_text(
+                                    "Switch between Furcadia's 1× 624×352 default map and the expanded map",
+                                )
+                                .clicked()
+                            {
+                                self.limit_view_range = !self.limit_view_range;
+                                self.zoom = if self.limit_view_range { 1.0 } else { 1.25 };
+                                self.save_config();
+                            }
+                        },
+                    );
                 });
             });
 
@@ -10412,8 +10393,22 @@ impl FurcadiaApp {
         let Some(snapshot) = self.looked_player.clone() else {
             return;
         };
+        let snapshot_name_key = shortname_key(&snapshot.info.name);
+        let live_self = self
+            .world
+            .self_uid
+            .and_then(|uid| self.world.avatars.get(&uid))
+            .filter(|avatar| shortname_key(&avatar.name) == snapshot_name_key)
+            .cloned();
+        // `]f` can report an incomplete appearance for the local character.
+        // The live avatar state has the authoritative species, gender, and
+        // color slots used by the species/gender tag shown before names.
+        let appearance = live_self
+            .as_ref()
+            .map(|avatar| avatar.appearance.clone())
+            .unwrap_or_else(|| snapshot.info.appearance.clone());
         let eff = {
-            let sp = snapshot.info.appearance.species_id;
+            let sp = appearance.species_id;
             if sp == 1000 {
                 None
             } else if (1001..=1080).contains(&sp) {
@@ -10427,7 +10422,7 @@ impl FurcadiaApp {
             } else {
                 Some((
                     if sp == 0 { 1 } else { sp },
-                    snapshot.info.appearance.gender,
+                    appearance.gender,
                 ))
             }
         };
@@ -10435,7 +10430,7 @@ impl FurcadiaApp {
         let (mut portrait_tex, mut badge_tex) = (snapshot.portrait_tex, snapshot.badge_tex);
         match eff {
             Some((eff_sp, eff_gender)) => {
-                let cache_state = (eff_sp, eff_gender, snapshot.info.appearance.color_key);
+                let cache_state = (eff_sp, eff_gender, appearance.color_key);
                 if snapshot.resolved_for != Some(cache_state) {
                     let (file_id, obj_id) = self.resolve_species_spec(eff_sp as usize);
                     let cache_key = self.ensure_species_cache(file_id);
@@ -10443,7 +10438,7 @@ impl FurcadiaApp {
                         portrait_tex = cache.get_or_load_portrait_tex(
                             ctx,
                             &self.palette,
-                            &snapshot.info.appearance,
+                            &appearance,
                             obj_id,
                             eff_gender,
                             4,
@@ -10451,7 +10446,7 @@ impl FurcadiaApp {
                         badge_tex = cache.get_or_load_portrait_tex(
                             ctx,
                             &self.palette,
-                            &snapshot.info.appearance,
+                            &appearance,
                             obj_id,
                             eff_gender,
                             35,
@@ -10519,7 +10514,7 @@ impl FurcadiaApp {
                     let port_size = Vec2::splat(self.portrait_size);
                     let custom_tex = snapshot
                         .portrait_id
-                        .and_then(|pid| self.custom_portrait_texture(ctx, pid, &snapshot.info.appearance));
+                        .and_then(|pid| self.custom_portrait_texture(ctx, pid, &appearance));
                     if let Some(ref tex) = custom_tex.or(portrait_tex) {
                         let resp = ui.image(egui::load::SizedTexture::new(tex.id(), port_size));
                         if let Some(pid) = snapshot.portrait_id {
@@ -12059,6 +12054,20 @@ fn render_chat_line(
                         rt = rt.color(Color32::from_rgb(232, 236, 244));
                     }
                     if let Some(url) = &style.link {
+                        if text.contains("#S") || text.contains("#C") {
+                            render_linked_inline_codes(
+                                ui,
+                                text,
+                                style,
+                                url,
+                                action_out,
+                                smileys,
+                                desctags,
+                                player_badge_colors,
+                                self_name_key,
+                            );
+                            continue;
+                        }
                         let lower = url.to_ascii_lowercase();
                         if let Some(short) = url.strip_prefix("name://") {
                             let key = shortname_key(short);
@@ -12072,7 +12081,7 @@ fn render_chat_line(
                                 .add(egui::Label::new(rt).sense(egui::Sense::click()))
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text(format!("{text}\nPlayer: {short}"));
-                            if resp.clicked() || resp.secondary_clicked() {
+                            if resp.secondary_clicked() {
                                 let pos = resp
                                     .interact_pointer_pos()
                                     .unwrap_or_else(|| resp.rect.left_bottom());
@@ -12117,7 +12126,7 @@ fn render_chat_line(
                             .add(egui::Label::new(rt.underline()).sense(egui::Sense::click()))
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .on_hover_text(format!("{peer}\nPlayer profile and actions"));
-                        if resp.clicked() || resp.secondary_clicked() {
+                        if resp.secondary_clicked() {
                             let pos = resp
                                 .interact_pointer_pos()
                                 .unwrap_or_else(|| resp.rect.left_bottom());
@@ -12175,6 +12184,106 @@ fn render_chat_line(
             }
         }
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_linked_inline_codes(
+    ui: &mut egui::Ui,
+    text: &str,
+    style: &furcadia_client::ChatStyle,
+    url: &str,
+    action_out: &mut Option<ChatClickAction>,
+    smileys: &[Option<TextureHandle>],
+    desctags: &[Option<TextureHandle>],
+    player_badge_colors: &HashMap<String, Color32>,
+    self_name_key: &str,
+) {
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let lower_url = url.to_ascii_lowercase();
+    for part in split_inline_chat_codes(text) {
+        match part {
+            InlineChatPart::Text(segment) if !segment.is_empty() => {
+                let mut rich = RichText::new(segment);
+                if style.bold {
+                    rich = rich.strong();
+                }
+                if style.italic || style.color.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("emote")) {
+                    rich = rich.italics();
+                }
+                if style.underline || style.link.is_some() {
+                    rich = rich.underline();
+                }
+                if let Some(color_name) = &style.color {
+                    rich = rich.color(map_chat_color(color_name));
+                } else {
+                    rich = rich.color(Color32::from_rgb(232, 236, 244));
+                }
+
+                if let Some(short) = url.strip_prefix("name://") {
+                    let key = shortname_key(short);
+                    let display_key = shortname_key(segment);
+                    rich = rich.color(
+                        player_badge_colors
+                            .get(&key)
+                            .or_else(|| player_badge_colors.get(&display_key))
+                            .copied()
+                            .unwrap_or_else(|| name_badge_chat_color(key == self_name_key)),
+                    );
+                    let response = ui
+                        .add(egui::Label::new(rich).sense(egui::Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!("{segment}\nPlayer: {short}"));
+                    if response.secondary_clicked() {
+                        let pos = response
+                            .interact_pointer_pos()
+                            .unwrap_or_else(|| response.rect.left_bottom());
+                        *action_out = Some(ChatClickAction::OpenPlayerMenu {
+                            display_name: segment.trim().to_owned(),
+                            short_name: short.to_owned(),
+                            pos,
+                        });
+                    }
+                } else if lower_url.starts_with("furc://") {
+                    let response = ui
+                        .add(egui::Label::new(rich).sense(egui::Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!("{segment}\n{url}"));
+                    if response.clicked() {
+                        *action_out = Some(ChatClickAction::EnterDreamUrl(url.to_owned()));
+                    }
+                } else if lower_url.starts_with("command://") {
+                    let command = url[10..].trim_start_matches('/').to_owned();
+                    let response = ui
+                        .add(egui::Label::new(rich).sense(egui::Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!("{segment}\nCommand: {command}"));
+                    if response.clicked() {
+                        *action_out = Some(ChatClickAction::SendCommand(command));
+                    }
+                } else {
+                    ui.hyperlink_to(rich, url)
+                        .on_hover_text(format!("{segment}\n{url}"));
+                }
+            }
+            InlineChatPart::Smiley { idx, code } => {
+                if let Some(tex) = smileys.get(idx).and_then(|tex| tex.as_ref()) {
+                    let size = smiley_draw_size(tex, &font_id);
+                    ui.image(egui::load::SizedTexture::new(tex.id(), size));
+                } else {
+                    ui.label(RichText::new(format!("#S{code}")));
+                }
+            }
+            InlineChatPart::Desctag { idx, code } => {
+                if let Some(tex) = desctags.get(idx).and_then(|tex| tex.as_ref()) {
+                    let size = smiley_draw_size(tex, &font_id);
+                    ui.image(egui::load::SizedTexture::new(tex.id(), size));
+                } else {
+                    ui.label(RichText::new(format!("#C{code}")));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn chat_line_speaker_key(line: &ChatLine) -> Option<String> {
@@ -12843,6 +12952,8 @@ fn connect_and_retry_pipe_account(
     let mut c = FurcadiaClient::connect(&default_connection_config()).ok()?;
     let pre_msgs = c.wait_for_handshake_timeout(Duration::from_secs(12)).ok()?;
     forward_pre_handshake_msgs(pre_msgs, tx, last_server_notice);
+    let tls_msgs = c.enable_tls(Duration::from_secs(12)).ok()?;
+    forward_pre_handshake_msgs(tls_msgs, tx, last_server_notice);
     c.login_account_raw_char(email, &pipe_char, password).ok()?;
     *last_server_notice = None;
     Some(c)
@@ -12925,6 +13036,30 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                                 }
                                 Err(err) => {
                                     let msg = format!("Handshake failed: {err}");
+                                    let _ = tx.send(NetToUi::Status(msg.clone()));
+                                    let _ = tx.send(NetToUi::ConnectFailed { seq, error: msg });
+                                    ctx.request_repaint();
+                                    continue;
+                                }
+                            }
+
+                            let _ = tx.send(NetToUi::ConnectStage {
+                                seq,
+                                stage: "Negotiating encrypted connection...".into(),
+                            });
+                            ctx.request_repaint();
+                            match c.enable_tls(Duration::from_secs(12)) {
+                                Ok(tls_msgs) => {
+                                    forward_pre_handshake_msgs(
+                                        tls_msgs,
+                                        &tx,
+                                        &mut last_server_notice,
+                                    );
+                                }
+                                Err(err) => {
+                                    let msg = format!(
+                                        "Secure connection failed; refusing to send credentials: {err}"
+                                    );
                                     let _ = tx.send(NetToUi::Status(msg.clone()));
                                     let _ = tx.send(NetToUi::ConnectFailed { seq, error: msg });
                                     ctx.request_repaint();

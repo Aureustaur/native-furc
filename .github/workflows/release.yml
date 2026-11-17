@@ -100,27 +100,29 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.14
-            - Turn plain HTTP and HTTPS addresses in chat and whispers into clickable links.
-            - Format emote whispers correctly when Furcadia omits the usual `to you` suffix.
-            - Add a refreshed README screenshot with fictional names, sample chat, and whisper tabs.
+            ### What's New in v1.0.15
+            - Add legacy TLS encryption for game sessions with a clear warning that Furcadia's expired server certificate is not verified.
+            - Improve Pounce startup by beginning sync at login and checking unknown statuses immediately.
+            - Improve Furcadia chat rendering, clickable links, player tags, and right-click player actions.
+            - Add Furcadia Default map sizing and a Change Portrait button.
+            - Keep account passwords out of curl command arguments and prevent HTTPS redirects from downgrading to HTTP.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.0.14-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.0.15-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.14_amd64.deb
+            sudo apt install ./furcadia-native_1.0.15_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.14-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.0.15-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

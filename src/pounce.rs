@@ -165,21 +165,16 @@ impl PounceMonitor {
                 None => true,
                 Some(checked_at) => now.saturating_duration_since(checked_at) >= self.poll_interval,
             })
-            .map(|(k, e)| (k.clone(), e.status))?;
+            .map(|(k, _)| k.clone())?;
 
         if let Some(last) = self.last_query_sent {
-            let spacing = if due_key.1 == OnlineStatus::Unknown {
-                self.query_spacing.min(Duration::from_millis(40))
-            } else {
-                self.query_spacing
-            };
-            if now.saturating_duration_since(last) < spacing {
+            if now.saturating_duration_since(last) < self.query_spacing {
                 return None;
             }
         }
 
         self.last_query_sent = Some(now);
-        if let Some(entry) = self.entries.get_mut(&due_key.0) {
+        if let Some(entry) = self.entries.get_mut(&due_key) {
             entry.last_checked = Some(now);
             return Some(entry.name.clone());
         }
@@ -229,7 +224,10 @@ impl PounceMonitor {
                     if let Some(existing) = self.entries.get_mut(&key) {
                         existing.name = name;
                         existing.status = status;
-                        existing.last_checked = Some(now);
+                        // The initial Pounce list can contain '?' for an unchecked
+                        // status. Do not treat that placeholder as a completed poll:
+                        // queue it for the first onln pass immediately.
+                        existing.last_checked = (status != OnlineStatus::Unknown).then_some(now);
                         if status == OnlineStatus::Online {
                             existing.last_seen_online = Some(now);
                         }
@@ -244,7 +242,7 @@ impl PounceMonitor {
                             PounceEntry {
                                 name,
                                 status,
-                                last_checked: Some(now),
+                                last_checked: (status != OnlineStatus::Unknown).then_some(now),
                                 last_seen_online: (status == OnlineStatus::Online).then_some(now),
                                 self_uid: Some(self_uid),
                                 friend_uid: Some(friend_uid),
@@ -421,8 +419,12 @@ mod tests {
 
         // Pipe-separated server name matches space-separated watchlist entry
         monitor.add_watch("Sunni McCalister");
-        let ev4 = monitor.handle_online_status("Sunni|McCalister", true, t0 + Duration::from_secs(550));
-        assert_eq!(ev4, Some(PounceEvent::CameOnline("Sunni McCalister".into())));
+        let ev4 =
+            monitor.handle_online_status("Sunni|McCalister", true, t0 + Duration::from_secs(550));
+        assert_eq!(
+            ev4,
+            Some(PounceEvent::CameOnline("Sunni McCalister".into()))
+        );
     }
 
     #[test]
@@ -467,7 +469,10 @@ mod tests {
         assert_eq!(order, vec!["Bram", "Ada", "LocalWatch", "Zed Wolf"]);
 
         // Mutual server-synced entries skip `onln` polling; local watchlist still polls.
-        assert_eq!(monitor.next_due_check(t0 + Duration::from_secs(1)), Some("LocalWatch".into()));
+        assert_eq!(
+            monitor.next_due_check(t0 + Duration::from_secs(1)),
+            Some("LocalWatch".into())
+        );
         assert_eq!(monitor.next_due_check(t0 + Duration::from_secs(5)), None);
 
         // ]?S updates Bram to offline silently.
@@ -477,7 +482,9 @@ mod tests {
         s_pkt.push(b'-');
         s_pkt.extend(encode_base220(100, 4).unwrap());
         s_pkt.extend(encode_base220(200, 4).unwrap());
-        assert!(monitor.apply_server_pounce(&s_pkt, t0 + Duration::from_secs(10)).is_empty());
+        assert!(monitor
+            .apply_server_pounce(&s_pkt, t0 + Duration::from_secs(10))
+            .is_empty());
 
         // ]?o flips Zed Wolf online and emits CameOnline event.
         let mut o_pkt = vec![b'o'];
