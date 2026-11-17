@@ -5634,7 +5634,7 @@ impl FurcadiaApp {
         }
     }
 
-        fn render_settings_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    fn render_settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let accent = self.theme.accent();
         ui.heading(RichText::new("⚙ Native Client Settings & Configuration").strong().color(accent));
         ui.add_space(4.0);
@@ -5692,6 +5692,19 @@ impl FurcadiaApp {
             if ui.checkbox(&mut self.autocorrect, "Auto-correct common typing mistakes when sending").changed() {
                 self.save_config();
             }
+            ui.horizontal(|ui| {
+                ui.label("Left-panel portrait size:");
+                if ui
+                    .add(egui::Slider::new(&mut self.portrait_size, 48.0..=160.0).suffix(" px"))
+                    .changed()
+                {
+                    self.save_config();
+                }
+                if ui.small_button("Reset").clicked() {
+                    self.portrait_size = 64.0;
+                    self.save_config();
+                }
+            });
             ui.separator();
             ui.label(RichText::new("Animations & Map").strong().color(accent));
             ui.horizontal(|ui| {
@@ -5709,6 +5722,51 @@ impl FurcadiaApp {
                 self.zoom = if self.limit_view_range { 1.0 } else { 1.25 };
                 self.save_config();
             }
+            if ui.checkbox(&mut self.allow_dream_skins, "Allow dream custom window skins").changed() {
+                self.save_config();
+            }
+            if ui.checkbox(&mut self.show_debug_packets, "Log raw/extended packets to chat").changed() {
+                self.save_config();
+            }
+            ui.separator();
+            ui.label(RichText::new("Whispers & Chat Behavior").strong().color(accent));
+            if ui
+                .checkbox(
+                    &mut self.whisper_open_tab_on_incoming,
+                    "Automatically open whisper tab on incoming whisper",
+                )
+                .changed()
+            {
+                self.save_config();
+            }
+            if ui
+                .checkbox(
+                    &mut self.whisper_emote_in_whisper,
+                    "Send :emotes inside active whisper tab as whispers",
+                )
+                .changed()
+            {
+                self.save_config();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Dice roll expression:");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.dice_roll)
+                            .hint_text("1d6")
+                            .desired_width(90.0),
+                    )
+                    .changed()
+                {
+                    self.save_config();
+                }
+                for preset in ["1d6", "1d20", "1d100", "2d6"] {
+                    if ui.selectable_label(self.dice_roll.trim() == preset, preset).clicked() {
+                        self.dice_roll = preset.to_owned();
+                        self.save_config();
+                    }
+                }
+            });
             ui.separator();
             ui.label(RichText::new("Audio & Desktop Notifications").strong().color(accent));
             if ui.checkbox(&mut self.sound_enabled, "Sound effects (.wav)").changed() { self.save_config(); }
@@ -5717,10 +5775,118 @@ impl FurcadiaApp {
             if ui.checkbox(&mut self.notify_whisper, "Notify on incoming whispers").changed() { self.save_config(); }
             if ui.checkbox(&mut self.notify_pounce, "Notify when Pounce friend comes online").changed() { self.save_config(); }
             if ui.checkbox(&mut self.notify_mention, "Notify when your name is mentioned").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.notify_only_unfocused, "Only notify when window is unfocused").changed() { self.save_config(); }
+            ui.separator();
+            ui.label(RichText::new("Pounce & Window Behavior").strong().color(accent));
+            if ui.checkbox(&mut self.pounce_visible, "Show Pounce panel").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.pounce_detached, "Detach Pounce into separate window").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.minimize_to_tray, "Minimize to tray/panel").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.close_to_tray, "Close button minimizes instead of quitting").changed() { self.save_config(); }
+            ui.separator();
+            ui.label(RichText::new("GitHub Updates").strong().color(accent));
+            if ui
+                .checkbox(&mut self.check_updates_on_startup, "Check GitHub for updates on startup")
+                .changed()
+            {
+                self.save_config();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!self.update_checking, egui::Button::new("Check for Updates Now"))
+                    .clicked()
+                {
+                    self.trigger_update_check(ctx);
+                }
+                if self.update_available.is_some() && ui.button("Install Update...").clicked() {
+                    self.update_popup_open = true;
+                }
+            });
+            if let Some(status) = &self.update_status {
+                ui.label(RichText::new(status).size(11.5).color(Color32::LIGHT_GRAY));
+            }
             ui.separator();
             ui.label(RichText::new("Chat & Whisper Logs").strong().color(accent));
             if ui.checkbox(&mut self.logging_enabled, "Save daily chat logs per character").changed() { self.save_config(); }
             if ui.checkbox(&mut self.log_whispers, "Save separate per-player whisper logs").changed() { self.save_config(); }
+            ui.horizontal(|ui| {
+                ui.label("Keep logs:");
+                for (days, label) in [
+                    (0u32, "Forever"),
+                    (7, "7 days"),
+                    (30, "30 days"),
+                    (90, "90 days"),
+                    (365, "1 year"),
+                ] {
+                    if ui.radio(self.log_retention_days == days, label).clicked() {
+                        self.log_retention_days = days;
+                        self.save_config();
+                    }
+                }
+            });
+            if let Some(dir) = default_logs_root() {
+                ui.label(
+                    RichText::new(format!("Log directory: {}", dir.display()))
+                        .size(11.0)
+                        .color(Color32::GRAY),
+                );
+            }
+            ui.separator();
+            ui.label(RichText::new("Sync with a cloud folder").strong().color(accent));
+            ui.label(
+                RichText::new(
+                    "Use a folder already synced by Nextcloud, Google Drive, Dropbox, or another provider. Choose the same cloud folder on each computer.",
+                )
+                .size(11.5)
+                .color(Color32::LIGHT_GRAY),
+            );
+            ui.label(
+                RichText::new("The app creates settings-<device>.ini and logs/<device>/ inside this folder.")
+                    .size(11.0)
+                    .color(Color32::GRAY),
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.sync_folder_input)
+                        .hint_text("Path to a dedicated cloud-synced folder")
+                        .desired_width((ui.available_width() - 142.0).max(120.0)),
+                );
+                if ui.button("Browse...").clicked() {
+                    self.browse_sync_folder();
+                }
+                if ui.button("Use Folder").clicked() {
+                    self.apply_sync_folder();
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button("Turn Off Sync").clicked() {
+                    self.sync_folder_input.clear();
+                    self.apply_sync_folder();
+                }
+                if !self.sync_folder.is_empty() {
+                    ui.label(
+                        RichText::new(format!("Active: {}", self.sync_folder))
+                            .size(10.5)
+                            .color(Color32::GRAY),
+                    );
+                }
+            });
+            if let Some(message) = &self.sync_folder_message {
+                ui.label(
+                    RichText::new(message)
+                        .size(11.0)
+                        .color(Color32::from_rgb(180, 220, 180)),
+                );
+            }
+            ui.label(
+                RichText::new(
+                    "Set this folder on the first computer, wait for the provider to sync it, then choose that same cloud folder on each other computer and restart. The newest settings snapshot loads at startup. Login credentials stay local; per-device logs are combined in the Log Viewer.",
+                )
+                .size(11.0)
+                .color(Color32::LIGHT_GRAY),
+            );
+            if ui.button("Open Log Viewer").clicked() {
+                self.open_log_viewer();
+            }
             ui.separator();
             ui.label(RichText::new("Windows Importer").strong().color(accent));
             ui.horizontal(|ui| {
