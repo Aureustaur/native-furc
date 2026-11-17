@@ -16,8 +16,10 @@ use eframe::egui::{
 use furcadia_client::{
     decode_fsh_sprites, extract_fr01_to_dir, fetch_account_characters, fetch_news, is_fr01,
     logs::{
-        append_chat_log, append_whisper_log, default_logs_dir, default_logs_root, list_log_characters,
-        list_log_files, load_whisper_log, prune_old_logs,
+        append_chat_log, append_shared_chat_log, append_shared_whisper_log, append_whisper_log,
+        default_logs_dir, default_logs_root, list_log_characters, list_log_files,
+        load_shared_whisper_log, load_whisper_log, peer_shortname_key, prune_old_logs,
+        SHARED_LOG_GROUP,
     },
     parse_chat_line, unescape_html,
     win_import::{discover_default_windows_furcadia_dirs, import_windows_furcadia_dir},
@@ -1473,6 +1475,7 @@ struct FurcadiaApp {
     // Settings, logging, notifications, tray, fonts & importer state
     logging_enabled: bool,
     log_whispers: bool,
+    shared_logs_mode: bool,
     log_retention_days: u32,
     notify_enabled: bool,
     notify_whisper: bool,
@@ -1813,6 +1816,7 @@ impl FurcadiaApp {
             bg_sessions: Vec::new(),
             logging_enabled: cfg.logging_enabled,
             log_whispers: cfg.log_whispers,
+            shared_logs_mode: cfg.shared_logs_mode,
             log_retention_days: cfg.log_retention_days,
             notify_enabled: cfg.notify_enabled,
             notify_whisper: cfg.notify_whisper,
@@ -1924,6 +1928,7 @@ impl FurcadiaApp {
             watchlist: self.pounce.entries().map(|e| e.name.clone()).collect(),
             logging_enabled: self.logging_enabled,
             log_whispers: self.log_whispers,
+            shared_logs_mode: self.shared_logs_mode,
             log_retention_days: self.log_retention_days,
             notify_enabled: self.notify_enabled,
             notify_whisper: self.notify_whisper,
@@ -2393,7 +2398,12 @@ impl FurcadiaApp {
             return;
         }
         if let Some(dir) = default_logs_dir() {
-            let _ = append_chat_log(&dir, &self.active_character_wire_name(), text);
+            let wire = self.active_character_wire_name();
+            if self.shared_logs_mode {
+                let _ = append_shared_chat_log(&dir, &wire, text);
+            } else {
+                let _ = append_chat_log(&dir, &wire, text);
+            }
         }
     }
 
@@ -2402,7 +2412,30 @@ impl FurcadiaApp {
             return;
         }
         if let Some(dir) = default_logs_dir() {
-            let _ = append_whisper_log(&dir, &self.active_character_wire_name(), peer, text);
+            let wire = self.active_character_wire_name();
+            if self.shared_logs_mode {
+                let _ = append_shared_whisper_log(&dir, &wire, peer, text);
+            } else {
+                let _ = append_whisper_log(&dir, &wire, peer, text);
+            }
+        }
+    }
+
+    fn load_whisper_history_for(&self, char_wire_or_disp: &str, peer: &str) -> Vec<String> {
+        let Some(dir) = default_logs_root() else {
+            return Vec::new();
+        };
+        if self.shared_logs_mode {
+            load_shared_whisper_log(&dir, peer, 200)
+        } else {
+            let mut lines = load_whisper_log(&dir, char_wire_or_disp, peer, 200);
+            if lines.is_empty() {
+                let disp = char_wire_or_disp.replace('|', " ");
+                if disp != char_wire_or_disp {
+                    lines = load_whisper_log(&dir, &disp, peer, 200);
+                }
+            }
+            lines
         }
     }
 
@@ -2484,7 +2517,11 @@ impl FurcadiaApp {
     fn open_log_viewer(&mut self) {
         self.log_viewer_open = true;
         if self.log_viewer_char.is_empty() {
-            self.log_viewer_char = self.active_character_wire_name();
+            self.log_viewer_char = if self.shared_logs_mode {
+                SHARED_LOG_GROUP.to_owned()
+            } else {
+                self.active_character_wire_name()
+            };
         }
         self.refresh_log_viewer_files();
     }
@@ -2687,6 +2724,15 @@ impl FurcadiaApp {
                             )
                         };
                         if let Some(peer) = peer {
+                            if self.logging_enabled && self.log_whispers {
+                                if let Some(dir) = default_logs_dir() {
+                                    if self.shared_logs_mode {
+                                        let _ = append_shared_whisper_log(&dir, &sess.char_name, &peer, &plain);
+                                    } else {
+                                        let _ = append_whisper_log(&dir, &sess.char_name, &peer, &plain);
+                                    }
+                                }
+                            }
                             sess.unread_count += 1;
                             let formatted =
                                 format_whisper_tab_line(&sess.char_name, &peer, &plain, &line);
@@ -2699,6 +2745,13 @@ impl FurcadiaApp {
                                 w.lines.push(formatted);
                             } else {
                                 let mut w = WhisperSession::new(peer.clone());
+                                if let Some(dir) = default_logs_root() {
+                                    w.history_lines = if self.shared_logs_mode {
+                                        load_shared_whisper_log(&dir, &peer, 200)
+                                    } else {
+                                        load_whisper_log(&dir, &sess.char_name, &peer, 200)
+                                    };
+                                }
                                 w.unread = 1;
                                 w.lines.push(formatted);
                                 sess.whispers.push(w);
@@ -4441,16 +4494,8 @@ impl FurcadiaApp {
             return idx;
         }
         let mut session = WhisperSession::new(trimmed.to_owned());
-        if let Some(dir) = default_logs_root() {
-            let wire_name = self.active_character_wire_name();
-            session.history_lines = load_whisper_log(&dir, &wire_name, trimmed, 200);
-            if session.history_lines.is_empty() {
-                let display_name = self.active_character_name();
-                if display_name != wire_name {
-                    session.history_lines = load_whisper_log(&dir, &display_name, trimmed, 200);
-                }
-            }
-        }
+        let wire_name = self.active_character_wire_name();
+        session.history_lines = self.load_whisper_history_for(&wire_name, trimmed);
         self.whispers.push(session);
         let idx = self.whispers.len() - 1;
         if focus {
@@ -5808,6 +5853,29 @@ impl FurcadiaApp {
             ui.label(RichText::new("Chat & Whisper Logs").strong().color(accent));
             if ui.checkbox(&mut self.logging_enabled, "Save daily chat logs per character").changed() { self.save_config(); }
             if ui.checkbox(&mut self.log_whispers, "Save separate per-player whisper logs").changed() { self.save_config(); }
+            ui.horizontal(|ui| {
+                ui.label("Logging style:");
+                if ui
+                    .radio(
+                        self.shared_logs_mode,
+                        "Furcadia-style shared logs (all characters share whisper history)",
+                    )
+                    .clicked()
+                {
+                    self.shared_logs_mode = true;
+                    self.save_config();
+                }
+                if ui
+                    .radio(
+                        !self.shared_logs_mode,
+                        "Individual character logs (separate per character)",
+                    )
+                    .clicked()
+                {
+                    self.shared_logs_mode = false;
+                    self.save_config();
+                }
+            });
             ui.horizontal(|ui| {
                 ui.label("Keep logs:");
                 for (days, label) in [
@@ -8681,14 +8749,18 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 self.focus_chat_input = true;
             }
             if ui.small_button("📜 History").on_hover_text(format!("View whisper logs with {peer}")).clicked() {
+                if self.shared_logs_mode {
+                    self.log_viewer_char = SHARED_LOG_GROUP.to_owned();
+                }
                 self.open_log_viewer();
+                let target_key = peer_shortname_key(peer);
                 if let Some(p) = self
                     .log_viewer_files
                     .iter()
                     .find(|p| {
                         p.file_stem()
                             .and_then(|s| s.to_str())
-                            .is_some_and(|s| s.eq_ignore_ascii_case(&wire))
+                            .is_some_and(|s| s.eq_ignore_ascii_case(&wire) || peer_shortname_key(s) == target_key)
                     })
                     .cloned()
                 {

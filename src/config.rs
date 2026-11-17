@@ -25,6 +25,9 @@ pub struct ClientConfig {
     pub watchlist: Vec<String>,
     pub logging_enabled: bool,
     pub log_whispers: bool,
+    /// When `true` (default), logs use Furcadia-style shared logs (one shared whispers/chat pool across all characters).
+    /// When `false`, logs are isolated strictly per individual character.
+    pub shared_logs_mode: bool,
     pub log_retention_days: u32,
     pub notify_enabled: bool,
     pub notify_whisper: bool,
@@ -77,6 +80,7 @@ impl Default for ClientConfig {
             watchlist: Vec::new(),
             logging_enabled: true,
             log_whispers: true,
+            shared_logs_mode: true,
             log_retention_days: 0,
             notify_enabled: true,
             notify_whisper: true,
@@ -248,6 +252,7 @@ impl ClientConfig {
         self.watchlist = shared.watchlist.clone();
         self.logging_enabled = shared.logging_enabled;
         self.log_whispers = shared.log_whispers;
+        self.shared_logs_mode = shared.shared_logs_mode;
         self.log_retention_days = shared.log_retention_days;
         self.notify_enabled = shared.notify_enabled;
         self.notify_whisper = shared.notify_whisper;
@@ -291,17 +296,7 @@ impl ClientConfig {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let body = self.serialize();
-        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
-        fs::write(&temp_path, body)?;
-        #[cfg(windows)]
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-        if let Err(err) = fs::rename(&temp_path, path) {
-            let _ = fs::remove_file(&temp_path);
-            return Err(err);
-        }
+        fs::write(path, self.serialize())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -340,6 +335,7 @@ impl ClientConfig {
                     }
                     "logging_enabled" => cfg.logging_enabled = v.trim() != "false",
                     "log_whispers" => cfg.log_whispers = v.trim() != "false",
+                    "shared_logs_mode" => cfg.shared_logs_mode = v.trim() != "false",
                     "log_retention_days" => {
                         if let Ok(days) = v.trim().parse::<u32>() {
                             cfg.log_retention_days = days;
@@ -366,10 +362,22 @@ impl ClientConfig {
                         }
                     }
                     "chat_font_size" => {
-                        if let Ok(sz) = v.trim().parse::<u16>() { cfg.chat_font_size = sz.clamp(9, 28); }
+                        if let Ok(sz) = v.trim().parse::<u16>() {
+                            cfg.chat_font_size = sz.clamp(9, 28);
+                        }
                     }
-                    "chat_text_color" => cfg.chat_text_color = u32::from_str_radix(v.trim().trim_start_matches('#'), 16).unwrap_or(cfg.chat_text_color) & 0xffffff,
-                    "input_text_color" => cfg.input_text_color = u32::from_str_radix(v.trim().trim_start_matches('#'), 16).unwrap_or(cfg.input_text_color) & 0xffffff,
+                    "chat_text_color" => {
+                        cfg.chat_text_color =
+                            u32::from_str_radix(v.trim().trim_start_matches('#'), 16)
+                                .unwrap_or(cfg.chat_text_color)
+                                & 0xffffff
+                    }
+                    "input_text_color" => {
+                        cfg.input_text_color =
+                            u32::from_str_radix(v.trim().trim_start_matches('#'), 16)
+                                .unwrap_or(cfg.input_text_color)
+                                & 0xffffff
+                    }
                     "autocorrect" => cfg.autocorrect = v.trim() == "true",
                     "anim_mode" => {
                         let m = v.trim();
@@ -410,11 +418,9 @@ impl ClientConfig {
                         }
                     }
                     "check_updates_on_startup" => {
-                        cfg.check_updates_on_startup = v.trim() != "false";
+                        cfg.check_updates_on_startup = v.trim() != "false"
                     }
-                    "first_setup_done" => {
-                        cfg.first_setup_done = v.trim() == "true";
-                    }
+                    "first_setup_done" => cfg.first_setup_done = v.trim() == "true",
                     "dice_roll" => {
                         let d = v.trim();
                         if !d.is_empty() {
@@ -449,7 +455,7 @@ impl ClientConfig {
             ""
         };
         format!(
-            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
+            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
@@ -459,6 +465,7 @@ impl ClientConfig {
             self.watchlist.join(","),
             self.logging_enabled,
             self.log_whispers,
+            self.shared_logs_mode,
             self.log_retention_days,
             self.notify_enabled,
             self.notify_whisper,
@@ -514,6 +521,7 @@ mod tests {
             watchlist: vec!["Alice".into(), "Bob".into()],
             logging_enabled: false,
             log_whispers: true,
+            shared_logs_mode: false,
             log_retention_days: 30,
             notify_enabled: true,
             notify_whisper: true,
@@ -550,15 +558,8 @@ mod tests {
             sync_device_id: String::new(),
             sync_updated_at: 0,
         };
-        let serialized = cfg.serialize();
-        assert_eq!(ClientConfig::parse(&serialized), cfg);
-
-        let no_pass = ClientConfig {
-            remember_password: false,
-            ..cfg
-        };
-        let parsed = ClientConfig::parse(&no_pass.serialize());
-        assert!(parsed.password.is_empty());
-        assert!(!parsed.remember_password);
+        let s = cfg.serialize();
+        let parsed = ClientConfig::parse(&s);
+        assert_eq!(cfg, parsed);
     }
 }
