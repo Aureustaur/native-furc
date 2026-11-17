@@ -1492,6 +1492,7 @@ struct FurcadiaApp {
     applied_font_family: String,
     applied_font_size: u16,
     settings_open: bool,
+    show_settings_tab: bool,
     sync_folder: String,
     sync_folder_input: String,
     sync_folder_message: Option<String>,
@@ -1831,6 +1832,7 @@ impl FurcadiaApp {
             applied_font_family: String::new(),
             applied_font_size: 0,
             settings_open: false,
+            show_settings_tab: false,
             sync_folder: cfg.sync_folder.clone(),
             sync_folder_input: cfg.sync_folder.clone(),
             sync_folder_message: None,
@@ -5038,9 +5040,7 @@ impl eframe::App for FurcadiaApp {
             AppScreen::InGame => self.render_in_game_screen(ctx),
         }
 
-        if self.settings_open {
-            self.render_settings_window(ctx);
-        }
+
         if self.log_viewer_open {
             self.render_log_viewer_window(ctx);
         }
@@ -5522,13 +5522,36 @@ impl FurcadiaApp {
                                 )
                                 .clicked()
                             {
-                                let launched = std::env::current_exe().and_then(|exe| {
-                                    std::process::Command::new(exe)
-                                        .stdin(std::process::Stdio::null())
-                                        .stdout(std::process::Stdio::null())
-                                        .stderr(std::process::Stdio::null())
-                                        .spawn()
-                                });
+                                let launched = std::env::current_exe()
+                                    .map(|exe| {
+                                        let s = exe.to_string_lossy();
+                                        if let Some(stripped) = s.strip_suffix(" (deleted)") {
+                                            std::path::PathBuf::from(stripped)
+                                        } else {
+                                            exe
+                                        }
+                                    })
+                                    .and_then(|exe| {
+                                        std::process::Command::new(&exe)
+                                            .stdin(std::process::Stdio::null())
+                                            .stdout(std::process::Stdio::null())
+                                            .stderr(std::process::Stdio::null())
+                                            .spawn()
+                                            .or_else(|_| {
+                                                std::process::Command::new("/usr/bin/furc-gui")
+                                                    .stdin(std::process::Stdio::null())
+                                                    .stdout(std::process::Stdio::null())
+                                                    .stderr(std::process::Stdio::null())
+                                                    .spawn()
+                                            })
+                                            .or_else(|_| {
+                                                std::process::Command::new("furc-gui")
+                                                    .stdin(std::process::Stdio::null())
+                                                    .stdout(std::process::Stdio::null())
+                                                    .stderr(std::process::Stdio::null())
+                                                    .spawn()
+                                            })
+                                    });
                                 match launched {
                                     Ok(mut child) => {
                                         // Give the new process a moment to initialize. If it
@@ -5597,421 +5620,109 @@ impl FurcadiaApp {
         }
     }
 
-    fn render_settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.settings_open;
+        fn render_settings_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let accent = self.theme.accent();
-        egui::Window::new("Native Client Settings")
-            .open(&mut open)
-            .resizable(true)
-            .default_size(Vec2::new(560.0, 440.0))
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (idx, label) in [
-                        (0usize, "Appearance & Fonts"),
-                        (1, "Animations & Map"),
-                        (2, "Whispers & Chat"),
-                        (3, "Sounds & Notify"),
-                        (4, "Pounce, Tray & Updates"),
-                        (5, "Logs"),
-                        (6, "Windows Importer"),
-                    ] {
-                        if ui.selectable_label(self.settings_tab == idx, label).clicked() {
-                            self.settings_tab = idx;
-                        }
-                    }
-                });
-                ui.separator();
+        ui.heading(RichText::new("⚙ Native Client Settings & Configuration").strong().color(accent));
+        ui.add_space(4.0);
+        ui.label(RichText::new("Configure your appearance, audio, map behavior, cloud sync, and imported data.").color(Color32::LIGHT_GRAY));
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
 
-                egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| match self.settings_tab {
-                    0 => {
-                        ui.label(RichText::new("Dream Window Skin").strong().color(accent));
-                        ui.horizontal_wrapped(|ui| {
-                            for t in [
-                                DreamTheme::ClassicPurple,
-                                DreamTheme::DragonHoard,
-                                DreamTheme::KitterMagic,
-                                DreamTheme::FerianWylde,
-                            ] {
-                                if ui.radio(self.theme == t, t.label()).clicked() {
-                                    self.theme = t;
-                                    self.save_config();
-                                }
-                            }
-                        });
-                        ui.separator();
-                        ui.label(RichText::new("Fonts").strong().color(accent));
-                        ui.horizontal(|ui| {
-                            ui.label("Font Family:");
-                            for fam in ["Proportional", "Monospace", "Fixedsys"] {
-                                if ui.radio(self.font_family == fam, fam).clicked() {
-                                    self.font_family = fam.to_owned();
-                                    self.save_config();
-                                }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Font Size:");
-                            if ui
-                                .add(egui::Slider::new(&mut self.font_size, 10..=22).suffix(" px"))
-                                .changed()
-                            {
-                                self.save_config();
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Chat text size:");
-                            if ui.add(egui::Slider::new(&mut self.chat_font_size, 9..=28).suffix(" px")).changed() {
-                                self.save_config();
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Chat text color:");
-                            if ui.color_edit_button_srgba(&mut self.chat_text_color).changed() { self.save_config(); }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Typed text color:");
-                            if ui.color_edit_button_srgba(&mut self.input_text_color).changed() { self.save_config(); }
-                        });
-                        if ui.checkbox(&mut self.autocorrect, "Auto-correct common typing mistakes when sending").changed() {
-                            self.save_config();
-                        }
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label("Left-panel portrait size:");
-                            if ui
-                                .add(egui::Slider::new(&mut self.portrait_size, 48.0..=160.0).suffix(" px"))
-                                .changed()
-                            {
-                                self.save_config();
-                            }
-                            if ui.small_button("Reset").clicked() {
-                                self.portrait_size = 64.0;
-                                self.save_config();
-                            }
-                        });
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.label(RichText::new("Dream Window Skin").strong().color(accent));
+            ui.horizontal_wrapped(|ui| {
+                for t in [
+                    DreamTheme::ClassicPurple,
+                    DreamTheme::DragonHoard,
+                    DreamTheme::KitterMagic,
+                    DreamTheme::FerianWylde,
+                ] {
+                    if ui.radio(self.theme == t, t.label()).clicked() {
+                        self.theme = t;
+                        self.save_config();
                     }
-                    1 => {
-                        ui.label(RichText::new("Animations (F11)").strong().color(accent));
-                        ui.horizontal(|ui| {
-                            for mode in ["Full", "Half", "Off"] {
-                                if ui.radio(self.anim_mode == mode, mode).clicked() {
-                                    self.anim_mode = mode.to_owned();
-                                    self.save_config();
-                                }
-                            }
-                        });
-                        ui.separator();
-                        ui.label(RichText::new("Map & Avatar Display").strong().color(accent));
-                        if ui
-                            .checkbox(&mut self.show_avatar_names, "Show names above avatars (Tab)")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(
-                                &mut self.limit_view_range,
-                                "Furcadia Default mode (1× 624 × 352 view; more room for chat)",
-                            )
-                            .changed()
-                        {
-                            self.zoom = if self.limit_view_range { 1.0 } else { 1.25 };
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.allow_dream_skins, "Allow dream custom window skins")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.show_debug_packets, "Log raw/extended packets to chat")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                    }
-                    2 => {
-                        ui.label(RichText::new("Whispers & Chat Behavior").strong().color(accent));
-                        if ui
-                            .checkbox(
-                                &mut self.whisper_open_tab_on_incoming,
-                                "Automatically open whisper tab on incoming whisper",
-                            )
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(
-                                &mut self.whisper_emote_in_whisper,
-                                "Send :emotes inside active whisper tab as whispers",
-                            )
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        ui.separator();
-                        ui.label(RichText::new("Dice Roll Button").strong().color(accent));
-                        ui.horizontal(|ui| {
-                            ui.label("Roll expression:");
-                            if ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut self.dice_roll)
-                                        .hint_text("1d6")
-                                        .desired_width(90.0),
-                                )
-                                .changed()
-                            {
-                                self.save_config();
-                            }
-                            for preset in ["1d6", "1d20", "1d100", "2d6"] {
-                                if ui
-                                    .selectable_label(self.dice_roll.trim() == preset, preset)
-                                    .clicked()
-                                {
-                                    self.dice_roll = preset.to_owned();
-                                    self.save_config();
-                                }
-                            }
-                        });
-                    }
-                    3 => {
-                        ui.label(RichText::new("Audio & Desktop Notifications").strong().color(accent));
-                        if ui
-                            .checkbox(&mut self.sound_enabled, "Sound effects (.wav) [Ctrl+P]")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.music_enabled, "Background music [Ctrl+O]")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        ui.separator();
-                        if ui
-                            .checkbox(&mut self.notify_enabled, "Enable desktop notifications")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.notify_whisper, "Notify on incoming whispers")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.notify_pounce, "Notify when Pounce friend comes online")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.notify_mention, "Notify when your name is mentioned")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.notify_only_unfocused, "Only notify when window is unfocused")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                    }
-                    4 => {
-                        ui.label(RichText::new("Pounce & Window Behavior").strong().color(accent));
-                        if ui
-                            .checkbox(&mut self.pounce_visible, "Show Pounce panel")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.pounce_detached, "Detach Pounce into separate window")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        ui.separator();
-                        if ui
-                            .checkbox(&mut self.minimize_to_tray, "Minimize to tray/panel")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.close_to_tray, "Close button minimizes instead of quitting")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        ui.separator();
-                        ui.label(RichText::new("GitHub Updates").strong().color(accent));
-                        if ui
-                            .checkbox(
-                                &mut self.check_updates_on_startup,
-                                "Check GitHub for updates on startup",
-                            )
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_enabled(
-                                    !self.update_checking,
-                                    egui::Button::new("Check for Updates Now"),
-                                )
-                                .clicked()
-                            {
-                                self.trigger_update_check(ctx);
-                            }
-                            if self.update_available.is_some()
-                                && ui.button("Install Update...").clicked()
-                            {
-                                self.update_popup_open = true;
-                            }
-                        });
-                        if let Some(status) = &self.update_status {
-                            ui.label(RichText::new(status).size(11.5).color(Color32::LIGHT_GRAY));
-                        }
-                    }
-                    5 => {
-                        ui.label(RichText::new("Chat & Whisper Logs").strong().color(accent));
-                        if ui
-                            .checkbox(&mut self.logging_enabled, "Save daily chat logs per character")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        if ui
-                            .checkbox(&mut self.log_whispers, "Save separate per-player whisper logs")
-                            .changed()
-                        {
-                            self.save_config();
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("Keep logs:");
-                            for (days, label) in [
-                                (0u32, "Forever"),
-                                (7, "7 days"),
-                                (30, "30 days"),
-                                (90, "90 days"),
-                                (365, "1 year"),
-                            ] {
-                                if ui.radio(self.log_retention_days == days, label).clicked() {
-                                    self.log_retention_days = days;
-                                    self.save_config();
-                                }
-                            }
-                        });
-                        if let Some(dir) = default_logs_root() {
-                            ui.label(
-                                RichText::new(format!("Log directory: {}", dir.display()))
-                                    .size(11.0)
-                                    .color(Color32::GRAY),
-                            );
-                        }
-                        ui.separator();
-                        ui.label(RichText::new("Sync with a cloud folder").strong().color(accent));
-                        ui.label(
-                            RichText::new(
-                                "Use a folder already synced by Nextcloud, Google Drive, Dropbox, or another provider. Choose the same cloud folder on each computer.",
-                            )
-                            .size(11.5)
-                            .color(Color32::LIGHT_GRAY),
-                        );
-                        ui.label(
-                            RichText::new("The app creates settings-<device>.ini and logs/<device>/ inside this folder.")
-                                .size(11.0)
-                                .color(Color32::GRAY),
-                        );
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.sync_folder_input)
-                                    .hint_text("Path to a dedicated cloud-synced folder")
-                                    .desired_width((ui.available_width() - 142.0).max(120.0)),
-                            );
-                            if ui.button("Browse...").clicked() {
-                                self.browse_sync_folder();
-                            }
-                            if ui.button("Use Folder").clicked() {
-                                self.apply_sync_folder();
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.small_button("Turn Off Sync").clicked() {
-                                self.sync_folder_input.clear();
-                                self.apply_sync_folder();
-                            }
-                            if !self.sync_folder.is_empty() {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "Active: {}",
-                                        self.sync_folder
-                                    ))
-                                    .size(10.5)
-                                    .color(Color32::GRAY),
-                                );
-                            }
-                        });
-                        if let Some(message) = &self.sync_folder_message {
-                            ui.label(
-                                RichText::new(message)
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(180, 220, 180)),
-                            );
-                        }
-                        ui.label(
-                            RichText::new(
-                                "Set this folder on the first computer, wait for the provider to sync it, then choose that same cloud folder on each other computer and restart. The newest settings snapshot loads at startup. Login credentials stay local; per-device logs are combined in the Log Viewer.",
-                            )
-                            .size(11.0)
-                            .color(Color32::LIGHT_GRAY),
-                        );
-                        if ui.button("Open Log Viewer").clicked() {
-                            self.open_log_viewer();
-                        }
-                    }
-                    _ => {
-                        ui.label(
-                            RichText::new("Import Windows Furcadia & Pounce Data")
-                                .strong()
-                                .color(accent),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Point to your Windows/Wine Furcadia install or Documents/Furcadia folder to import patches, sounds, fonts, Pounce watchlists, character INIs, and logs.",
-                            )
-                            .size(11.5)
-                            .color(Color32::LIGHT_GRAY),
-                        );
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.import_path_input)
-                                    .desired_width((ui.available_width() - 88.0).max(160.0)),
-                            );
-                            if ui.button("Browse...").clicked() {
-                                self.browse_import_directory();
-                            }
-                        });
-                        if ui.button("Import Windows Furcadia Data").clicked() {
-                            self.run_windows_import();
-                        }
-                        if let Some(report) = &self.import_report {
-                            ui.colored_label(Color32::from_rgb(130, 225, 145), report);
-                        }
-                    }
-                });
+                }
             });
-        self.settings_open = open;
+            ui.separator();
+            ui.label(RichText::new("Fonts & Colors").strong().color(accent));
+            ui.horizontal(|ui| {
+                ui.label("Font Family:");
+                for fam in ["Proportional", "Monospace", "Fixedsys"] {
+                    if ui.radio(self.font_family == fam, fam).clicked() {
+                        self.font_family = fam.to_owned();
+                        self.save_config();
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Font Size:");
+                if ui.add(egui::Slider::new(&mut self.font_size, 10..=22).suffix(" px")).changed() {
+                    self.save_config();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Chat text size:");
+                if ui.add(egui::Slider::new(&mut self.chat_font_size, 9..=28).suffix(" px")).changed() {
+                    self.save_config();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Chat text color:");
+                if ui.color_edit_button_srgba(&mut self.chat_text_color).changed() { self.save_config(); }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Typed text color:");
+                if ui.color_edit_button_srgba(&mut self.input_text_color).changed() { self.save_config(); }
+            });
+            if ui.checkbox(&mut self.autocorrect, "Auto-correct common typing mistakes when sending").changed() {
+                self.save_config();
+            }
+            ui.separator();
+            ui.label(RichText::new("Animations & Map").strong().color(accent));
+            ui.horizontal(|ui| {
+                for mode in ["Full", "Half", "Off"] {
+                    if ui.radio(self.anim_mode == mode, mode).clicked() {
+                        self.anim_mode = mode.to_owned();
+                        self.save_config();
+                    }
+                }
+            });
+            if ui.checkbox(&mut self.show_avatar_names, "Show names above avatars (Tab)").changed() {
+                self.save_config();
+            }
+            if ui.checkbox(&mut self.limit_view_range, "Furcadia Default mode (1× 624 × 352 view)").changed() {
+                self.zoom = if self.limit_view_range { 1.0 } else { 1.25 };
+                self.save_config();
+            }
+            ui.separator();
+            ui.label(RichText::new("Audio & Desktop Notifications").strong().color(accent));
+            if ui.checkbox(&mut self.sound_enabled, "Sound effects (.wav)").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.music_enabled, "Background music").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.notify_enabled, "Enable desktop notifications").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.notify_whisper, "Notify on incoming whispers").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.notify_pounce, "Notify when Pounce friend comes online").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.notify_mention, "Notify when your name is mentioned").changed() { self.save_config(); }
+            ui.separator();
+            ui.label(RichText::new("Chat & Whisper Logs").strong().color(accent));
+            if ui.checkbox(&mut self.logging_enabled, "Save daily chat logs per character").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.log_whispers, "Save separate per-player whisper logs").changed() { self.save_config(); }
+            ui.separator();
+            ui.label(RichText::new("Windows Importer").strong().color(accent));
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.import_path_input).desired_width(240.0));
+                if ui.button("Browse...").clicked() { self.browse_import_directory(); }
+            });
+            if ui.button("Import Windows Furcadia Data").clicked() {
+                self.run_windows_import();
+            }
+            if let Some(report) = &self.import_report {
+                ui.colored_label(Color32::from_rgb(130, 225, 145), report);
+            }
+        });
     }
 
-    fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
+fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         let mut open = self.log_viewer_open;
         let accent = self.theme.accent();
         egui::Window::new("Furcadia Chat & Whisper Logs")
@@ -7815,7 +7526,7 @@ impl FurcadiaApp {
                                     .add(egui::Button::new("⚙ Edit My Settings").min_size(Vec2::new(112.0, 28.0)))
                                     .clicked()
                                 {
-                                    self.settings_open = true;
+                                    self.show_settings_tab = true;
                                 }
                                 if ui
                                     .add(egui::Button::new("💤 AFK Settings").min_size(Vec2::new(112.0, 28.0)))
@@ -8157,7 +7868,7 @@ impl FurcadiaApp {
                                 )
                                 .clicked()
                             {
-                                self.settings_open = true;
+                                self.show_settings_tab = true;
                             }
 
                             ui.add_space(8.0);
@@ -8583,6 +8294,20 @@ impl FurcadiaApp {
     }
 
     fn render_in_game_screen(&mut self, ctx: &egui::Context) {
+        if self.show_settings_tab {
+            self.render_detached_viewports(ctx);
+            self.render_sidebar(ctx);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(self.theme.bg()).inner_margin(16.0))
+                .show(ctx, |ui| {
+                    if ui.button("← Back to Game").clicked() {
+                        self.show_settings_tab = false;
+                    }
+                    ui.add_space(8.0);
+                    self.render_settings_tab(ui, ctx);
+                });
+            return;
+        }
         self.handle_in_game_hotkeys(ctx);
         self.render_detached_viewports(ctx);
         self.render_sidebar(ctx);
@@ -8657,7 +8382,7 @@ impl FurcadiaApp {
                         self.save_config();
                     }
                     if ui.small_button("Settings").on_hover_text("Open Settings").clicked() {
-                        self.settings_open = !self.settings_open;
+                        self.show_settings_tab = !self.show_settings_tab;
                     }
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
