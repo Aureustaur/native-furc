@@ -8662,11 +8662,7 @@ impl FurcadiaApp {
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            let map_size_label = if self.limit_view_range {
-                                "Map Size: Default"
-                            } else {
-                                "Map Size: Expanded"
-                            };
+                            let map_size_label = "Map Size";
                             if ui
                                 .selectable_label(self.limit_view_range, map_size_label)
                                 .on_hover_text(

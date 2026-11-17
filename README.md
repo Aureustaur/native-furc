@@ -50,7 +50,7 @@ You can also sync this client's preferences and logs between computers with Next
 
 The client manages the contents of that folder: it creates `settings-<device>.ini` files at the top level and stores logs under `logs/<device>/` for each computer. The log viewer combines those per-device logs. Sync the whole **Furcadia Native Sync** folder, including its settings files and `logs` subfolder. Let the provider finish syncing before starting the client on another computer. Email, passwords, and auto-login credentials stay in each computer's local app settings.
 
-The client reads Fox5 and FR01 asset archives and supports Furcadia map formats V01.40 and V01.50. Proprietary game files are not included in this repository; use files from your own Furcadia installation.
+The client reads Fox5, FSHX, FSH, and FR01 asset archives and supports Furcadia map formats V01.40 and V01.50. Proprietary game files are not included in this repository; use files from your own Furcadia installation.
 
 ### Choose how to use it
 
@@ -66,7 +66,7 @@ Prebuilt packages are published on the [GitHub Releases page](https://github.com
 | --- | --- |
 | Windows 64-bit | `FurcadiaNative-Setup-<version>-x86_64.exe` |
 | Debian, Ubuntu, Linux Mint | `furcadia-native_<version>_amd64.deb` |
-| Arch Linux | `furcadia-native-<version>-1-x86_64.pkg.tar.zst` |
+| Arch Linux, CachyOS, Manjaro, EndeavourOS | `furcadia-native-<version>-1-x86_64.pkg.tar.zst` |
 
 On Debian-based distributions, install the downloaded package with:
 
@@ -74,7 +74,7 @@ On Debian-based distributions, install the downloaded package with:
 sudo apt install ./furcadia-native_<version>_amd64.deb
 ```
 
-On Arch Linux, install the downloaded package with:
+On Arch Linux, CachyOS, Manjaro, and EndeavourOS, install the downloaded package with:
 
 ```sh
 sudo pacman -U ./furcadia-native-<version>-1-x86_64.pkg.tar.zst
