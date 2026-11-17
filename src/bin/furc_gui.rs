@@ -1189,7 +1189,7 @@ impl FoxSpriteCache {
         let try_ids: &[u16] = if obj_id == 0 { &[0] } else { &[obj_id, 0] };
 
         for &try_id in try_ids {
-            let archives = if purpose == 4 {
+            let archives = if purpose == 4 || purpose == 35 {
                 // A dream patch may provide a non-remappable placeholder portrait.
                 // Prefer the canonical species portrait so avatar colors can map.
                 [
@@ -1226,7 +1226,7 @@ impl FoxSpriteCache {
                 let Some(layer) = candidate else {
                     continue;
                 };
-                let remap_color = (layer.category & 0x40) == 0 && (layer.category & 0x20) != 0;
+                let remap_color = (layer.category & 0x40) == 0;
                 if let Some((tex, is_one_by_one)) = Self::decode_or_get_avatar_image(
                     fox,
                     is_dream,
@@ -2806,7 +2806,20 @@ impl FurcadiaApp {
             return;
         }
         self.pending_whisper_echoes.clear();
+        self.pending_vascodagama = false;
+        self.login_ack_at = None;
         let character = self.active_character_wire_name();
+        let login_desc = self
+            .pending_desc
+            .take()
+            .or_else(|| {
+                let d = self.live_desc_input.trim();
+                (!d.is_empty()).then(|| d.to_owned())
+            })
+            .map(|d| d.replace(['\r', '\n'], " "));
+        let colors = self
+            .selected_character()
+            .and_then(|ch| (!ch.colors.is_empty()).then(|| ch.colors.clone()));
         self.connect_seq = self.connect_seq.wrapping_add(1);
         self.connecting_error = None;
         self.connecting_stage = "Reconnecting...".to_owned();
@@ -2815,13 +2828,11 @@ impl FurcadiaApp {
             email: self.email.trim().to_owned(),
             character,
             password: self.password.clone(),
-            updated_desc: None,
-            // Let the server keep the live avatar palette during reconnect. Account
-            // summaries can be stale and resending them can overwrite current colors.
-            colors: None,
+            updated_desc: login_desc,
+            colors,
         });
     }
-
+    
     fn push_system_line(&mut self, color: &str, text: &str) {
         self.chat_log
             .push(parse_chat_line(&format!("<font color='{color}'>{text}</font>")));
@@ -6954,13 +6965,13 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         }
                         if ui
                             .small_button("Chars")
-                            .on_hover_text("Disconnect and return to Character Select")
+                            .on_hover_text("Open Character List in browser")
                             .clicked()
                         {
-                            let _ = self.to_net.send(UiToNet::Disconnect);
-                            self.is_connected = false;
-                            self.screen = AppScreen::CharacterSelect;
-                        }
+                            ctx.open_url(egui::OpenUrl::new_tab(
+                                "https://cms.furcadia.com/character/list",
+                            ));
+                        }                      
                     });
                 });
 
@@ -10062,7 +10073,7 @@ Light: {} | Amb: {} | Elev: {:?}",
             if self.context_menu_avatar.is_some() {
                 self.context_menu_avatar = None;
             } else if let Some(cp) = response.interact_pointer_pos() {
-                if let Some((uid, short_name, display_name, is_self)) = hit_at(cp).map(|hb| {
+                if let Some((uid, short_name, display_name, _is_self)) = hit_at(cp).map(|hb| {
                     (
                         hb.uid,
                         hb.short_name.clone(),
@@ -10074,16 +10085,6 @@ Light: {} | Amb: {} | Elev: {:?}",
                     if ctrl_held {
                         self.open_whisper_tab(&display_name, true);
                     } else {
-                        if hitboxes.iter().rev().any(|h| h.contains_badge(cp)) {
-                            self.context_menu_avatar = Some(ContextMenuTarget {
-                                uid,
-                                display_name,
-                                short_name: short_name.clone(),
-                                is_self,
-                                anchor_pos: cp,
-                                opened_this_frame: true,
-                            });
-                        }
                         if let Some(av) = self.world.avatars.get(&uid).cloned() {
                             if let Some((eff_species, _)) = self.world.resolved_avatar_species_gender(&av) {
                                 let (file_id, _) = self.resolve_species_spec(eff_species as usize);
@@ -10329,16 +10330,13 @@ Light: {} | Amb: {} | Elev: {:?}",
             return;
         };
         let snapshot_name_key = shortname_key(&snapshot.info.name);
-        let live_self = self
+        let live_avatar = self
             .world
-            .self_uid
-            .and_then(|uid| self.world.avatars.get(&uid))
-            .filter(|avatar| shortname_key(&avatar.name) == snapshot_name_key)
+            .avatars
+            .values()
+            .find(|avatar| shortname_key(&avatar.name) == snapshot_name_key)
             .cloned();
-        // `]f` can report an incomplete appearance for the local character.
-        // The live avatar state has the authoritative species, gender, and
-        // color slots used by the species/gender tag shown before names.
-        let appearance = live_self
+        let appearance = live_avatar
             .as_ref()
             .map(|avatar| avatar.appearance.clone())
             .unwrap_or_else(|| snapshot.info.appearance.clone());
@@ -11921,24 +11919,48 @@ fn render_chat_line(
                         .as_deref()
                         .is_some_and(|c| c.eq_ignore_ascii_case("emote"));
                     if is_emote && style.link.is_none() && text.contains('"') {
+                        let font_id = egui::TextStyle::Body.resolve(ui.style());
                         let segments = split_emote_quotes(text);
                         for (seg, is_quoted) in segments {
                             if seg.is_empty() {
                                 continue;
                             }
-                            let mut rt = RichText::new(seg);
-                            if style.bold {
-                                rt = rt.strong();
+                            for part in split_inline_chat_codes(seg) {
+                                match part {
+                                    InlineChatPart::Text(sub) if !sub.is_empty() => {
+                                        let mut rt = RichText::new(sub);
+                                        if style.bold {
+                                            rt = rt.strong();
+                                        }
+                                        if style.underline {
+                                            rt = rt.underline();
+                                        }
+                                        if is_quoted {
+                                            rt = rt.color(Color32::from_rgb(242, 245, 250));
+                                        } else {
+                                            rt = rt.italics().color(map_chat_color("emote"));
+                                        }
+                                        ui.label(rt);
+                                    }
+                                    InlineChatPart::Smiley { idx, code } => {
+                                        if let Some(tex) = smileys.get(idx).and_then(|o| o.as_ref()) {
+                                            let sz = smiley_draw_size(tex, &font_id);
+                                            ui.image(egui::load::SizedTexture::new(tex.id(), sz));
+                                        } else {
+                                            ui.label(RichText::new(format!("#S{code}")));
+                                        }
+                                    }
+                                    InlineChatPart::Desctag { idx, code } => {
+                                        if let Some(tex) = desctags.get(idx).and_then(|o| o.as_ref()) {
+                                            let sz = smiley_draw_size(tex, &font_id);
+                                            ui.image(egui::load::SizedTexture::new(tex.id(), sz));
+                                        } else {
+                                            ui.label(RichText::new(format!("#C{code}")));
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
-                            if style.underline {
-                                rt = rt.underline();
-                            }
-                            if is_quoted {
-                                rt = rt.color(Color32::from_rgb(242, 245, 250));
-                            } else {
-                                rt = rt.italics().color(map_chat_color("emote"));
-                            }
-                            ui.label(rt);
                         }
                         continue;
                     }
