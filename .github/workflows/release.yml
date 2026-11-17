@@ -100,29 +100,29 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.0.17
-            - Add legacy TLS encryption for game sessions with a clear warning that Furcadia's expired server certificate is not verified.
-            - Improve Pounce startup by beginning sync at login and checking unknown statuses immediately.
-            - Improve Furcadia chat rendering, clickable links, player tags, and right-click player actions.
-            - Add Furcadia Default map sizing and a Change Portrait button.
-            - Keep account passwords out of curl command arguments and prevent HTTPS redirects from downgrading to HTTP.
+            ### What's New in v1.1.0
+            - Migrated Settings from a floating popup window into a clean, dedicated full-page tab alongside your character tabs.
+            - Fixed custom FOX5 wall archives converted from legacy FSH files (`D=0` sequential paired wall IDs) so dream walls and foliage render the correct sprites and orientations.
+            - Fixed signed 16-bit layer offset (`'O'` opcode) parsing in FOX5 frames so negative offsets do not clamp to positive `i16::MAX`.
+            - Added a live `Shift + Hover` tile inspector tooltip in the map viewport displaying tile coordinates, floor, item, wall, region, effect, lighting, ambience, and elevation data.
+            - Shortened the top toolbar `Map Size` toggle label so it never overlaps adjacent toolbar buttons.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.0.17-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.1.0-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.0.17_amd64.deb
+            sudo apt install ./furcadia-native_1.1.0_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.0.17-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.1.0-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

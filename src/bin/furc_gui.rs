@@ -1356,6 +1356,7 @@ struct BackgroundSession {
     from_net: Receiver<NetToUi>,
 }
 
+#[allow(dead_code)]
 struct FurcadiaApp {
     screen: AppScreen,
 
@@ -1965,6 +1966,7 @@ impl FurcadiaApp {
         }
     }
 
+#[allow(dead_code)]
     fn apply_sync_folder(&mut self) {
         let requested = self.sync_folder_input.trim().to_owned();
         let old_logs = default_logs_dir();
@@ -2055,6 +2057,7 @@ impl FurcadiaApp {
         (!value.is_empty()).then(|| std::path::PathBuf::from(value))
     }
 
+#[allow(dead_code)]
     fn browse_sync_folder(&mut self) {
         #[cfg(target_os = "windows")]
         let out = furcadia_client::sys::command("powershell")
@@ -12389,6 +12392,7 @@ fn custom_dictionary_path() -> Option<std::path::PathBuf> {
         .and_then(|d| d.parent().map(|p| p.join("custom_dictionary.txt")))
 }
 
+#[allow(dead_code)]
 fn expand_user_path(raw: &str) -> std::path::PathBuf {
     let value = raw.trim();
     if value == "~" || value.starts_with("~/") {
