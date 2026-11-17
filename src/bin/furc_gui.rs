@@ -648,6 +648,18 @@ impl FoxSpriteCache {
             .is_some_and(|arc| arc.is_fshx_or_fsh)
     }
 
+    fn active_uses_paired_wall_ids(&self, use_legacy: bool) -> bool {
+        let base = if use_legacy {
+            self.legacy_archive.as_ref()
+        } else {
+            self.default_archive.as_ref()
+        };
+        self.dream_archive
+            .as_ref()
+            .or(base)
+            .is_some_and(|arc| arc.uses_paired_wall_ids())
+    }
+
     fn dream_is_fshx_or_fsh(&self) -> bool {
         self.dream_archive
             .as_ref()
@@ -743,7 +755,10 @@ impl FoxSpriteCache {
         anim_ms: u64,
     ) -> Option<ResolvedShapeLayers> {
         let resolved = shape.slots_at(anim_ms)?;
-        let is_animated = shape.frames.len() > 1 && !shape.anim_steps.is_empty();
+        // KitterSpeak step programs can animate slot offsets/state even when the
+        // shape reuses a single frame, so the presence of a program is what
+        // determines whether the view needs periodic redraws.
+        let is_animated = !shape.anim_steps.is_empty();
         let mut layers = Vec::new();
         for active in resolved.slots.iter().flatten() {
             let Some(frame) = shape.frames.get(active.frame_idx) else {
@@ -822,6 +837,45 @@ impl FoxSpriteCache {
         }
 
         self.shape_textures.insert((id, dir, use_legacy), loaded.clone());
+        loaded
+    }
+
+    /// Resolves a wall shape strictly from the dream patch. A present custom wall
+    /// archive replaces that wall group; absent shapes must stay absent instead of
+    /// falling through to unrelated default wall art.
+    fn get_or_load_dream_shape(
+        &mut self,
+        ctx: &egui::Context,
+        palette: &Palette,
+        id: u16,
+        dir: u8,
+    ) -> Option<CachedSprite> {
+        let key = (id, dir, false);
+        if let Some(cached) = self.shape_textures.get(&key) {
+            return cached.clone();
+        }
+        let mut loaded = None;
+        if let Some(fox) = self.dream_archive.as_mut() {
+            if let Some(shape) = fox.resolve_shape(id, dir) {
+                if let Some((tex, is_one_by_one)) = Self::decode_or_get_image(
+                    fox,
+                    ARCHIVE_DREAM,
+                    &self.prefix,
+                    &mut self.image_textures,
+                    ctx,
+                    palette,
+                    shape.image_idx,
+                ) {
+                    loaded = Some(CachedSprite {
+                        tex,
+                        offset: shape.offset,
+                        elev: shape.elev,
+                        is_one_by_one,
+                    });
+                }
+            }
+        }
+        self.shape_textures.insert(key, loaded.clone());
         loaded
     }
 
@@ -1061,7 +1115,7 @@ impl FoxSpriteCache {
         }
 
         let (is_dream, shape) = found?;
-        let is_animated = shape.frames.len() > 1 && !shape.anim_steps.is_empty();
+        let is_animated = !shape.anim_steps.is_empty();
         let fox = if is_dream {
             self.dream_archive.as_mut()?
         } else {
@@ -1286,6 +1340,7 @@ enum NetToUi {
 struct BackgroundSession {
     char_idx: usize,
     char_name: String,
+    live_desc_input: String,
     is_connected: bool,
     status_text: String,
     world: WorldState,
@@ -2493,6 +2548,7 @@ impl FurcadiaApp {
             BackgroundSession {
                 char_idx: self.selected_char_idx,
                 char_name,
+                live_desc_input: self.live_desc_input.clone(),
                 is_connected: old_connected,
                 status_text: old_status,
                 world: old_world,
@@ -2565,6 +2621,7 @@ impl FurcadiaApp {
             self.active_char_tab_pos = idx.min(self.bg_sessions.len());
         }
         self.selected_char_idx = target.char_idx;
+        self.live_desc_input = target.live_desc_input;
         self.is_connected = target.is_connected;
         self.status_text = target.status_text;
         self.world = target.world;
@@ -2981,6 +3038,14 @@ impl FurcadiaApp {
         if let Some(expected) = expected_checksum {
             let cached_hash = std::fs::read_to_string(dir.join(".hash")).ok()?;
             if cached_hash.trim() != expected.trim() {
+                return None;
+            }
+        } else {
+            // Without a server checksum, never trust an old dream package forever:
+            // map edits can otherwise leave stale walls and floors in the live view.
+            let modified = std::fs::metadata(&dir).ok()?.modified().ok()?;
+            let age = std::time::SystemTime::now().duration_since(modified).ok()?;
+            if age > Duration::from_secs(6 * 60 * 60) {
                 return None;
             }
         }
@@ -3596,7 +3661,10 @@ impl FurcadiaApp {
             resolve_floor_variant(floor_id, x, y)
         };
         let use_legacy = !self.world.is_modern;
-        if (209..=308).contains(&fid) && (use_legacy || self.floors2_cache.has_dream()) {
+        // Map IDs 209..=308 are the floors2 namespace even in modern maps.
+        // Keep consulting floors2 first so old background tiles (such as Vinca's
+        // cloud floor 209) don't resolve to unrelated shapes in modern floors.fox.
+        if (209..=308).contains(&fid) {
             if let Some(sp) = self
                 .floors2_cache
                 .get_or_load_shape_mode(ctx, &self.palette, fid - 209, 0, use_legacy)
@@ -3619,6 +3687,74 @@ impl FurcadiaApp {
         }
         self.floors_cache
             .get_or_load_shape_mode(ctx, &self.palette, fid, 0, use_legacy)
+    }
+
+    fn resolve_floor_layers(
+        &mut self,
+        ctx: &egui::Context,
+        floor_id: u16,
+        x: usize,
+        y: usize,
+        anim_ms: u64,
+    ) -> Option<ResolvedShapeLayers> {
+        let dream_overrides_floor = floor_id < 500
+            && self
+                .floors_cache
+                .dream_archive
+                .as_ref()
+                .is_some_and(|fox| fox.resolve_object_shape(floor_id, 0).is_some());
+        let fid = if dream_overrides_floor {
+            floor_id
+        } else {
+            resolve_floor_variant(floor_id, x, y)
+        };
+        let use_legacy = !self.world.is_modern;
+
+        // Map IDs 209..=308 are the floors2 namespace even in modern maps.
+        if (209..=308).contains(&fid) {
+            if let Some(shape) = self
+                .floors2_cache
+                .get_or_load_shape_layers_mode(ctx, &self.palette, fid - 209, 0, anim_ms, use_legacy)
+                .or_else(|| {
+                    self.floors2_cache.get_or_load_shape_layers_mode(
+                        ctx,
+                        &self.palette,
+                        fid,
+                        0,
+                        anim_ms,
+                        use_legacy,
+                    )
+                })
+            {
+                return Some(shape);
+            }
+        }
+
+        if fid >= 500 {
+            return self
+                .floore_cache
+                .get_or_load_shape_layers_mode(
+                    ctx,
+                    &self.palette,
+                    fid - 500,
+                    0,
+                    anim_ms,
+                    use_legacy,
+                )
+                .or_else(|| {
+                    self.floors_cache.get_or_load_shape_layers_mode(
+                        ctx,
+                        &self.palette,
+                        fid,
+                        0,
+                        anim_ms,
+                        use_legacy,
+                    )
+                });
+        }
+
+        self.floors_cache
+            .get_or_load_shape_layers_mode(ctx, &self.palette, fid, 0, anim_ms, use_legacy)
     }
 
     fn resolve_item_layers(
@@ -4003,32 +4139,40 @@ impl FurcadiaApp {
                     .get_or_load_shape_mode(ctx, &self.palette, junc_obj, jdir, use_legacy);
             }
             let cache = self.wall_caches.get_mut(&0)?;
-            let is_fshx = cache.active_is_fshx_or_fsh(use_legacy);
+            let is_paired = cache.active_uses_paired_wall_ids(use_legacy);
             let side_off = if dir == 9 { 1 } else { 0 };
-            let (obj_id, lookup_dir) = if is_fshx {
+            let (obj_id, lookup_dir) = if is_paired {
                 (16 * tex as u16 + 2 * obj + side_off, 0)
             } else {
                 (8 * tex as u16 + obj, dir)
             };
-            return cache.get_or_load_shape_mode(
-                ctx,
-                &self.palette,
-                obj_id,
-                lookup_dir,
-                use_legacy,
-            );
+            return if cache.has_dream() {
+                cache.get_or_load_dream_shape(ctx, &self.palette, obj_id, lookup_dir)
+            } else {
+                cache.get_or_load_shape_mode(
+                    ctx,
+                    &self.palette,
+                    obj_id,
+                    lookup_dir,
+                    use_legacy,
+                )
+            };
         }
 
         let file_key = tex + 1;
         let cache = self.wall_caches.get_mut(&file_key)?;
-        let is_fshx = cache.active_is_fshx_or_fsh(use_legacy);
+        let is_paired = cache.active_uses_paired_wall_ids(use_legacy);
         let side_off = if dir == 9 { 1 } else { 0 };
-        let (obj_id, lookup_dir) = if is_fshx {
+        let (obj_id, lookup_dir) = if is_paired {
             (2 * obj + side_off, 0)
         } else {
             (obj, dir)
         };
-        cache.get_or_load_shape_mode(ctx, &self.palette, obj_id, lookup_dir, use_legacy)
+        if cache.has_dream() {
+            cache.get_or_load_dream_shape(ctx, &self.palette, obj_id, lookup_dir)
+        } else {
+            cache.get_or_load_shape_mode(ctx, &self.palette, obj_id, lookup_dir, use_legacy)
+        }
     }
 
     fn handle_net_events(&mut self, ctx: &egui::Context) {
@@ -7579,15 +7723,15 @@ impl FurcadiaApp {
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
-                                    ("✨ Vinca", "fdl furc://vinca"),
-                                    ("🎭 Imaginarium", "fdl furc://imaginarium"),
-                                    ("🌊 Naia", "fdl furc://naia"),
-                                    ("🏛 Acropolis", "fdl furc://acropolis"),
-                                    ("⛵ Allegria", "fdl furc://allegria"),
-                                    ("🌲 Wylde", "fdl furc://wylde"),
-                                    ("🏘 Olde Towne", "fdl furc://oldetowne"),
-                                    ("🌿 Hawthorn", "fdl furc://hawthorn"),
-                                    ("🐾 FurN", "fdl furc://furn"),
+                                    ("✨ Vinca", "fdl furc://vinca/"),
+                                    ("🎭 Imaginarium", "fdl furc://imaginarium/"),
+                                    ("🌊 Naia", "fdl furc://naiagreen/"),
+                                    ("🏛 Acropolis", "fdl furc://acropolis/"),
+                                    ("⛵ Allegria", "fdl furc://allegria/"),
+                                    ("🌲 Wylde", "fdl furc://wylde/"),
+                                    ("🏘 Olde Towne", "fdl furc://oldetowne/"),
+                                    ("🌿 Hawthorn", "fdl furc://hawthorn/"),
+                                    ("🐾 FurN", "fdl furc://furn/"),
                                     ("🐱 Meovanni", "fdl furc://meovannivillage/"),
                                 ] {
                                     if ui
@@ -9611,6 +9755,7 @@ impl FurcadiaApp {
         // Pass 1: row-major floor rendering with AnchorX=33, AnchorY=79 cell_origin.
         let mut floor_elevs: HashMap<(usize, usize), (i16, i16)> = HashMap::new();
         let mut tile_elevs: HashMap<(usize, usize), (i16, i16)> = HashMap::new();
+        let mut any_animated = false;
         for tile in &mut tiles_to_draw {
             // Floor 161 is the DreamEd "no floor" placeholder (a pit sprite in the default
             // `floors.fox`); Furcadia renders it as empty black unless the dream defines its own.
@@ -9623,15 +9768,33 @@ impl FurcadiaApp {
             {
                 continue;
             }
-            if let Some(cs) = self.resolve_floor_sprite(&ctx, tile.floor_id, tile.x, tile.y) {
-                tile.floor_elev = cs.elev;
-                if cs.elev != (0, 0) {
-                    floor_elevs.insert((tile.x, tile.y), cs.elev);
-                    tile_elevs.insert((tile.x, tile.y), cs.elev);
+            if let Some(shape) = self.resolve_floor_layers(
+                &ctx,
+                tile.floor_id,
+                tile.x,
+                tile.y,
+                anim_ms,
+            ) {
+                any_animated |= shape.is_animated;
+                tile.floor_elev = shape.elev;
+                if shape.elev != (0, 0) {
+                    floor_elevs.insert((tile.x, tile.y), shape.elev);
+                    tile_elevs.insert((tile.x, tile.y), shape.elev);
                 }
-                if !cs.is_one_by_one {
-                    draw_cached_sprite_at(&painter, tile.tile_top_left, (0, 0), scale, &cs);
-                }
+                let mut floor_shadows = Vec::new();
+                let mut floor_sprites = Vec::new();
+                collect_shape_slot_ops(
+                    &shape.layers,
+                    shape.alpha,
+                    0..4,
+                    tile.tile_top_left,
+                    scale,
+                    (0, 0),
+                    &mut floor_shadows,
+                    &mut floor_sprites,
+                );
+                emit_map_draw_ops(&painter, &floor_shadows);
+                emit_map_draw_ops(&painter, &floor_sprites);
             } else {
                 let diamond = [
                     Pos2::new(tile.center.x, tile.center.y - tile_h * 0.5),
@@ -9668,7 +9831,6 @@ impl FurcadiaApp {
         let mut hitboxes: Vec<AvatarHitBox> = Vec::new();
         let mut name_badges: Vec<NameBadge> = Vec::new();
         let mut av_idx = 0usize;
-        let mut any_animated = false;
         let mut shadow_ops: Vec<MapDrawOp> = Vec::new();
         let mut fg_ops: Vec<MapDrawOp> = Vec::new();
         let thresh = self.world.region_defaults.indoor_threshold;
@@ -10104,6 +10266,55 @@ impl FurcadiaApp {
         }
         if self.hovered_avatar_uid.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        if ui.input(|i| i.modifiers.shift) {
+            if let Some(hp) = response.hover_pos() {
+                if let Some(t) = tiles_to_draw.iter().min_by(|a, b| {
+                    let da = ((hp.x - a.center.x) / (tile_w * 0.5)).abs()
+                        + ((hp.y - a.center.y) / (tile_h * 0.5)).abs();
+                    let db = ((hp.x - b.center.x) / (tile_w * 0.5)).abs()
+                        + ((hp.y - b.center.y) / (tile_h * 0.5)).abs();
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    let (raw_f, raw_i, raw_w, raw_r, raw_l, raw_a) =
+                        self.world.map.as_ref().map_or((0, 0, 0, 0, 0, 0), |m| {
+                            (
+                                m.floor_at(t.x, t.y),
+                                m.item_at(t.x, t.y),
+                                m.wall_at(t.x, t.y),
+                                m.region_at(t.x, t.y),
+                                m.lighting_at(t.x, t.y),
+                                m.ambience_at(t.x, t.y),
+                            )
+                        });
+                    egui::show_tooltip_at_pointer(
+                        &ctx,
+                        ui.layer_id(),
+                        egui::Id::new("tile_debug_tooltip"),
+                        |ui| {
+                            ui.label(format!(
+                                "Tile ({}, {})
+Floor: {} (raw {})
+Item: {} (raw {})
+Wall NW: {} (tex={}, v={}) | NE: {} (tex={}, v={}) [raw 0x{:04x}]
+Upper NW: {} | NE: {}
+Region: {} | Effect: {}
+Light: {} | Amb: {} | Elev: {:?}",
+                                t.x, t.y,
+                                t.floor_id, raw_f,
+                                t.item_id, raw_i,
+                                t.wall_nw, t.wall_nw / 12, t.wall_nw % 12,
+                                t.wall_ne, t.wall_ne / 12, t.wall_ne % 12,
+                                raw_w,
+                                t.upper_nw, t.upper_ne,
+                                raw_r, t.effect_id,
+                                raw_l, raw_a, t.floor_elev
+                            ));
+                        },
+                    );
+                }
+            }
         }
 
         if response.secondary_clicked() {
@@ -11144,37 +11355,6 @@ fn emit_map_draw_ops(painter: &egui::Painter, ops: &[MapDrawOp]) {
             }
         }
     }
-}
-
-fn draw_sprite_at(
-    painter: &egui::Painter,
-    tex: &TextureHandle,
-    top_left: Pos2,
-    scale: f32,
-    tint: Color32,
-) {
-    let size = tex.size_vec2() * scale;
-    painter.image(
-        tex.id(),
-        Rect::from_min_size(top_left, size),
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-        tint,
-    );
-}
-
-fn draw_cached_sprite_at(
-    painter: &egui::Painter,
-    tile_top_left: Pos2,
-    anchor_off: (i16, i16),
-    scale: f32,
-    cs: &CachedSprite,
-) {
-    let top_left = tile_top_left
-        + Vec2::new(
-            (cs.offset.0 + anchor_off.0) as f32,
-            (cs.offset.1 + anchor_off.1) as f32,
-        ) * scale;
-    draw_sprite_at(painter, &cs.tex, top_left, scale, Color32::WHITE);
 }
 
 #[derive(Clone)]
@@ -13870,7 +14050,8 @@ fn decode_furcadia_portrait(data: &[u8], palette: &Palette) -> Option<(usize, us
         if let Ok(mut archive) = FoxArchive::from_bytes(fox_bytes) {
             if let Ok(sprite) = archive.decode_image(0, palette) {
                 let rgba = sprite.rgba.clone();
-                return Some((sprite.width as usize, sprite.height as usize, rgba, true));
+                let remappable = portrait_has_remap_pixels(&rgba);
+                return Some((sprite.width as usize, sprite.height as usize, rgba, remappable));
             }
         }
         return None;

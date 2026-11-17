@@ -1196,6 +1196,17 @@ impl FoxArchive {
     }
 
     /// Returns true if `object_id` declares any 1x portal pad (`p=28`) or swirl (`p=29`) shape.
+    /// Returns true if this archive uses paired sequential (FSH-style D=0) wall objects
+    /// rather than directional (D=7 / D=9) wall shapes.
+    pub fn uses_paired_wall_ids(&self) -> bool {
+        self.is_fshx_or_fsh
+            || !self
+                .object_avatar_shapes
+                .values()
+                .flatten()
+                .any(|s| s.dir == 7 || s.dir == 9)
+    }
+
     pub fn has_portal_shapes(&self, object_id: u16) -> bool {
         self.object_avatar_shapes.get(&object_id).is_some_and(|shapes| {
             shapes.iter().any(|s| {
@@ -1946,11 +1957,8 @@ fn parse_level4_frame(
                 }
             }
             b'O' => {
-                if let (Some(lx), Some(ly)) = (read_be_u16(s, pos), read_be_u16(s, pos)) {
-                    layer_offset = (
-                        lx.min(i16::MAX as u16) as i16,
-                        ly.min(i16::MAX as u16) as i16,
-                    );
+                if let Some(pair) = read_be_i16_pair(s, pos) {
+                    layer_offset = pair;
                 }
             }
             b'c' => {
