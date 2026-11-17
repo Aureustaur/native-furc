@@ -25,26 +25,42 @@
 
 Furcadia Native Client is an independent desktop client for Furcadia, built in Rust with an `egui` interface. It includes a graphical client for everyday play, a command-line client for terminal workflows, and a reusable library for Furcadia networking and asset formats. The project targets Linux and Windows and is designed to use Furcadia data already present on your system.
 
-## What you can do
+## Features
 
-### Explore dreams and play
+### Playing and exploring
 
-- Connect to Furcadia, sign in with an account or character, and switch between characters and chat tabs.
+- Connect to Furcadia and sign in with an account or a character.
+- Run multiple characters at once in a single window, with each alt in its own tab.
 - View dream maps with animated avatars, portraits, player names, and dream-specific skins.
 - Join saved dreams or enter a `furc://` address; use map shortcuts and player actions to move around.
 - Inspect player descriptions and use common actions such as whisper, join, summon, follow, pounce, cookie, and gift.
 
-### Keep up with conversations
+### Chat and tabs
 
-- Use main chat, emotes, whispers, clickable links, and character-colored names.
-- Reorder character and whisper tabs, and open incoming whispers in their own tabs.
+- Main chat with emotes, clickable links, and character-colored names.
+- Tabbed chat channels, with incoming whispers opening in their own tabs.
+- Tabbed characters so one window covers all of your logged-in alts.
+- Reorder character and whisper tabs to arrange them how you like.
+- Dock and undock panels: Pounce, whispers, and alts can live in their own windows or stay docked in the main layout.
 - Keep local chat and whisper logs, with configurable logging and retention.
-- Follow characters with the Pounce watchlist and receive configurable notifications for pounces, whispers, and mentions.
+
+### Pounce and notifications
+
+- Follow characters with the Pounce watchlist, including Pounce list import.
+- Receive configurable notifications for pounces, whispers, and mentions.
 - Read Furcadia news and review online status from the client.
+
+### Interface and comfort
+
+- Modern, easy-to-use interface with a layout you can rearrange.
+- Adjustable text and portrait sizing.
+- Custom fonts and colors.
+- Built-in spell checker.
+- Automatic update checks so you know when a new release is available.
 
 ### Bring your Furcadia files with you
 
-Import maps, patches, portraits, settings, character details, Pounce lists, and logs from an existing Windows or Wine Furcadia installation. The importer searches common install and Documents locations, and you can also select a location from the client.
+Import is optional and safe to skip: the client works on its own, and importing simply brings over what you already have. Import maps, patches, portraits, settings, character details, Pounce lists, and logs from an existing Windows or Wine Furcadia installation. The importer searches common install and Documents locations, and you can also select a location from the client.
 
 You can also sync this client's preferences and logs between computers with Nextcloud, Google Drive for desktop, Dropbox, or another app that syncs a local folder. No special account linking is needed in Furcadia Native Client: install your provider's app, then create or choose a dedicated folder inside its local synced area, such as `Nextcloud/Furcadia Native Sync/`. In the client, open **Settings → Logs**, select that folder, and click **Use Folder**. Choose the same synced folder on each computer; on additional computers, restart the client after connecting so it loads the newest shared preferences.
 
@@ -52,7 +68,7 @@ The client manages the contents of that folder: it creates `settings-<device>.in
 
 The client reads Fox5, FSHX, FSH, and FR01 asset archives and supports Furcadia map formats V01.40 and V01.50. Proprietary game files are not included in this repository; use files from your own Furcadia installation.
 
-### Choose how to use it
+### Three ways to use it
 
 - **GUI (`furc-gui`)** — the full desktop client, including dream view, chat, character selection, saved dreams, settings, and Pounce tools.
 - **CLI (`furc-cli`)** — a terminal client for connecting, chatting, sending protocol commands, and monitoring watched characters.
