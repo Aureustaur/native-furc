@@ -1,19 +1,22 @@
 # Maintainer: Morgan Lowe <https://github.com/morganlowe/native-furcadia>
 pkgname=furcadia-native
-pkgver=1.0.15
+pkgver=1.0.16
 pkgrel=1
 pkgdesc="Native Furcadia client (GUI and CLI)"
 arch=('x86_64')
 url="https://github.com/morganlowe/native-furcadia"
 license=('CC-BY-NC-SA-4.0')
-depends=('glibc' 'libglvnd' 'libx11' 'libxcb' 'libxkbcommon' 'curl' 'bzip2' 'unzip')
-makedepends=('cargo')
+depends=('glibc' 'libglvnd' 'libx11' 'libxcb' 'libxkbcommon' 'curl' 'bzip2' 'unzip' 'openssl')
+makedepends=('cargo' 'openssl' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/morganlowe/native-furcadia/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
   cd "$srcdir/native-furcadia-$pkgver"
   export CARGO_HOME="$srcdir/.cargo"
+  # Arch's hardened linker uses -nodefaultlibs. OpenSSL's Rust crate needs
+  # the system libraries explicitly linked on this target.
+  export OPENSSL_NO_VENDOR=1
   cargo build --release --locked --bins
 }
 
