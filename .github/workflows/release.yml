@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v1.1.2 — Maintenance Release"
+          name: "Furcadia Native Client v1.1.3 — Emoji Name Rendering"
           body: |
-            ## Furcadia Native Client v1.1.2 — Maintenance Release
+            ## Furcadia Native Client v1.1.3 — Emoji Name Rendering
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -100,26 +100,27 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.1.2
-            - Added a shared logging mode toggle that applies the selected chat logging behavior across characters.
-            - Expanded the README with documentation for the new logging modes.
+            ### What's New in v1.1.3
+            - Render Furcadia smiley sprites inline in Pounce player rows and player context-menu headers.
+            - Replace Furcadia smiley codes with emoji stand-ins in plain-text name labels, whisper tabs, and log viewer surfaces.
+            - Correct the heart smiley mapping in the picker.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.1.2-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.1.3-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.1.2_amd64.deb
+            sudo apt install ./furcadia-native_1.1.3_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.1.2-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.1.3-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh
