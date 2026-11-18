@@ -7,3 +7,5 @@
 *.deb
 *.pkg.tar.zst
 .DS_Store
+/android/
+/.github/workflows/android.yml

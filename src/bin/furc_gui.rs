@@ -4975,7 +4975,7 @@ impl FurcadiaApp {
         } else if raw.starts_with('=') {
             // Channel broadcasts (=talz, =news, =fun, etc.)
             ClientCommand::Raw(raw)
-        } else if raw.starts_with(':') {
+        } else if raw.starts_with(':') && is_whisper_colon_emote(&raw) {
             if let Some(peer) = self.active_chat_tab.clone().filter(|_| self.whisper_emote_in_whisper) {
                 self.last_whisper_target = peer.clone();
                 ClientCommand::Whisper {
@@ -11438,6 +11438,26 @@ fn push_badge_seg_merged(out: &mut Vec<BadgeSeg>, seg: BadgeSeg) {
     out.push(seg);
 }
 
+fn render_inline_smiley_badge(ui: &mut egui::Ui, tex: &TextureHandle, font: &FontId) -> egui::Response {
+    let sz = smiley_draw_size(tex, font);
+    let pad = Vec2::new(3.5, 2.0);
+    let (rect, resp) = ui.allocate_exact_size(sz + pad * 2.0, Sense::hover());
+    ui.painter().rect_filled(rect, 4.0, Color32::from_rgb(225, 222, 232));
+    ui.painter().rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0, Color32::from_rgb(155, 148, 175)),
+    );
+    let img_rect = Rect::from_center_size(rect.center(), sz);
+    ui.painter().image(
+        tex.id(),
+        img_rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    resp
+}
+
 fn smiley_draw_size(tex: &TextureHandle, font: &FontId) -> Vec2 {
     let sz = tex.size_vec2();
     let h = (font.size * 1.18).max(10.0);
@@ -11897,6 +11917,37 @@ fn extract_outgoing_whisper_echo(plain: &str) -> Option<(String, String)> {
 
 /// Formats a whisper line for a dedicated peer whisper tab/window in regular chat style
 /// (stripping the `[ You whisper "..." to Peer . ]` / `[ Peer whispers, "..." to you. ]` wrapper).
+fn is_whisper_colon_emote(text: &str) -> bool {
+    let Some(rest) = text.trim().strip_prefix(':') else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return false;
+    }
+    if rest.starts_with("\x27s ") || rest.starts_with("\x27S ") {
+        return true;
+    }
+    let first_word = rest.split_whitespace().next().unwrap_or("");
+    let first_char = first_word.chars().next().unwrap_or(' ');
+    if !first_char.is_ascii_alphabetic() {
+        return false;
+    }
+    let stripped = first_word.trim_end_matches(['!', '?', '.', ',']);
+    let lower = stripped.to_ascii_lowercase();
+    if !lower.is_empty() {
+        let first_lower = lower.chars().next().unwrap();
+        let all_same = lower.chars().all(|c| c == first_lower);
+        if all_same && matches!(first_lower, 'd' | 'p' | 'o' | 's' | 'x' | 'b' | 'c' | 'v' | 'z') {
+            return false;
+        }
+        if matches!(lower.as_str(), "xd" | "xp" | "xo" | "dd" | "pp") {
+            return false;
+        }
+    }
+    stripped.len() >= 2
+}
+
 fn format_whisper_tab_line(
     self_name: &str,
     peer: &str,
@@ -11961,10 +12012,12 @@ fn format_whisper_tab_line(
         "<name shortname='{short_name_attr}'>{}</name>",
         escape_html(&speaker_disp)
     );
-    if let Some(emote) = trimmed.strip_prefix(':') {
+    if is_whisper_colon_emote(trimmed) {
+        let emote = trimmed.strip_prefix(':').unwrap_or(trimmed);
         let emote_body = emote.trim_start();
+        let sep = if emote_body.starts_with('\x27') { "" } else { " " };
         let line_html = format!(
-            "<font color='emote'>{speaker_tag} {}</font>",
+            "<font color='emote'>{speaker_tag}{sep}{}</font>",
             escape_html(emote_body)
         );
         parse_chat_line(&line_html)
@@ -12044,7 +12097,21 @@ fn render_chat_image_span(
     if let Some(idx) = parsed_smiley_idx {
         if let Some(tex) = smileys.get(idx).and_then(|o| o.as_ref()) {
             let sz = smiley_draw_size(tex, &font_id);
-            let resp = ui.image(egui::load::SizedTexture::new(tex.id(), sz));
+            let pad = Vec2::new(4.0, 2.0);
+            let (rect, resp) = ui.allocate_exact_size(sz + pad * 2.0, Sense::hover());
+            ui.painter().rect_filled(rect, 4.0, Color32::from_rgb(225, 222, 232));
+            ui.painter().rect_stroke(
+                rect,
+                4.0,
+                Stroke::new(1.0, Color32::from_rgb(155, 148, 175)),
+            );
+            let img_rect = Rect::from_center_size(rect.center(), sz);
+            ui.painter().image(
+                tex.id(),
+                img_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
             if !trimmed_alt.is_empty() {
                 resp.on_hover_text(trimmed_alt);
             }
@@ -12257,8 +12324,7 @@ fn render_chat_line(
                                     }
                                     InlineChatPart::Smiley { idx, code } => {
                                         if let Some(tex) = smileys.get(idx).and_then(|o| o.as_ref()) {
-                                            let sz = smiley_draw_size(tex, &font_id);
-                                            ui.image(egui::load::SizedTexture::new(tex.id(), sz));
+                                            render_inline_smiley_badge(ui, tex, &font_id);
                                         } else {
                                             ui.label(RichText::new(format!("#S{code}")));
                                         }
@@ -12399,8 +12465,7 @@ fn render_chat_line(
                                 }
                                 InlineChatPart::Smiley { idx, code } => {
                                     if let Some(tex) = smileys.get(idx).and_then(|o| o.as_ref()) {
-                                        let sz = smiley_draw_size(tex, &font_id);
-                                        ui.image(egui::load::SizedTexture::new(tex.id(), sz));
+                                        render_inline_smiley_badge(ui, tex, &font_id);
                                     } else {
                                         ui.label(RichText::new(format!("#S{code}")));
                                     }
@@ -12506,8 +12571,7 @@ fn render_linked_inline_codes(
             }
             InlineChatPart::Smiley { idx, code } => {
                 if let Some(tex) = smileys.get(idx).and_then(|tex| tex.as_ref()) {
-                    let size = smiley_draw_size(tex, &font_id);
-                    ui.image(egui::load::SizedTexture::new(tex.id(), size));
+                    render_inline_smiley_badge(ui, tex, &font_id);
                 } else {
                     ui.label(RichText::new(format!("#S{code}")));
                 }
