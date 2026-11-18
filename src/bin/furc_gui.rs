@@ -2689,6 +2689,9 @@ impl FurcadiaApp {
         self.cam_offset = target.cam_offset;
         self.to_net = target.to_net;
         self.from_net = target.from_net;
+        if self.is_connected {
+            let _ = self.to_net.send(UiToNet::Send(ClientCommand::Raw("info".to_owned())));
+        }
         self.looked_player = None;
         self.recent_portrait_target = None;
         self.context_menu_avatar = None;
@@ -4986,7 +4989,27 @@ impl FurcadiaApp {
                 ClientCommand::Raw(raw)
             }
         } else if Self::is_bare_furcadia_command(&raw) {
-            ClientCommand::Raw(raw)
+            let first = raw.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+            if matches!(
+                first.as_str(),
+                "make-cookie"
+                    | "give-cookie"
+                    | "make-secret"
+                    | "secret-cookie"
+                    | "eat-cookie"
+                    | "munch-cookie"
+                    | "buy-cookie"
+                    | "cookies-reject"
+                    | "cookies-accept"
+                    | "cookies-off"
+                    | "cookies-on"
+                    | "give"
+            ) || first.starts_with("give-")
+            {
+                ClientCommand::Say(raw)
+            } else {
+                ClientCommand::Raw(raw)
+            }
         } else if let Some(peer) = self.active_chat_tab.clone() {
             self.last_whisper_target = peer.clone();
             ClientCommand::Whisper {
@@ -6808,7 +6831,29 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
 
     fn send_raw_cmd(&self, cmd: &str) {
         if self.is_connected {
-            let _ = self.to_net.send(UiToNet::Send(ClientCommand::Raw(cmd.to_owned())));
+            let trimmed = cmd.trim();
+            let first = trimmed.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+            let wire = if matches!(
+                first.as_str(),
+                "make-cookie"
+                    | "give-cookie"
+                    | "make-secret"
+                    | "secret-cookie"
+                    | "eat-cookie"
+                    | "munch-cookie"
+                    | "buy-cookie"
+                    | "cookies-reject"
+                    | "cookies-accept"
+                    | "cookies-off"
+                    | "cookies-on"
+                    | "give"
+            ) || first.starts_with("give-")
+            {
+                format!("\"{trimmed}")
+            } else {
+                trimmed.to_owned()
+            };
+            let _ = self.to_net.send(UiToNet::Send(ClientCommand::Raw(wire)));
         }
     }
 
@@ -7446,20 +7491,31 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 if ui.small_button("🖼 Change Portrait").clicked() {
                                     self.send_raw_cmd("portrchng");
                                 }
-                                if self.cookies_collected.is_some() || self.cookies_total.is_some() {
+                                {
                                     let mut txt = String::from("🍪");
                                     if let Some(c) = self.cookies_collected {
-                                        txt.push_str(&format!(" {c} held"));
+                                        txt.push_str(&format!(" {c} active"));
                                     }
                                     if let Some(t) = self.cookies_total {
-                                        txt.push_str(&format!(" · {t} all-time"));
+                                        txt.push_str(&format!(" · {t} bank/inactive"));
                                     }
-                                    ui.label(
-                                        RichText::new(txt)
-                                            .size(11.0)
-                                            .color(Color32::from_rgb(235, 190, 120)),
-                                    )
-                                    .on_hover_text("Cookies reported by the server (updates when the server sends cookie info)");
+                                    if self.cookies_collected.is_none() && self.cookies_total.is_none() {
+                                        txt.push_str(" Cookies (click to refresh)");
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(txt)
+                                                    .size(11.0)
+                                                    .color(Color32::from_rgb(235, 190, 120)),
+                                            )
+                                            .sense(Sense::click()),
+                                        )
+                                        .on_hover_text("Click to query the server (`info`) for your current cookie counts")
+                                        .clicked()
+                                    {
+                                        self.send_raw_cmd("info");
+                                    }
                                 }
                             });
                         });
@@ -10463,7 +10519,12 @@ Light: {} | Amb: {} | Elev: {:?}",
             PlayerMenuAction::ToggleIgnore => self.send_raw_cmd(&format!("ignore {short_name}")),
             PlayerMenuAction::ShareEdit => self.send_raw_cmd(&format!("share {short_name}")),
             PlayerMenuAction::UnshareEdit => self.send_raw_cmd(&format!("unshare {short_name}")),
-            PlayerMenuAction::Raw(cmd) => self.send_raw_cmd(cmd),
+            PlayerMenuAction::Raw(cmd) => {
+                self.send_raw_cmd(cmd);
+                if cmd.contains("cookie") {
+                    self.send_raw_cmd("info");
+                }
+            }
         }
     }
 
@@ -10742,50 +10803,68 @@ Light: {} | Amb: {} | Elev: {:?}",
                             if self.is_connected
                                 && !display_name.eq_ignore_ascii_case(&self.active_character_name())
                             {
-                                ui.menu_button("🍪 Cookie", |ui| {
+                                ui.menu_button("Cookie", |ui| {
                                     for (lbl, cmd, tip) in [
                                         (
-                                            "🍪 Make Cookie (Daily)",
+                                            "🍪 Make Cookie",
                                             "make-cookie",
-                                            "Bake a new daily cookie for this player (requires 15 min login time)",
+                                            "Bake a daily cookie for this player",
                                         ),
                                         (
-                                            "🤲 Give Held Cookie",
+                                            "🤲 Give Cookie",
                                             "give-cookie",
-                                            "Give one of the cookies currently in your description",
+                                            "Give one of your held cookies",
                                         ),
                                         (
-                                            "🤫 Make Secret Cookie",
+                                            "Make Secret Cookie",
                                             "make-secret",
-                                            "Bake a daily cookie without alerting others in the room",
+                                            "Bake a daily cookie silently",
                                         ),
                                         (
-                                            "🤫 Give Secret Cookie",
+                                            "Give Secret Cookie",
                                             "secret-cookie",
-                                            "Give a held cookie from your description without alerting others",
+                                            "Give a held cookie silently",
                                         ),
                                     ] {
                                         if ui.button(lbl).on_hover_text(tip).clicked() {
-                                            self.send_raw_cmd(&format!("{cmd} {}", snapshot.short_name));
+                                            let target_wire = if snapshot.short_name.trim().is_empty() {
+                                                wire_player_name(&display_name)
+                                            } else {
+                                                wire_player_name(&snapshot.short_name)
+                                            };
+                                            self.send_raw_cmd(&format!("{cmd} {target_wire}"));
+                                            self.push_system_line(
+                                                "emit",
+                                                &format!("Cookie Sent `{cmd} {target_wire}`"),
+                                            );
                                             ui.close_menu();
                                         }
                                     }
                                 });
-                                ui.menu_button("🎁 Gift", |ui| {
+                                ui.menu_button("Gift", |ui| {
                                     for (lbl, cmd) in [
-                                        ("✋ Give Held Item", "give"),
-                                        ("🌹 Rose", "give-rose"),
-                                        ("🌹 Red Rose", "give-red-rose"),
-                                        ("🥀 Black Rose", "give-black-rose"),
-                                        ("💐 Bouquet", "give-bouquet"),
-                                        ("📿 Bracelet", "give-bracelet"),
-                                        ("🤗 Snug", "give-snug"),
-                                        ("🍬 Candy Cane", "give-candy-cane"),
-                                        ("💝 Valentine", "give-valentine"),
-                                        ("🔥 Flaming Sword", "give-flaming-sword"),
+                                        ("✋ Give Item", "give"),
+                                        ("Rose", "give-rose"),
+                                        ("Red Rose", "give-red-rose"),
+                                        ("Black Rose", "give-black-rose"),
+                                        ("Bouquet", "give-bouquet"),
+                                        ("Bracelet", "give-bracelet"),
+                                        ("Snug", "give-snug"),
+                                        ("Candy Cane", "give-candy-cane"),
+                                        ("Valentine", "give-valentine"),
+                                        ("Flaming Sword", "give-flaming-sword"),
                                     ] {
                                         if ui.button(lbl).clicked() {
-                                            self.send_raw_cmd(&format!("{cmd} {}", snapshot.short_name));
+                                            let target_wire = if snapshot.short_name.trim().is_empty() {
+                                                wire_player_name(&display_name)
+                                            } else {
+                                                wire_player_name(&snapshot.short_name)
+                                            };
+                                            self.send_raw_cmd(&format!("{cmd} {target_wire}"));
+                                            self.push_system_line(
+                                                "emit",
+                                                &format!("Gift Sent `{cmd} {target_wire}`"),
+                                            );
                                             ui.close_menu();
                                         }
                                     }
@@ -11446,7 +11525,7 @@ fn render_inline_smiley_badge(ui: &mut egui::Ui, tex: &TextureHandle, font: &Fon
     ui.painter().rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, Color32::from_rgb(155, 148, 175)),
+        Stroke::new(1.0_f32, Color32::from_rgb(155, 148, 175)),
     );
     let img_rect = Rect::from_center_size(rect.center(), sz);
     ui.painter().image(
@@ -11817,10 +11896,18 @@ fn parse_cookie_counts(plain: &str) -> (Option<u32>, Option<u32>) {
             .collect();
         digits.parse().ok()
     });
-    (
-        collected,
-        after("all-time cookie total:"),
-    )
+    let total_or_inactive = after("all-time cookie total:").or_else(|| {
+        let idx = lower.find("item: cookies (")?;
+        let sub = &lower[idx..];
+        let act_idx = sub.find("active,")? + "active,".len();
+        let digits: String = sub[act_idx..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    });
+    (collected, total_or_inactive)
 }
 
 fn extract_whisper_peer(plain: &str) -> Option<String> {
@@ -12103,7 +12190,7 @@ fn render_chat_image_span(
             ui.painter().rect_stroke(
                 rect,
                 4.0,
-                Stroke::new(1.0, Color32::from_rgb(155, 148, 175)),
+                Stroke::new(1.0_f32, Color32::from_rgb(155, 148, 175)),
             );
             let img_rect = Rect::from_center_size(rect.center(), sz);
             ui.painter().image(
