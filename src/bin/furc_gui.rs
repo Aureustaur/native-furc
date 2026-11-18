@@ -6929,7 +6929,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         let name_resp = ui
                             .allocate_ui(Vec2::new(name_w, 18.0), |ui| {
                                 ui.add(
-                                    egui::Label::new(RichText::new(&name).color(name_color))
+                                    egui::Label::new(RichText::new(name_display_clean(&name)).color(name_color))
                                         .truncate()
                                         .sense(Sense::click()),
                                 )
@@ -8890,9 +8890,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             .as_deref()
                                             .is_some_and(|a| a.eq_ignore_ascii_case(&w.peer));
                                         let label = if w.unread > 0 && !sel {
-                                            format!("💬 {} ({})", w.peer, w.unread)
+                                            format!("💬 {} ({})", name_display_clean(&w.peer), w.unread)
                                         } else {
-                                            format!("💬 {}", w.peer)
+                                            format!("💬 {}", name_display_clean(&w.peer))
                                         };
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 2.0;
@@ -9096,7 +9096,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             ('A', "😊"), ('B', "😁"), ('C', "😉"), ('D', "😢"),
                             ('E', "😛"), ('F', "😮"), ('G', "😠"), ('H', "😎"),
                             ('I', "😳"), ('J', "😇"), ('K', "😈"), ('L', "❤️"),
-                            ('M', "💔"), ('N', "🌹"), ('O', "⭐"), ('P', "🎵"),
+                            ('M', "💔"), ('N', "🌹"), ('O', "❤️"), ('P', "🎵"),
                             ('Q', "🎉"), ('R', "💤"), ('S', "🤔"), ('T', "😂"),
                             ('U', "😘"), ('V', "🙄"), ('W', "😬"), ('X', "😴"),
                             ('Y', "👍"), ('Z', "👎"),
@@ -10554,7 +10554,7 @@ Light: {} | Amb: {} | Elev: {:?}",
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(148.0);
                     ui.label(
-                        RichText::new(&target.display_name)
+                        RichText::new(name_display_clean(&target.display_name))
                             .strong()
                             .color(self.theme.accent()),
                     );
@@ -11354,6 +11354,49 @@ fn smiley_index_for_code(ch: char) -> Option<usize> {
         '1'..='3' => Some(51 + (ch as usize) - ('1' as usize)),
         _ => None,
     }
+}
+
+
+fn emoji_fallback_for_code(code: char) -> Option<&'static str> {
+    // Unicode stand-ins for plain-text labels (Pounce rows, whisper tabs,
+    // context menu). Verified in-game: O = heart. The rest mirror the
+    // smiley picker guesses; confirm with the picker and tune both tables.
+    Some(match code {
+        'A' => "\u{1f60a}", 'B' => "\u{1f601}", 'C' => "\u{1f609}",
+        'D' => "\u{1f622}", 'E' => "\u{1f61b}", 'F' => "\u{1f62e}",
+        'G' => "\u{1f620}", 'H' => "\u{1f60e}", 'I' => "\u{1f633}",
+        'J' => "\u{1f607}", 'K' => "\u{1f608}", 'L' => "\u{2764}",
+        'M' => "\u{1f494}", 'N' => "\u{1f339}", 'O' => "\u{2665}",
+        'P' => "\u{1f3b5}", 'Q' => "\u{1f389}", 'R' => "\u{1f4a4}",
+        'S' => "\u{1f914}", 'T' => "\u{1f602}", 'U' => "\u{1f618}",
+        'V' => "\u{1f644}", 'W' => "\u{1f62c}", 'X' => "\u{1f634}",
+        'Y' => "\u{1f44d}", 'Z' => "\u{1f44e}",
+        _ => return None,
+    })
+}
+
+/// Replaces `#S<x>` smiley codes with Unicode stand-ins for plain-text UI
+/// (lists and menus render labels, not sprites; map badges and chat keep
+/// drawing real sprites via parse_furc_badge_segments/split_inline_chat_codes).
+fn name_display_clean(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut it = raw.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '#' && it.peek() == Some(&'S') {
+            let mut la = it.clone();
+            la.next();
+            if let Some(code) = la.next() {
+                if let Some(fb) = emoji_fallback_for_code(code) {
+                    out.push_str(fb);
+                    it.next();
+                    it.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn parse_furc_badge_segments(raw: &str) -> Vec<BadgeSeg> {
