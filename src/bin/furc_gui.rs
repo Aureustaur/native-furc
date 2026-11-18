@@ -8919,7 +8919,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                                     .strong()
                                                     .color(Color32::from_rgb(20, 14, 6)),
                                             )
-                                            .fill(Color32::from_rgb(235, 180, 60))
+                                            .fill(Color32::from_rgb(250, 220, 50))
                                             .stroke(Stroke::new(
                                                 1.5_f32,
                                                 Color32::from_rgb(255, 225, 130),
@@ -8927,7 +8927,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         )
                                         .clicked()
                                     } else {
-                                        ui.selectable_label(main_sel, main_label).clicked()
+                                        ui.add(egui::Button::new(if main_sel { RichText::new(main_label).strong().color(Color32::from_rgb(24, 16, 6)) } else { RichText::new(main_label) }).fill(if main_sel { Color32::from_rgb(130, 200, 255) } else { Color32::from_rgb(42, 30, 68) })).clicked()
                                     };
                                     if main_clicked {
                                         self.main_chat_unread = 0;
@@ -8959,7 +8959,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                                             .strong()
                                                             .color(Color32::from_rgb(20, 14, 6)),
                                                     )
-                                                    .fill(Color32::from_rgb(235, 180, 60))
+                                                    .fill(Color32::from_rgb(250, 220, 50))
                                                     .stroke(Stroke::new(
                                                         1.5_f32,
                                                         Color32::from_rgb(255, 225, 130),
@@ -8973,7 +8973,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                                             .strong()
                                                             .color(Color32::from_rgb(24, 16, 6)),
                                                     )
-                                                    .fill(accent)
+                                                    .fill(Color32::from_rgb(130, 200, 255))
                                                     .sense(Sense::click_and_drag()),
                                                 )
                                             } else {
@@ -12442,6 +12442,8 @@ fn render_chat_line(
                     }
                     if let Some(color_name) = &style.color {
                         rt = rt.color(map_chat_color(color_name));
+                    } else if text.trim().starts_with('[') && text.trim().ends_with(']') {
+                        rt = rt.color(Color32::from_rgb(115, 195, 255));
                     } else {
                         rt = rt.color(Color32::from_rgb(232, 236, 244));
                     }
@@ -12597,6 +12599,9 @@ fn render_linked_inline_codes(
                 let mut rich = RichText::new(segment);
                 if style.bold {
                     rich = rich.strong();
+                }
+                if segment.trim().starts_with('[') && segment.trim().ends_with(']') {
+                    rich = rich.color(Color32::from_rgb(115, 195, 255));
                 }
                 if style.italic || style.color.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("emote")) {
                     rich = rich.italics();
