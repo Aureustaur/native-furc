@@ -1,7 +1,7 @@
 <div align="center">
   <img src="native-icon.png" alt="Furcadia Native Client icon" width="96" />
   <h1>Furcadia Native Client</h1>
-  <p><strong>A native desktop client for exploring Furcadia dreams, chatting, and keeping up with the people you know.</strong></p>
+  <p><strong>A fast, standalone native desktop client for exploring Furcadia dreams, trading, roleplaying, and keeping up with the people you know — on Linux and Windows, with no Wine required.</strong></p>
   <p>
     <img src="https://img.shields.io/github/v/release/morganlowe/native-furcadia?label=Version&style=flat-square" alt="Latest release" />
     <img src="https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-blue?style=flat-square" alt="CC BY-NC-SA 4.0 license" />
@@ -23,56 +23,83 @@
 
 ![Furcadia Native Client with fictional demo names, sample chat, and four whisper tabs](mockups/demo-chat-screenshot-reference-v2.png)
 
-Furcadia Native Client is an independent desktop client for Furcadia, built in Rust with an `egui` interface. It includes a graphical client for everyday play, a command-line client for terminal workflows, and a reusable library for Furcadia networking and asset formats. The project targets Linux and Windows and is designed to use Furcadia data already present on your system.
+Furcadia Native Client is an independent, natively compiled Rust client for Furcadia built with `egui`. It runs **standalone out of the box** on both clean Linux and Windows installs — automatically fetching stock species, dynamic Digo avatars, portraits, and dreams without requiring Wine or a pre-existing installation — while still letting you import your existing Windows or Wine Furcadia files whenever you want.
+
+Alongside the graphical desktop client (`furc-gui`), the repository provides a script-friendly command-line client (`furc-cli`) and a reusable Rust library (`furcadia_client`) for Furcadia networking, protocol handling, and archive decoding.
+
+## Why Furcadia Native Client?
+
+- **True native performance**: compiled to a small native Rust executable for Linux and Windows with zero Wine, compatibility layers, or browser bloat.
+- **Ready on a fresh install**: connects cleanly on first launch and downloads public species, dynamic avatars, portraits, and dream assets automatically.
+- **Multi-alt power in one window**: keep multiple logged-in characters open simultaneously as reorderable character tabs, complete with per-character cookie counts preserved across tab switches.
+- **Built for daily RP and trading**: includes dedicated **Cookie**, **Gift**, and **Trade** menus right on the player card, inline Furcadia smiley sprites, `[bracketed text]` highlighting, rich text buttons, and a configurable dice roller.
+- **Clean, distraction-free UI**: crisp plain-text and ASCII interface free of emoji clutter, with customizable themes, fonts, sizes, and colors.
+- **Keep everything yours**: optionally import existing maps, portraits, settings, Pounce watchlists, and logs, or sync preferences and logs across computers through your own cloud-synced folder.
 
 ## Features
 
-### Playing and exploring
+### Playing, Dreams, and Avatars
 
-- Connect to Furcadia and sign in with an account or a character.
-- Run multiple characters at once in a single window, with each alt in its own tab.
-- View dream maps with animated avatars, portraits, player names, and dream-specific skins.
-- Join saved dreams or enter a `furc://` address; use map shortcuts and player actions to move around.
-- Inspect player descriptions and use common actions such as whisper, join, summon, follow, pounce, cookie, and gift.
+- Sign in with an account email or individual character credentials, with multi-character support in a single window.
+- Render Furcadia dreams natively (`Fox5`, `FSHX`, `FSH`, and `FR01` archives; map formats `V01.40` and `V01.50`) with Furcadia palette/color remapping, animated avatars, dynamic Digo avatars, remappable/custom portraits, and player badges.
+- Switch between 1x default Furcadia view range or zoomed exploration, and choose from Dream Window themes (`ClassicPurple`, `DragonHoard`, `KitterMagic`, `FerianWylde`).
+- Navigate via main map shortcuts, `furc://` Dream URLs, **Saved Dreams** bookmarks, and sidebar Digo controls for wings, toggles, costumes, and Digo abilities.
+- Built-in sound effects and dream music toggles.
 
-### Chat and tabs
+### Player Card, Secure Trading, Cookies, and Gifts
 
-- Main chat with emotes, clickable links, and character-colored names.
-- Tabbed chat channels, with incoming whispers opening in their own tabs.
-- Tabbed characters so one window covers all of your logged-in alts.
-- Reorder character and whisper tabs to arrange them how you like.
-- Dock and undock panels: Pounce, whispers, and alts can live in their own windows or stay docked in the main layout.
-- Keep local chat and whisper logs, with configurable logging and retention.
+- Look at any player to open their portrait card with one-click **Whisper**, **Join**, **Summon**, **Follow**, and **+Pounce / -Pounce** controls.
+- **Cookie menu**: run `Make Cookie`, `Give Cookie`, `Make Secret Cookie`, and `Give Secret Cookie` straight from a player's card, with per-character active and bank cookie counts preserved across alt tabs (no more stray `info` output on tab switches).
+- **Gift menu**: quickly send `Give Item`, roses, bouquets, bracelets, snugs, and other items directly to the looked-at player.
+- **Trade menu**: initiate and complete secure trades cleanly from the other-character card (`Start Trade`, `Trade Status`, `Add Portrait Space`, inline `Item` `+Add` / `-Rem` for items or DragonScales like `GD 50`, inline `Reason` `Set`, `Accept Trade`, `Reject Trade`, and `End Trade`).
+- Proper Furcadia speech-prefix (`"`) wire routing for `trade-*`, `gift-*`, `give-*`, `discard-*`, and cookie commands whether entered in Main Chat, Whisper tabs, detached whisper windows, `/cmd`, `` `cmd ``, or player menus — without breaking ordinary whisper messages like `"give me a minute"`.
 
-### Pounce and notifications
+### Chat, Whispers, and Roleplay Tools
 
-- Follow characters with the Pounce watchlist, including Pounce list import.
-- Receive configurable notifications for pounces, whispers, and mentions.
-- Read Furcadia news and review online status from the client.
+- Character-colored names and clean channel formatting across Main Chat and whispers.
+- `[bracketed text]` automatically highlighted in blue inside chat and whisper messages for easy OOC / RP tag scanning.
+- Inline Furcadia smiley sprites rendered in chat, player lists, Pounce rows, and the smiley picker.
+- Unread **yellow** and active **light-blue** tab highlights across both character tabs and whisper tabs so missed messages stand out immediately.
+- Drag-to-reorder character and whisper tabs, plus pop-out / dockable windows for whispers and Pounce.
+- Bold/Italic/Underline formatting buttons, a clickable link builder (`https://` and `furc://`), configurable dice roller (`1d20`, `1d100`, etc.), built-in spell checker/autocorrect, and `F1` hotkeys.
 
-### Interface and comfort
+### Pounce and Notifications
 
-- Modern, easy-to-use interface with a layout you can rearrange.
-- Adjustable text and portrait sizing.
-- Custom fonts and colors.
-- Built-in spell checker.
-- Automatic update checks so you know when a new release is available.
+- Real-time Pounce friend watchlist with online/offline status indicators and Pounce list import.
+- Saved Dreams list alongside Pounce so favorite maps stay one click away.
+- Configurable notifications for Pounce alerts, whispers, and mentions, plus in-client Furcadia news.
 
-### Bring your Furcadia files with you
+### Logging and Cloud Folder Sync
 
-Import is optional and safe to skip: the client works on its own, and importing simply brings over what you already have. Import maps, patches, portraits, settings, character details, Pounce lists, and logs from an existing Windows or Wine Furcadia installation. The importer searches common install and Documents locations, and you can also select a location from the client.
+- Local chat and whisper logging with a searchable in-client log viewer and configurable retention.
+- Choose between **per-character logs** or **Furcadia-style shared logging mode** (combining logs across characters).
+- Sync preferences and logs between computers via any folder-sync tool you already use — **Nextcloud**, **Google Drive for desktop**, **Dropbox**, or similar — without special account linking inside the client.
 
-You can also sync this client's preferences and logs between computers with Nextcloud, Google Drive for desktop, Dropbox, or another app that syncs a local folder. No special account linking is needed in Furcadia Native Client: install your provider's app, then create or choose a dedicated folder inside its local synced area, such as `Nextcloud/Furcadia Native Sync/`. In the client, open **Settings → Logs**, select that folder, and click **Use Folder**. Choose the same synced folder on each computer; on additional computers, restart the client after connecting so it loads the newest shared preferences.
+### Interface, Settings, and Cache Tools
 
-The client manages the contents of that folder: it creates `settings-<device>.ini` files at the top level and stores logs under `logs/<device>/` for each computer. The log viewer combines those per-device logs. Sync the whole **Furcadia Native Sync** folder, including its settings files and `logs` subfolder. Let the provider finish syncing before starting the client on another computer. Email, passwords, and auto-login credentials stay in each computer's local app settings.
+- Dedicated Settings tab to adjust chat font, text and portrait sizing, colors, themes, audio, notifications, spell check, and Windows asset import.
+- **Cached Downloads** manager in Settings to inspect avatar and dream cache disk usage and flush or re-download cached avatars, dreams, or all downloads with one click if downloaded files ever need a fresh copy.
+- Clean emoji-free text/ASCII UI controls across every menu, tab, and toolbar, plus automatic update checks when a newer GitHub release is published.
 
-The client reads Fox5, FSHX, FSH, and FR01 asset archives and supports Furcadia map formats V01.40 and V01.50. Proprietary game files are not included in this repository; use files from your own Furcadia installation.
+## Bring your Furcadia files with you
 
-### Three ways to use it
+Importing is completely optional: the client works standalone on a fresh install and fetches public game assets on demand. If you already play Furcadia on Windows or Wine, the built-in importer can bring over maps, patches, portraits, settings, character details, Pounce lists, and logs from common install and Documents paths — or any folder you pick manually.
 
-- **GUI (`furc-gui`)** — the full desktop client, including dream view, chat, character selection, saved dreams, settings, and Pounce tools.
-- **CLI (`furc-cli`)** — a terminal client for connecting, chatting, sending protocol commands, and monitoring watched characters.
-- **Rust library (`furcadia_client`)** — networking, protocol messages, authentication, map and archive readers, world state, and related utilities.
+To sync settings and logs across multiple computers with Nextcloud, Google Drive for desktop, or Dropbox:
+
+1. Create or choose a dedicated folder inside your provider's locally synced directory (for example, `Nextcloud/Furcadia Native Sync/`).
+2. In Furcadia Native Client, open **Settings -> Logs**, select that folder, and click **Use Folder**.
+3. Choose the same synced folder on each computer. When switching machines, let your sync provider finish syncing before launching, and restart the client after connecting if needed so it picks up the newest shared preferences.
+
+The client manages per-machine preferences as `settings-<device>.ini` at the top level and stores logs under `logs/<device>/`, combining per-device logs automatically in the log viewer. Account email, passwords, and auto-login credentials remain only in each computer's local app configuration.
+
+The client reads `Fox5`, `FSHX`, `FSH`, and `FR01` asset archives and supports Furcadia map formats `V01.40` and `V01.50`. Proprietary game files are not bundled in this repository; public assets are fetched from Furcadia's public servers or read from your own local installation.
+
+## Three ways to use it
+
+- **GUI (`furc-gui`)** — the full desktop client with dream rendering, multi-alt character tabs, whisper tabs, Trade/Gift/Cookie player card menus, Pounce, log viewer, importer, and cache management.
+- **CLI (`furc-cli`)** — a terminal client for connecting, chatting, sending raw protocol commands, and watching Pounce friends from a shell or script.
+- **Rust library (`furcadia_client`)** — reusable crate covering Furcadia networking, protocol parsing/encoding, authentication, map and FOX5/FSH archive decoding, palette remapping, and world state.
 
 ## Get the client
 
@@ -96,11 +123,11 @@ On Arch Linux, CachyOS, Manjaro, and EndeavourOS, install the downloaded package
 sudo pacman -U ./furcadia-native-<version>-1-x86_64.pkg.tar.zst
 ```
 
-The Windows installer installs both client binaries and adds a Start Menu entry. Package contents and available platforms can vary by release; check the release notes for the current assets.
+The Windows installer installs both `furc-gui` and `furc-cli`, creates a Start Menu shortcut, and registers an uninstaller in Windows Apps & Features. Package contents and available platforms can vary by release; check the release notes for the current assets.
 
 ## Build from source
 
-You will need the [stable Rust toolchain](https://www.rust-lang.org/tools/install). Linux builds also need the system development libraries required by `eframe`/`winit` for your desktop session (X11 or Wayland) and OpenGL.
+You will need the [stable Rust toolchain](https://www.rust-lang.org/tools/install). Linux builds also need the system development libraries required by `eframe`/`winit` and OpenSSL (`libx11`, `libxcb`, `libxkbcommon`, OpenGL, and `openssl`/`pkg-config` dev packages).
 
 ```sh
 git clone https://github.com/morganlowe/native-furcadia.git
@@ -108,11 +135,11 @@ cd native-furcadia
 cargo build --release --bins
 ```
 
-The binaries are written to `target/release/furc-gui` and `target/release/furc-cli`. To launch the graphical client, run `./target/release/furc-gui`.
+The compiled binaries are written to `target/release/furc-gui` and `target/release/furc-cli`. Launch the graphical client with `./target/release/furc-gui`.
 
 ## Command-line client
 
-`furc-cli` connects to the default Furcadia server. Supply either a character name or an account email and a password:
+`furc-cli` connects to the default Furcadia server using either a character name or an account email and password:
 
 ```sh
 ./target/release/furc-cli --name CharacterName --password 'your-password'
@@ -122,19 +149,19 @@ The binaries are written to `target/release/furc-gui` and `target/release/furc-c
 ./target/release/furc-cli --account you@example.com --password 'your-password' --watch FriendOne,FriendTwo
 ```
 
-While connected, enter chat text directly or use `/wh NAME message`, `/who`, `/onln NAME`, `/glook NAME`, `/watch NAME`, `/unwatch NAME`, and `/pounce`. Prefix a protocol command with `/raw ` or a backtick. Run `furc-cli --help` for connection options such as `--host`, `--port`, and `--timeout-secs`.
+While connected, type chat directly or use `/wh NAME message`, `/who`, `/onln NAME`, `/glook NAME`, `/watch NAME`, `/unwatch NAME`, and `/pounce`. Prefix a raw protocol command with `/raw ` or a backtick. Run `furc-cli --help` for options such as `--host`, `--port`, and `--timeout-secs`.
 
 ## Data and privacy
 
-Settings are stored locally at `~/.config/furcadia-native/config.ini` on Linux (or `%APPDATA%\furcadia-native\config.ini` on Windows). Chat logs are also stored locally. The client connects to Furcadia services for login, game sessions, news, and update checks; account login details are used to authenticate with Furcadia. On Unix-like systems the configuration file is written with owner-only permissions when possible. Avoid sharing your configuration file because it may contain saved credentials.
+Local configuration is stored at `~/.config/furcadia-native/config.ini` on Linux (or `%APPDATA%\furcadia-native\config.ini` on Windows). Downloaded caches and logs are also stored locally. The client connects to Furcadia services for login, game sessions, news, and public assets, and to GitHub to check for newer releases; account credentials are used solely to authenticate with Furcadia. On Unix-like systems the configuration file is written with owner-only permissions when possible. Avoid sharing your configuration file because it may contain saved credentials.
 
 ## Project status
 
-This is an independent, actively developed client. Some behavior and asset support may differ from the official client, and compatibility can vary across dreams and installations. Please report reproducible problems through [GitHub Issues](https://github.com/morganlowe/native-furcadia/issues), including your operating system and the relevant log or error details. Do not attach account passwords or private credentials.
+This is an independent, actively developed client. Some behavior and asset support may differ from the official Windows client, and compatibility can vary across dreams and custom patches. Please report reproducible bugs or feature requests on [GitHub Issues](https://github.com/morganlowe/native-furcadia/issues) with your OS and relevant log output (never attach passwords or private credentials).
 
 ## Credits and license
 
-The desktop interface uses [egui/eframe](https://github.com/emilk/egui). The project also uses `image` for PNG decoding, `lzma-rs` for LZMA decompression, and `bzip2-rs` for BZip2 data. See [`Cargo.toml`](Cargo.toml) for dependency details and their licenses.
+The desktop interface uses [egui/eframe](https://github.com/emilk/egui). The project also uses `image` for PNG decoding, `lzma-rs` for LZMA decompression, `bzip2-rs` for BZip2 data, and `openssl` for TLS connections. See [`Cargo.toml`](Cargo.toml) for full dependency and license details.
 
 Furcadia and its protocol and assets are associated with Dragon's Eye Productions, Inc. This is an independent community client and is not affiliated with or endorsed by Dragon's Eye Productions. It does not redistribute proprietary game assets.
 
