@@ -1554,6 +1554,9 @@ struct FurcadiaApp {
     notify_pounce: bool,
     notify_mention: bool,
     notify_only_unfocused: bool,
+    flash_taskbar_on_message: bool,
+    flash_taskbar_on_main_chat: bool,
+    mention_nicknames: String,
     sound_enabled: bool,
     music_enabled: bool,
     minimize_to_tray: bool,
@@ -1597,6 +1600,8 @@ struct FurcadiaApp {
     /// Last dream identifier passed to `enter_dream`, used to re-download after flushing dream cache.
     last_dream_id: Option<String>,
     window_focused: bool,
+    pending_taskbar_flash: bool,
+    taskbar_flash_active: bool,
     posture: u8,
     anim_mode: String,
     last_sent_msg: String,
@@ -1905,6 +1910,9 @@ impl FurcadiaApp {
             notify_pounce: cfg.notify_pounce,
             notify_mention: cfg.notify_mention,
             notify_only_unfocused: cfg.notify_only_unfocused,
+            flash_taskbar_on_message: cfg.flash_taskbar_on_message,
+            flash_taskbar_on_main_chat: cfg.flash_taskbar_on_main_chat,
+            mention_nicknames: cfg.mention_nicknames.clone(),
             sound_enabled: cfg.sound_enabled,
             music_enabled: cfg.music_enabled,
             minimize_to_tray: cfg.minimize_to_tray,
@@ -1945,6 +1953,8 @@ impl FurcadiaApp {
             last_dream_explicit_url: None,
             last_dream_id: None,
             window_focused: true,
+            pending_taskbar_flash: false,
+            taskbar_flash_active: false,
             posture: 0,
             anim_mode: cfg.anim_mode.clone(),
             last_sent_msg: String::new(),
@@ -2020,6 +2030,9 @@ impl FurcadiaApp {
             notify_pounce: self.notify_pounce,
             notify_mention: self.notify_mention,
             notify_only_unfocused: self.notify_only_unfocused,
+            flash_taskbar_on_message: self.flash_taskbar_on_message,
+            flash_taskbar_on_main_chat: self.flash_taskbar_on_main_chat,
+            mention_nicknames: self.mention_nicknames.clone(),
             sound_enabled: self.sound_enabled,
             music_enabled: self.music_enabled,
             minimize_to_tray: self.minimize_to_tray,
@@ -2490,6 +2503,30 @@ impl FurcadiaApp {
         });
     }
 
+    fn request_taskbar_flash(&mut self) {
+        if !self.window_focused {
+            self.pending_taskbar_flash = true;
+        }
+    }
+
+    fn flush_taskbar_flash(&mut self, ctx: &egui::Context) {
+        if self.window_focused {
+            if self.taskbar_flash_active {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Reset,
+                ));
+                self.taskbar_flash_active = false;
+            }
+            self.pending_taskbar_flash = false;
+        } else if self.pending_taskbar_flash {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+            self.pending_taskbar_flash = false;
+            self.taskbar_flash_active = true;
+        }
+    }
+
     fn active_character_name(&self) -> String {
         self.active_character_wire_name().replace('|', " ")
     }
@@ -2956,7 +2993,15 @@ impl FurcadiaApp {
     }
 
     fn poll_bg_sessions(&mut self) {
-        let mut events_for_notify: Vec<(String, String, bool)> = Vec::new();
+        enum BgNotifyKind {
+            Whisper,
+            Mention,
+            MainChatFlashOnly,
+        }
+        let mut events_for_notify: Vec<(String, String, BgNotifyKind)> = Vec::new();
+        let nicknames_snapshot = self.mention_nicknames.clone();
+        let notify_mention = self.notify_mention;
+        let flash_on_main_chat = self.flash_taskbar_on_main_chat;
         for sess in &mut self.bg_sessions {
             while let Ok(ev) = sess.from_net.try_recv() {
                 match ev {
@@ -3024,12 +3069,42 @@ impl FurcadiaApp {
                                 w.lines.push(formatted);
                                 sess.whispers.push(w);
                             }
-                            events_for_notify.push((
-                                format!("[{}] Whisper from {peer}", sess.char_name),
-                                plain.clone(),
-                                true,
-                            ));
+                            if !plain.starts_with("[ You whisper ") && !plain.starts_with("You whisper ") {
+                                events_for_notify.push((
+                                    format!("[{}] Whisper from {peer}", sess.char_name),
+                                    plain.clone(),
+                                    BgNotifyKind::Whisper,
+                                ));
+                            }
                         } else {
+                            if notify_mention {
+                                if let Some(matched) =
+                                    find_chat_mention(&plain, &sess.char_name, &nicknames_snapshot)
+                                {
+                                    sess.unread_count += 1;
+                                    events_for_notify.push((
+                                        format!("[{}] Mentioned ({matched})", sess.char_name),
+                                        plain.clone(),
+                                        BgNotifyKind::Mention,
+                                    ));
+                                } else if flash_on_main_chat
+                                    && !is_self_or_system_chat_line(&plain, &sess.char_name)
+                                {
+                                    events_for_notify.push((
+                                        String::new(),
+                                        String::new(),
+                                        BgNotifyKind::MainChatFlashOnly,
+                                    ));
+                                }
+                            } else if flash_on_main_chat
+                                && !is_self_or_system_chat_line(&plain, &sess.char_name)
+                            {
+                                events_for_notify.push((
+                                    String::new(),
+                                    String::new(),
+                                    BgNotifyKind::MainChatFlashOnly,
+                                ));
+                            }
                             sess.chat_log.push(line);
                         }
                     }
@@ -3048,10 +3123,31 @@ impl FurcadiaApp {
                 }
             }
         }
-        for (title, body, is_whisper) in events_for_notify {
-            if is_whisper && self.notify_whisper {
-                self.play_sound("whisper.wav");
-                self.send_desktop_notification(&title, &body);
+        for (title, body, kind) in events_for_notify {
+            match kind {
+                BgNotifyKind::Whisper => {
+                    if self.notify_whisper {
+                        self.play_sound("whisper.wav");
+                        self.send_desktop_notification(&title, &body);
+                    }
+                    if self.flash_taskbar_on_message {
+                        self.request_taskbar_flash();
+                    }
+                }
+                BgNotifyKind::Mention => {
+                    if self.notify_mention {
+                        self.play_sound("talk.wav");
+                        self.send_desktop_notification(&title, &body);
+                    }
+                    if self.flash_taskbar_on_message {
+                        self.request_taskbar_flash();
+                    }
+                }
+                BgNotifyKind::MainChatFlashOnly => {
+                    if self.flash_taskbar_on_main_chat {
+                        self.request_taskbar_flash();
+                    }
+                }
             }
         }
     }
@@ -4888,22 +4984,42 @@ impl FurcadiaApp {
                         self.whispers[idx].unread += 1;
                     }
                     self.whispers[idx].lines.push(formatted);
-                    if self.notify_whisper && !plain.starts_with("[ You whisper ") && !plain.starts_with("You whisper ") {
-                        self.play_sound("whisper.wav");
-                        self.send_desktop_notification(&format!("Whisper from {peer}"), &plain);
+                    let is_incoming_whisper = !plain.starts_with("[ You whisper ")
+                        && !plain.starts_with("You whisper ");
+                    if is_incoming_whisper {
+                        if self.notify_whisper {
+                            self.play_sound("whisper.wav");
+                            self.send_desktop_notification(&format!("Whisper from {peer}"), &plain);
+                        }
+                        if self.flash_taskbar_on_message {
+                            self.request_taskbar_flash();
+                        }
                     }
                     self.last_received_whisper_from = peer;
                 } else {
+                    let me = self.active_character_name();
+                    let mut flashed = false;
                     if self.notify_mention {
-                        let me = self.active_character_name();
-                        if !me.is_empty()
-                            && me != "Unknown"
-                            && plain.to_ascii_lowercase().contains(&me.to_ascii_lowercase())
-                            && !plain.starts_with(&format!("{me}:"))
+                        if let Some(matched) =
+                            find_chat_mention(&plain, &me, &self.mention_nicknames)
                         {
+                            let matched_owned = matched.to_owned();
                             self.play_sound("talk.wav");
-                            self.send_desktop_notification(&format!("Mentioned ({me})"), &plain);
+                            self.send_desktop_notification(
+                                &format!("Mentioned ({matched_owned})"),
+                                &plain,
+                            );
+                            if self.flash_taskbar_on_message {
+                                self.request_taskbar_flash();
+                                flashed = true;
+                            }
                         }
+                    }
+                    if !flashed
+                        && self.flash_taskbar_on_main_chat
+                        && !is_self_or_system_chat_line(&plain, &me)
+                    {
+                        self.request_taskbar_flash();
                     }
                     if self.active_chat_tab.is_some() {
                         self.main_chat_unread += 1;
@@ -5357,6 +5473,93 @@ fn posture_wire_command(posture: u8) -> &'static str {
     }
 }
 
+/// Parses comma, semicolon, or newline-separated custom mention nicknames.
+fn parse_mention_nicknames(raw: &str) -> Vec<&str> {
+    raw.split(|c| matches!(c, ',' | ';' | '\n' | '\r'))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Case-insensitive word-boundary match so short nicknames (e.g. `"Aur"`) match
+/// `"hugs Aur!"` or `"Aur's"` without false-triggering on `"taur"` or `"aura"`.
+fn contains_word_ci(haystack: &str, needle: &str) -> bool {
+    let needle_trimmed = needle.trim();
+    if needle_trimmed.is_empty() {
+        return false;
+    }
+    let h = haystack.to_ascii_lowercase();
+    let n = needle_trimmed.to_ascii_lowercase();
+    let mut start = 0;
+    while let Some(rel) = h[start..].find(&n) {
+        let idx = start + rel;
+        let end = idx + n.len();
+        let before_ok = h[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = h[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+        while start < h.len() && !h.is_char_boundary(start) {
+            start += 1;
+        }
+    }
+    false
+}
+
+/// Returns `true` if `plain` is spoken/emoted by `char_name` itself or is a system/status line.
+fn is_self_or_system_chat_line(plain: &str, char_name: &str) -> bool {
+    let trimmed = plain.trim_start();
+    if trimmed.is_empty()
+        || trimmed.starts_with("[*]")
+        || trimmed.starts_with("[Pounce]")
+        || trimmed.starts_with("[ You ")
+        || trimmed.starts_with("You ")
+        || trimmed.starts_with("Current players:")
+    {
+        return true;
+    }
+    let me = char_name.trim();
+    if !me.is_empty() && me != "Unknown" {
+        let lower_line = trimmed.to_ascii_lowercase();
+        let lower_me = me.to_ascii_lowercase();
+        if let Some(rest) = lower_line.strip_prefix(&lower_me) {
+            if rest.is_empty()
+                || rest.starts_with(':')
+                || rest.starts_with(' ')
+                || rest.starts_with('\'')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Checks whether a Main Chat line mentions `char_name` or any nickname in `nicknames_raw`,
+/// returning the first matched term. Skips self-spoken/emoted lines and system notices.
+fn find_chat_mention<'a>(plain: &str, char_name: &'a str, nicknames_raw: &'a str) -> Option<&'a str> {
+    if is_self_or_system_chat_line(plain, char_name) {
+        return None;
+    }
+    let me = char_name.trim();
+    if !me.is_empty() && me != "Unknown" && contains_word_ci(plain, me) {
+        return Some(me);
+    }
+    for nick in parse_mention_nicknames(nicknames_raw) {
+        if contains_word_ci(plain, nick) {
+            return Some(nick);
+        }
+    }
+    None
+}
+
 /// Builds a single-line Furcadia trade command (`trade-add <item>`, `trade-remove <item>`,
 /// `trade-reason <text>`), sanitizing embedded newlines and returning `None` if empty.
 fn build_trade_command(verb: &str, arg: &str) -> Option<String> {
@@ -5524,6 +5727,7 @@ impl eframe::App for FurcadiaApp {
 
         self.handle_net_events(ctx);
         self.poll_bg_sessions();
+        self.flush_taskbar_flash(ctx);
 
         if self.is_connected {
             if self.pending_vascodagama
@@ -6473,14 +6677,29 @@ impl FurcadiaApp {
                 }
             });
             ui.separator();
-            ui.label(RichText::new("Audio & Desktop Notifications").strong().color(accent));
+            ui.label(RichText::new("Audio, Mentions & Taskbar Flash").strong().color(accent));
             if ui.checkbox(&mut self.sound_enabled, "Sound effects (.wav)").changed() { self.save_config(); }
             if ui.checkbox(&mut self.music_enabled, "Background music").changed() { self.save_config(); }
             if ui.checkbox(&mut self.notify_enabled, "Enable desktop notifications").changed() { self.save_config(); }
-            if ui.checkbox(&mut self.notify_whisper, "Notify on incoming whispers").changed() { self.save_config(); }
-            if ui.checkbox(&mut self.notify_pounce, "Notify when Pounce friend comes online").changed() { self.save_config(); }
-            if ui.checkbox(&mut self.notify_mention, "Notify when your name is mentioned").changed() { self.save_config(); }
-            if ui.checkbox(&mut self.notify_only_unfocused, "Only notify when window is unfocused").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.flash_taskbar_on_message, "Flash taskbar on whispers & mentions (when unfocused)").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.flash_taskbar_on_main_chat, "Flash taskbar on any Main Chat message (when unfocused)").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.notify_whisper, "Alert on incoming whispers").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.notify_pounce, "Alert when Pounce friend comes online").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.notify_mention, "Watch Main Chat for your name & nicknames (mentions)").changed() { self.save_config(); }
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label("Nicknames to alert on:");
+                let nick_edit = ui.add_enabled(
+                    self.notify_mention,
+                    egui::TextEdit::singleline(&mut self.mention_nicknames)
+                        .hint_text("e.g. Aur, Bear, Amala (comma-separated)")
+                        .desired_width(260.0),
+                );
+                if nick_edit.changed() {
+                    self.save_config();
+                }
+            });
+            if ui.checkbox(&mut self.notify_only_unfocused, "Only send desktop notifications when window is unfocused").changed() { self.save_config(); }
             ui.separator();
             ui.label(RichText::new("Pounce & Window Behavior").strong().color(accent));
             if ui.checkbox(&mut self.pounce_visible, "Show Pounce panel").changed() { self.save_config(); }
@@ -7959,6 +8178,39 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         self.suspend_active_session_to_bg(ctx);
                         self.active_char_tab_pos = self.bg_sessions.len();
                         self.screen = AppScreen::CharacterSelect;
+                    }
+                    let mention_label = if self.notify_mention {
+                        "Mentions: ON"
+                    } else {
+                        "Mentions: OFF"
+                    };
+                    let mention_btn = egui::Button::new(
+                        RichText::new(mention_label)
+                            .size(11.0)
+                            .strong()
+                            .color(if self.notify_mention {
+                                Color32::from_rgb(24, 16, 6)
+                            } else {
+                                Color32::from_rgb(195, 190, 210)
+                            }),
+                    )
+                    .fill(if self.notify_mention {
+                        accent
+                    } else {
+                        Color32::from_rgb(42, 30, 68)
+                    })
+                    .rounding(4.0);
+                    let mention_hover = if self.mention_nicknames.trim().is_empty() {
+                        "Toggle Main Chat mention alerts for your name & nicknames (configure nicknames in Settings -> General)".to_owned()
+                    } else {
+                        format!(
+                            "Toggle Main Chat mention alerts (watching your name +: {}). Edit nicknames in Settings -> General.",
+                            self.mention_nicknames.trim()
+                        )
+                    };
+                    if ui.add(mention_btn).on_hover_text(mention_hover).clicked() {
+                        self.notify_mention = !self.notify_mention;
+                        self.save_config();
                     }
                 });
 
@@ -16126,5 +16378,39 @@ mod tests {
         assert_eq!(posture_from_wire_pose(4), 0);
         assert_eq!(posture_from_wire_pose(3), 1);
         assert_eq!(posture_from_wire_pose(6), 2);
+    }
+
+    #[test]
+    fn mention_matching_handles_nicknames_word_boundaries_and_self_lines() {
+        assert_eq!(
+            find_chat_mention("Myuel hugs Aur!", "Aureus K'Tharr", "Aur, Bear"),
+            Some("Aur")
+        );
+        assert_eq!(
+            find_chat_mention("Myuel: Hey Aureus K'Tharr!", "Aureus K'Tharr", "Aur"),
+            Some("Aureus K'Tharr")
+        );
+        // Word boundary prevents partial-word false positives.
+        assert_eq!(
+            find_chat_mention("Myuel: nice bear-taur aura!", "Aureus K'Tharr", "Aur"),
+            None
+        );
+        // Self speech/emotes and system/Who lines are ignored.
+        assert_eq!(
+            find_chat_mention("Aureus K'Tharr cheers! Aur is here!", "Aureus K'Tharr", "Aur"),
+            None
+        );
+        assert_eq!(
+            find_chat_mention("Aureus K'Tharr: hi Aur", "Aureus K'Tharr", "Aur"),
+            None
+        );
+        assert_eq!(
+            find_chat_mention("Current players: Myuel, Aureus K'Tharr.", "Aureus K'Tharr", "Aur"),
+            None
+        );
+        assert_eq!(
+            parse_mention_nicknames(" Aur, Bear ; Amala \n"),
+            vec!["Aur", "Bear", "Amala"]
+        );
     }
 }

@@ -34,6 +34,9 @@ pub struct ClientConfig {
     pub notify_pounce: bool,
     pub notify_mention: bool,
     pub notify_only_unfocused: bool,
+    pub flash_taskbar_on_message: bool,
+    pub flash_taskbar_on_main_chat: bool,
+    pub mention_nicknames: String,
     pub sound_enabled: bool,
     pub music_enabled: bool,
     pub minimize_to_tray: bool,
@@ -107,6 +110,9 @@ impl Default for ClientConfig {
             notify_pounce: true,
             notify_mention: true,
             notify_only_unfocused: true,
+            flash_taskbar_on_message: true,
+            flash_taskbar_on_main_chat: false,
+            mention_nicknames: String::new(),
             sound_enabled: true,
             music_enabled: false,
             minimize_to_tray: false,
@@ -299,6 +305,9 @@ impl ClientConfig {
         self.notify_pounce = shared.notify_pounce;
         self.notify_mention = shared.notify_mention;
         self.notify_only_unfocused = shared.notify_only_unfocused;
+        self.flash_taskbar_on_message = shared.flash_taskbar_on_message;
+        self.flash_taskbar_on_main_chat = shared.flash_taskbar_on_main_chat;
+        self.mention_nicknames = shared.mention_nicknames.clone();
         self.sound_enabled = shared.sound_enabled;
         self.music_enabled = shared.music_enabled;
         self.minimize_to_tray = shared.minimize_to_tray;
@@ -412,6 +421,9 @@ impl ClientConfig {
                     "notify_pounce" => cfg.notify_pounce = v.trim() != "false",
                     "notify_mention" => cfg.notify_mention = v.trim() != "false",
                     "notify_only_unfocused" => cfg.notify_only_unfocused = v.trim() != "false",
+                    "flash_taskbar_on_message" => cfg.flash_taskbar_on_message = v.trim() != "false",
+                    "flash_taskbar_on_main_chat" => cfg.flash_taskbar_on_main_chat = v.trim() == "true",
+                    "mention_nicknames" => cfg.mention_nicknames = v.trim().to_owned(),
                     "sound_enabled" => cfg.sound_enabled = v.trim() != "false",
                     "music_enabled" => cfg.music_enabled = v.trim() == "true",
                     "minimize_to_tray" => cfg.minimize_to_tray = v.trim() == "true",
@@ -573,7 +585,7 @@ impl ClientConfig {
             ""
         };
         format!(
-            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nmy_speech_color={:06x}\nbracket_text_color={:06x}\nemote_text_color={:06x}\nwhisper_text_color={:06x}\nemit_text_color={:06x}\nshout_text_color={:06x}\nroll_text_color={:06x}\nsuccess_text_color={:06x}\nwarning_text_color={:06x}\nerror_text_color={:06x}\ntab_active_bg={:06x}\ntab_active_text={:06x}\ntab_unread_bg={:06x}\ntab_unread_text={:06x}\ntab_inactive_bg={:06x}\ntab_inactive_text={:06x}\ncustom_ui_bg={}\nchat_bg_color={:06x}\npanel_bg_color={:06x}\naccent_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
+            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nflash_taskbar_on_message={}\nflash_taskbar_on_main_chat={}\nmention_nicknames={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nmy_speech_color={:06x}\nbracket_text_color={:06x}\nemote_text_color={:06x}\nwhisper_text_color={:06x}\nemit_text_color={:06x}\nshout_text_color={:06x}\nroll_text_color={:06x}\nsuccess_text_color={:06x}\nwarning_text_color={:06x}\nerror_text_color={:06x}\ntab_active_bg={:06x}\ntab_active_text={:06x}\ntab_unread_bg={:06x}\ntab_unread_text={:06x}\ntab_inactive_bg={:06x}\ntab_inactive_text={:06x}\ncustom_ui_bg={}\nchat_bg_color={:06x}\npanel_bg_color={:06x}\naccent_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
@@ -590,6 +602,9 @@ impl ClientConfig {
             self.notify_pounce,
             self.notify_mention,
             self.notify_only_unfocused,
+            self.flash_taskbar_on_message,
+            self.flash_taskbar_on_main_chat,
+            self.mention_nicknames.replace(['\r', '\n'], ","),
             self.sound_enabled,
             self.music_enabled,
             self.minimize_to_tray,
@@ -666,6 +681,9 @@ mod tests {
             notify_pounce: false,
             notify_mention: true,
             notify_only_unfocused: false,
+            flash_taskbar_on_message: false,
+            flash_taskbar_on_main_chat: true,
+            mention_nicknames: "Aur, Bear".into(),
             sound_enabled: false,
             music_enabled: true,
             minimize_to_tray: true,
