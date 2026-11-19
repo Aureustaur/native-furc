@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v1.1.3 — Emoji Name Rendering"
+          name: "Furcadia Native Client v1.1.6 — Trade Menu, Cache Tools & UI Fixes"
           body: |
-            ## Furcadia Native Client v1.1.3 — Emoji Name Rendering
+            ## Furcadia Native Client v1.1.6 — Trade Menu, Cache Tools & UI Fixes
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -100,27 +100,30 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.1.3
-            - Render Furcadia smiley sprites inline in Pounce player rows and player context-menu headers.
-            - Replace Furcadia smiley codes with emoji stand-ins in plain-text name labels, whisper tabs, and log viewer surfaces.
-            - Correct the heart smiley mapping in the picker.
+            ### What's New in v1.1.6
+            - Added a **Trade** menu on the other-character card (`Start Trade`, `Trade Status`, `Add Portrait Space`, inline `Item` `+Add`/`-Rem`, inline `Reason` `Set`, `Accept Trade`, `Reject Trade`, `End Trade`).
+            - Fixed `trade-*`, `gift-*`, `give-*`, `discard-*`, and cookie commands to send with Furcadia's `"` speech wire prefix across main chat, whisper tabs, detached whisper windows, `/` / `` ` `` prefixes, and menu/`command://` actions.
+            - Stopped automatic `info` spam when switching character tabs by preserving per-character cookie counts on background sessions.
+            - Added **Cached Downloads** controls in Settings to inspect cache usage and flush/re-download cached avatars, dreams, or all downloads.
+            - Fixed clean-install palette (`MASTER_PALETTE`) and stock/dynamic species downloads (`play.furcadia.com/common/`, `]M%`, `DPlayer<id-135>.fox`, automatic mislabeled cache cleanup).
+            - Highlighted `[bracketed text]` in chat and whispers in blue (`#005c80`), updated tab highlight colors (unread = yellow, active = light blue), and removed all UI emojis in favor of plain text / ASCII labels.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.1.3-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.1.6-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.1.3_amd64.deb
+            sudo apt install ./furcadia-native_1.1.6_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.1.3-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.1.6-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

@@ -376,7 +376,7 @@ fn interpolate_stops(pts: &[(usize, [u8; 3])]) -> [[u8; 3]; 256] {
     lut
 }
 
-const MASTER_PALETTE: [[u8; 3]; 256] = [
+pub(crate) const MASTER_PALETTE: [[u8; 3]; 256] = [
     [0, 0, 0],
     [0, 247, 55],
     [0, 247, 55],

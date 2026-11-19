@@ -491,15 +491,80 @@ fn shortname_key(name: &str) -> String {
         .collect()
 }
 
-/// Maps wire species ID to `(fox_file_id, object_id)` matching web client `Eu()` (`L2293`).
-fn resolve_species_fox_spec(sp_id: usize) -> (usize, u16) {
-    match sp_id {
-        97 => (104, 1),
-        98 => (106, 1),
-        99 => (119, 1),
-        id if id > 2000 => (id % 2000, (id / 2000) as u16),
-        id => (id.max(1), 0),
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if b < MB {
+        format!("{:.1} KB", b / KB)
+    } else if b < GB {
+        format!("{:.1} MB", b / MB)
+    } else {
+        format!("{:.2} GB", b / GB)
     }
+}
+
+/// Maps a wire species ID to `(cache_file_id, object_id)` matching the official web client
+/// (`Eu()` for stock/local species and `Vu()`/`]M%` for dynamic avatars `DPlayer<id-135>.fox`).
+fn resolve_species_spec_with_dynamic(
+    sp_id: usize,
+    dynamic_avatars: &HashMap<u16, (usize, bool)>,
+) -> (usize, u16) {
+    if (1000..=2000).contains(&sp_id) {
+        return (sp_id, 0);
+    }
+    match sp_id {
+        0 => return (1, 0),
+        97 => return (104, 1),
+        98 => return (106, 1),
+        99 => return (119, 1),
+        _ => {}
+    }
+    let (base_sp, obj_id) = if sp_id > 2000 {
+        (sp_id % 2000, (sp_id / 2000) as u16)
+    } else {
+        (sp_id, 0)
+    };
+    if base_sp == 0 {
+        return (1, 0);
+    }
+    if (1000..=2000).contains(&base_sp) {
+        return (base_sp, obj_id);
+    }
+    if let Ok(sp_u16) = u16::try_from(base_sp) {
+        if let Some(&(dplayer_id, _hop)) = dynamic_avatars.get(&sp_u16) {
+            return (DYNAMIC_AVATAR_CACHE_BASE + dplayer_id, obj_id);
+        }
+    }
+    if (136..1000).contains(&base_sp) {
+        return (DYNAMIC_AVATAR_CACHE_BASE + (base_sp - 135), obj_id);
+    }
+    (base_sp, obj_id)
+}
+
+/// Parses `]M%<server_code><8-byte entries>` (`DynamicAvatarDetails`).
+/// Returns `(server_code, Vec<(species_id, dplayer_id, hop)>)`.
+fn parse_dynamic_avatar_details(data: &[u8]) -> Option<(Option<char>, Vec<(u16, usize, bool)>)> {
+    if data.first() != Some(&b'%') || data.len() < 2 {
+        return None;
+    }
+    let srv = data[1];
+    let server_code = (srv != b' ' && srv.is_ascii_alphanumeric()).then_some(srv as char);
+    let mut out = Vec::new();
+    for chunk in data[2..].chunks_exact(8) {
+        let lo = chunk[2].saturating_sub(35) as u16;
+        let hi_and_flag = chunk[3].saturating_sub(35) as u16;
+        let species_id = (hi_and_flag >> 1) * 220 + lo;
+        let hop = (hi_and_flag & 1) != 0;
+        if (136..1000).contains(&species_id) {
+            let dplayer_id = (species_id - 135) as usize;
+            out.push((species_id, dplayer_id, hop));
+        }
+    }
+    Some((server_code, out))
 }
 
 /// Cache-key offset for dynamic avatars (`DPlayer<id>.fox`) so they never collide with `species<id>.fox`.
@@ -1355,6 +1420,8 @@ struct BackgroundSession {
     current_dream_dir: Option<std::path::PathBuf>,
     cam_offset: Vec2,
     unread_count: usize,
+    cookies_collected: Option<u32>,
+    cookies_total: Option<u32>,
     to_net: Sender<UiToNet>,
     from_net: Receiver<NetToUi>,
 }
@@ -1440,7 +1507,7 @@ struct FurcadiaApp {
     wall_caches: HashMap<usize, FoxSpriteCache>,
     species_caches: HashMap<usize, FoxSpriteCache>,
     pending_species_downloads: std::collections::HashSet<usize>,
-    dynamic_avatars: HashMap<u16, (usize, u16)>,
+    dynamic_avatars: HashMap<u16, (usize, bool)>,
     dynamic_avatar_server: Option<char>,
     custom_portrait_rgba: HashMap<u32, Option<(usize, usize, Vec<u8>)>>,
     custom_portrait_textures: HashMap<String, TextureHandle>,
@@ -1461,6 +1528,8 @@ struct FurcadiaApp {
     pending_dream_modern: Option<bool>,
     pending_dream_name: Option<String>,
     looked_player: Option<LookedPlayerCard>,
+    trade_item_input: String,
+    trade_reason_input: String,
     pending_glook_target: Option<(String, Instant)>,
     recent_portrait_target: Option<(String, Instant)>,
     hovered_avatar_uid: Option<u32>,
@@ -1519,6 +1588,13 @@ struct FurcadiaApp {
     chat_scroll_delta: f32,
     font_popup_open: bool,
     import_report: Option<String>,
+    cache_report: Option<String>,
+    /// `((species_files, species_bytes), (dream_files, dream_bytes))`, computed on demand for Settings.
+    cache_usage: Option<((usize, u64), (usize, u64))>,
+    /// Explicit download URL used for the current dream (player dreams), so it can be re-fetched.
+    last_dream_explicit_url: Option<String>,
+    /// Last dream identifier passed to `enter_dream`, used to re-download after flushing dream cache.
+    last_dream_id: Option<String>,
     window_focused: bool,
     posture: u8,
     anim_mode: String,
@@ -1561,6 +1637,7 @@ impl FurcadiaApp {
         thread::spawn(move || network_worker(net_rx, net_tx, net_ctx));
 
         let cfg = ClientConfig::load_default();
+        AssetLocator::purge_mislabeled_species_cache();
         let assets = AssetLocator::discover();
         let discovered_import_dirs = discover_default_windows_furcadia_dirs();
         let import_source_detected = !discovered_import_dirs.is_empty();
@@ -1785,7 +1862,7 @@ impl FurcadiaApp {
             wall_caches,
             species_caches: HashMap::new(),
             pending_species_downloads: std::collections::HashSet::new(),
-            dynamic_avatars: HashMap::from([(164u16, (29usize, 0u16))]),
+            dynamic_avatars: HashMap::new(),
             dynamic_avatar_server: None,
             custom_portrait_rgba: HashMap::new(),
             custom_portrait_textures: HashMap::new(),
@@ -1806,6 +1883,8 @@ impl FurcadiaApp {
             pending_dream_modern: None,
             pending_dream_name: None,
             looked_player: None,
+            trade_item_input: String::new(),
+            trade_reason_input: String::new(),
             pending_glook_target: None,
             recent_portrait_target: None,
             hovered_avatar_uid: None,
@@ -1860,6 +1939,10 @@ impl FurcadiaApp {
             chat_scroll_delta: 0.0,
             font_popup_open: false,
             import_report: None,
+            cache_report: None,
+            cache_usage: None,
+            last_dream_explicit_url: None,
+            last_dream_id: None,
             window_focused: true,
             posture: 0,
             anim_mode: cfg.anim_mode.clone(),
@@ -2457,6 +2540,12 @@ impl FurcadiaApp {
         if summary.assets_copied > 0 {
             self.assets = AssetLocator::discover();
             self.fonts_configured = false;
+            self.palette = self.assets.load_default_palette().unwrap_or_default();
+            self.species_caches.clear();
+            self.char_portraits.clear();
+            if let Some(card) = self.looked_player.as_mut() {
+                card.resolved_for = None;
+            }
         }
         for name in &summary.pounce_added {
             let wire = wire_player_name(name);
@@ -2481,6 +2570,144 @@ impl FurcadiaApp {
         }
         self.import_report = Some(msg.clone());
         self.push_system_line("success", &msg);
+    }
+
+    /// Drops every in-memory avatar/portrait texture and archive so they are rebuilt
+    /// (from disk or by re-downloading) the next time they are drawn.
+    fn reset_avatar_memory_caches(&mut self) {
+        self.species_caches.clear();
+        self.pending_species_downloads.clear();
+        self.char_portraits.clear();
+        self.custom_portrait_rgba.clear();
+        self.custom_portrait_textures.clear();
+        self.remappable_portraits.clear();
+        self.pending_portrait_downloads.clear();
+        self.chat_img_textures.clear();
+        self.pending_chat_img_downloads.clear();
+        if let Some(card) = self.looked_player.as_mut() {
+            card.resolved_for = None;
+        }
+        // Re-request portraits for everyone we already know about.
+        let pids: Vec<u32> = self.player_portrait_ids.values().copied().collect();
+        for pid in pids {
+            if self.pending_portrait_downloads.insert(pid) {
+                let _ = self.to_net.send(UiToNet::DownloadPortrait { portrait_id: pid });
+            }
+        }
+    }
+
+    fn refresh_cache_usage(&mut self) {
+        let species = AssetLocator::species_cache_dir()
+            .map(|d| AssetLocator::dir_usage(&d))
+            .unwrap_or((0, 0));
+        let dreams = AssetLocator::dreams_cache_dir()
+            .map(|d| AssetLocator::dir_usage(&d))
+            .unwrap_or((0, 0));
+        self.cache_usage = Some((species, dreams));
+    }
+
+    fn retrigger_loaded_avatar_downloads(&mut self) {
+        if self.world.avatars.is_empty() {
+            return;
+        }
+        let mut file_ids = std::collections::BTreeSet::new();
+        file_ids.insert(1usize);
+        for av in self.world.avatars.values() {
+            if let Some((eff_sp, _)) = self.world.resolved_avatar_species_gender(av) {
+                file_ids.insert(self.resolve_species_spec(eff_sp as usize).0);
+            }
+            file_ids.insert(self.resolve_species_spec(av.appearance.species_id as usize).0);
+        }
+        for file_id in file_ids {
+            self.ensure_species_cache(file_id);
+        }
+    }
+
+    fn clear_avatar_download_cache(&mut self) {
+        let result = AssetLocator::species_cache_dir()
+            .ok_or_else(|| "could not resolve cache directory".to_owned())
+            .and_then(|d| AssetLocator::clear_dir(&d).map_err(|e| e.to_string()));
+        self.reset_avatar_memory_caches();
+        self.retrigger_loaded_avatar_downloads();
+        let msg = match result {
+            Ok((files, bytes)) => format!(
+                "Cleared {files} cached avatar/portrait file(s) ({}). They will re-download as needed.",
+                format_bytes(bytes)
+            ),
+            Err(e) => format!("Could not clear avatar cache: {e}"),
+        };
+        self.cache_report = Some(msg.clone());
+        self.push_system_line("system", &msg);
+        self.refresh_cache_usage();
+    }
+
+    fn reload_or_clear_dream_after_cache_flush(&mut self) -> bool {
+        if self.is_connected {
+            if let Some(name) = self
+                .last_dream_id
+                .clone()
+                .or_else(|| self.world.map_name.clone())
+            {
+                let modern = self.world.is_modern;
+                let url = self.last_dream_explicit_url.clone();
+                self.enter_dream(&name, None, url.as_deref(), false, Some(modern));
+                return true;
+            }
+        }
+        self.clear_dream_patches();
+        false
+    }
+
+    fn clear_dream_download_cache(&mut self) {
+        let result = AssetLocator::dreams_cache_dir()
+            .ok_or_else(|| "could not resolve cache directory".to_owned())
+            .and_then(|d| AssetLocator::clear_dir(&d).map_err(|e| e.to_string()));
+        let mut msg = match result {
+            Ok((files, bytes)) => format!("Cleared {files} cached dream file(s) ({}).", format_bytes(bytes)),
+            Err(e) => format!("Could not clear dream cache: {e}"),
+        };
+        // The current dream's files were just deleted; fetch it again so patches keep working.
+        if self.reload_or_clear_dream_after_cache_flush() {
+            msg.push_str(" Re-downloading the current dream.");
+        }
+        self.cache_report = Some(msg.clone());
+        self.push_system_line("system", &msg);
+        self.refresh_cache_usage();
+    }
+
+    fn clear_all_download_caches(&mut self) {
+        let species_res = AssetLocator::species_cache_dir()
+            .ok_or_else(|| "could not resolve species cache directory".to_owned())
+            .and_then(|d| AssetLocator::clear_dir(&d).map_err(|e| e.to_string()));
+        let dreams_res = AssetLocator::dreams_cache_dir()
+            .ok_or_else(|| "could not resolve dream cache directory".to_owned())
+            .and_then(|d| AssetLocator::clear_dir(&d).map_err(|e| e.to_string()));
+
+        let redownloading_dream = self.reload_or_clear_dream_after_cache_flush();
+        self.reset_avatar_memory_caches();
+        self.retrigger_loaded_avatar_downloads();
+
+        let msg = match (species_res, dreams_res) {
+            (Ok((sf, sb)), Ok((df, db))) => {
+                let mut s = format!(
+                    "Cleared {} cached file(s) ({} avatars/portraits/images, {} dreams; {}).",
+                    sf + df,
+                    sf,
+                    df,
+                    format_bytes(sb + db)
+                );
+                if redownloading_dream {
+                    s.push_str(" Re-downloading current dream and active avatars.");
+                } else {
+                    s.push_str(" Cached files will re-download as needed.");
+                }
+                s
+            }
+            (Err(e), _) | (_, Err(e)) => format!("Could not clear all caches: {e}"),
+        };
+        self.cache_report = Some(msg.clone());
+        self.push_system_line("system", &msg);
+        self.refresh_cache_usage();
     }
 
     fn browse_import_directory(&mut self) {
@@ -2578,6 +2805,8 @@ impl FurcadiaApp {
         let old_status = std::mem::replace(&mut self.status_text, "Disconnected".to_owned());
         let old_connected = std::mem::replace(&mut self.is_connected, false);
         let old_cam = std::mem::replace(&mut self.cam_offset, Vec2::ZERO);
+        let old_cookies_collected = self.cookies_collected.take();
+        let old_cookies_total = self.cookies_total.take();
         let char_name = old_world
             .self_name
             .clone()
@@ -2603,6 +2832,8 @@ impl FurcadiaApp {
                 current_dream_dir: old_dream_dir,
                 cam_offset: old_cam,
                 unread_count: 0,
+                cookies_collected: old_cookies_collected,
+                cookies_total: old_cookies_total,
                 to_net: old_to_net,
                 from_net: old_from_net,
             },
@@ -2678,8 +2909,8 @@ impl FurcadiaApp {
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_dirty_at = None;
         self.spell_misspelled.clear();
-        self.cookies_collected = None;
-        self.cookies_total = None;
+        self.cookies_collected = target.cookies_collected;
+        self.cookies_total = target.cookies_total;
         if self.current_dream_dir != target.current_dream_dir {
             self.clear_dream_patches();
             if let Some(dir) = target.current_dream_dir {
@@ -2689,9 +2920,6 @@ impl FurcadiaApp {
         self.cam_offset = target.cam_offset;
         self.to_net = target.to_net;
         self.from_net = target.from_net;
-        if self.is_connected {
-            let _ = self.to_net.send(UiToNet::Send(ClientCommand::Raw("info".to_owned())));
-        }
         self.looked_player = None;
         self.recent_portrait_target = None;
         self.context_menu_avatar = None;
@@ -2718,6 +2946,13 @@ impl FurcadiaApp {
                     NetToUi::Message(ServerMessage::Text(t)) => {
                         let line = parse_chat_line(&t);
                         let plain = line.to_plain_text();
+                        let (collected, total) = parse_cookie_counts(&plain);
+                        if collected.is_some() {
+                            sess.cookies_collected = collected;
+                        }
+                        if total.is_some() {
+                            sess.cookies_total = total;
+                        }
                         let peer = if let Some(peer) = extract_whisper_peer(&plain) {
                             Some(peer)
                         } else {
@@ -3424,38 +3659,21 @@ impl FurcadiaApp {
     }
 
     fn resolve_species_spec(&self, sp_id: usize) -> (usize, u16) {
-        if (1000..=2000).contains(&sp_id) {
-            return (sp_id, 0);
-        }
-        if let Ok(sp_u16) = u16::try_from(sp_id) {
-            if let Some(&(dplayer_id, obj_id)) = self.dynamic_avatars.get(&sp_u16) {
-                return (DYNAMIC_AVATAR_CACHE_BASE + dplayer_id, obj_id);
-            }
-        }
-        resolve_species_fox_spec(sp_id)
+        resolve_species_spec_with_dynamic(sp_id, &self.dynamic_avatars)
     }
 
     /// Parses `]M%<server_code><8-byte entries>` (`DynamicAvatarDetails`) from `Furcadia.exe`.
     fn apply_dynamic_avatar_details(&mut self, data: &[u8]) {
-        if data.first() != Some(&b'%') || data.len() < 2 {
+        let Some((server_code, entries)) = parse_dynamic_avatar_details(data) else {
             return;
-        }
-        let srv = data[1];
-        self.dynamic_avatar_server =
-            (srv != b' ' && srv.is_ascii_alphanumeric()).then_some(srv as char);
+        };
+        self.dynamic_avatar_server = server_code;
         let mut changed = false;
-        for (idx, chunk) in data[2..].chunks_exact(8).enumerate() {
-            let lo = chunk[2].saturating_sub(35) as u16;
-            let hi_and_flag = chunk[3].saturating_sub(35) as u16;
-            let species_id = (hi_and_flag >> 1) * 220 + lo;
-            let obj_flag = hi_and_flag & 1;
-            let dplayer_id = idx + 1;
-            if species_id > 0 {
-                let prev = self.dynamic_avatars.insert(species_id, (dplayer_id, obj_flag));
-                if prev != Some((dplayer_id, obj_flag)) {
-                    changed = true;
-                    self.species_caches.remove(&(species_id as usize));
-                }
+        for (species_id, dplayer_id, hop) in entries {
+            let prev = self.dynamic_avatars.insert(species_id, (dplayer_id, hop));
+            if prev != Some((dplayer_id, hop)) {
+                changed = true;
+                self.species_caches.remove(&(species_id as usize));
             }
         }
         if changed {
@@ -3616,20 +3834,43 @@ impl FurcadiaApp {
                     if_newer_than: cached,
                 });
             }
-        } else if ((100..1000).contains(&file_id) || (!is_loaded && (1..1000).contains(&file_id)))
+        } else if !is_loaded
+            && (1..1000).contains(&file_id)
             && self.pending_species_downloads.insert(file_id)
         {
             let _ = self.to_net.send(UiToNet::DownloadSpecies {
                 file_id,
-                server_code: self.dynamic_avatar_server,
-                if_newer_than: self.assets.species_patch_path(file_id),
+                server_code: None,
+                if_newer_than: None,
+            });
+        } else if !is_loaded
+            && (1001..=1004).contains(&file_id)
+            && self.pending_species_downloads.insert(file_id)
+        {
+            let _ = self.to_net.send(UiToNet::DownloadSpecies {
+                file_id,
+                server_code: None,
+                if_newer_than: None,
             });
         }
         if is_loaded {
             file_id
         } else {
             if !self.species_caches.contains_key(&1) {
-                let mut c1 = FoxSpriteCache::load(&self.assets, "species1.fox", "species_1");
+                let mut c1 = if let Some(p1) = self.assets.species_patch_path(1) {
+                    let mut tmp = FoxSpriteCache::from_dream_only(&p1, "species_1");
+                    tmp.default_archive = tmp.dream_archive.take();
+                    tmp
+                } else {
+                    FoxSpriteCache::load(&self.assets, "species1.fox", "species_1")
+                };
+                if !c1.is_loaded() && self.pending_species_downloads.insert(1) {
+                    let _ = self.to_net.send(UiToNet::DownloadSpecies {
+                        file_id: 1,
+                        server_code: None,
+                        if_newer_than: None,
+                    });
+                }
                 if let Some(p) = self
                     .current_dream_dir
                     .as_deref()
@@ -3675,6 +3916,8 @@ impl FurcadiaApp {
             self.cam_offset = Vec2::ZERO;
         }
         self.clear_dream_patches();
+        self.last_dream_id = Some(name.to_owned());
+        self.last_dream_explicit_url = explicit_url.map(str::to_owned);
 
         if explicit_url.is_none() {
             if let Some((map, dir)) = self.try_load_cached_dream(name, checksum) {
@@ -4328,6 +4571,7 @@ impl FurcadiaApp {
                         }
                     }
                     self.pending_dream_name = None;
+                    self.cache_usage = None;
                     self.clear_dream_patches();
                     if let Some(dir) = dream_dir {
                         self.load_dream_dir(&dir);
@@ -4380,15 +4624,40 @@ impl FurcadiaApp {
                 }
                 NetToUi::SpeciesDownloaded { file_id, path } => {
                     if let Some(p) = path {
-                        let mut cache = FoxSpriteCache::from_dream_only(&p, &format!("species_{file_id}"));
+                        self.cache_usage = None;
+                        let prefix = if file_id >= DYNAMIC_AVATAR_CACHE_BASE {
+                            format!("dplayer_{}", file_id - DYNAMIC_AVATAR_CACHE_BASE)
+                        } else if file_id > 1000 {
+                            format!("local_{}", file_id - 1000)
+                        } else {
+                            format!("species_{file_id}")
+                        };
+                        let mut cache = FoxSpriteCache::from_dream_only(&p, &prefix);
                         // Promote the downloaded file to default_archive so dream patches can override it.
                         cache.default_archive = cache.dream_archive.take();
-                        if let Some(patch_p) = self
-                            .current_dream_dir
-                            .as_deref()
-                            .and_then(|d| Self::find_file_case_insensitive(d, &format!("species{file_id}.fox")))
-                        {
-                            let _ = cache.set_dream_patch(&patch_p);
+                        if file_id < DYNAMIC_AVATAR_CACHE_BASE {
+                            if let Some(dir) = self.current_dream_dir.as_deref() {
+                                let patch_p = if file_id > 1000 {
+                                    Self::find_file_case_insensitive(
+                                        dir,
+                                        &format!("species{file_id}.fox"),
+                                    )
+                                    .or_else(|| {
+                                        Self::find_file_case_insensitive(
+                                            dir,
+                                            &format!("local{}.fox", file_id - 1000),
+                                        )
+                                    })
+                                } else {
+                                    Self::find_file_case_insensitive(
+                                        dir,
+                                        &format!("species{file_id}.fox"),
+                                    )
+                                };
+                                if let Some(patch_p) = patch_p {
+                                    let _ = cache.set_dream_patch(&patch_p);
+                                }
+                            }
                         }
                         if cache.is_loaded() {
                             self.species_caches.insert(file_id, cache);
@@ -4401,11 +4670,13 @@ impl FurcadiaApp {
                 }
                 NetToUi::PortraitDownloaded { portrait_id, rgba, remappable } => {
                     self.pending_portrait_downloads.remove(&portrait_id);
+                    self.cache_usage = None;
                     if remappable { self.remappable_portraits.insert(portrait_id); }
                     self.custom_portrait_rgba.insert(portrait_id, rgba);
                 }
                 NetToUi::ChatImageDownloaded { url, rgba } => {
                     self.pending_chat_img_downloads.remove(&url);
+                    self.cache_usage = None;
                     let tex = rgba.map(|(w, h, bytes)| {
                         let img = ColorImage::from_rgba_unmultiplied([w, h], &bytes);
                         ctx.load_texture(format!("chat_img_{url}"), img, TextureOptions::NEAREST)
@@ -4900,7 +5171,10 @@ impl FurcadiaApp {
         if raw.is_empty() || !self.is_connected {
             return;
         }
-        if self.autocorrect && !raw.starts_with(['/', '`']) {
+        if self.autocorrect
+            && !raw.starts_with(['/', '`'])
+            && !Self::is_bare_furcadia_command(&raw)
+        {
             raw = autocorrect_common_words(&raw);
         }
         self.last_sent_msg = raw.clone();
@@ -4909,116 +5183,19 @@ impl FurcadiaApp {
         self.spell_misspelled.clear();
         self.spell_dirty_at = None;
 
-        let cmd = if let Some(raw_cmd) = raw.strip_prefix('`') {
-            ClientCommand::Raw(raw_cmd.to_owned())
-        } else if let Some(after_slash) = raw.strip_prefix('/') {
-            if after_slash.starts_with("%%") || after_slash.starts_with('%') {
-                // Offline message (/%%name msg) or exact-name whisper (/%name msg).
-                ClientCommand::Raw(raw)
-            } else if let Some(rest) = after_slash.strip_prefix('"') {
-                // Quoted whisper: /"furre name" message
-                if let Some((target, msg)) = rest.split_once('"') {
-                    let msg = msg.trim_start();
-                    let disp = target.replace('|', " ");
-                    self.last_whisper_target = disp.clone();
-                    self.open_whisper_tab(&disp, true);
-                    ClientCommand::Whisper {
-                        target: wire_player_name(target),
-                        message: msg.to_owned(),
-                    }
-                } else {
-                    ClientCommand::Raw(raw)
-                }
-            } else if let Some(rest) = after_slash
-                .strip_prefix("wh ")
-                .or_else(|| after_slash.strip_prefix("w "))
-            {
-                if let Some((target, msg)) = rest.split_once(' ') {
-                    let disp = target.replace('|', " ");
-                    self.last_whisper_target = disp.clone();
-                    self.open_whisper_tab(&disp, true);
-                    ClientCommand::Whisper {
-                        target: wire_player_name(target),
-                        message: msg.to_owned(),
-                    }
-                } else {
-                    ClientCommand::Raw(raw)
-                }
-            } else if let Some(name) = after_slash.strip_prefix("onln ") {
-                ClientCommand::OnlineCheck(wire_player_name(name))
-            } else if let Some(name) = after_slash.strip_prefix("glook ") {
-                ClientCommand::Glook(wire_player_name(name))
-            } else if after_slash.eq_ignore_ascii_case("who") {
-                ClientCommand::Who
-            } else if let Some(line) = after_slash.strip_prefix("raw ") {
-                ClientCommand::Raw(line.to_owned())
-            } else if let Some((target, msg)) = after_slash.split_once(' ') {
-                let first_lower = target.to_ascii_lowercase();
-                if matches!(
-                    first_lower.as_str(),
-                    "help" | "look" | "ignore" | "banish" | "tempbanish" | "summon" | "join"
-                        | "lead" | "follow" | "desc" | "chdesc" | "roll" | "m" | "jg" | "chat"
-                        | "afk" | "fdl"
-                ) {
-                    ClientCommand::Raw(after_slash.to_owned())
-                } else {
-                    // Furcadia `/furrename message` shorthand whisper
-                    let disp = target.replace('|', " ");
-                    self.last_whisper_target = disp.clone();
-                    self.open_whisper_tab(&disp, true);
-                    ClientCommand::Whisper {
-                        target: wire_player_name(target),
-                        message: msg.to_owned(),
-                    }
-                }
-            } else {
-                // Single-word `/command` such as `/info`, `/time`, `/sit`, `/dreamurl`, etc.
-                ClientCommand::Raw(after_slash.to_owned())
+        let (cmd, open_whisper_tab_disp) = classify_chat_input(
+            &raw,
+            self.active_chat_tab.as_deref(),
+            self.whisper_emote_in_whisper,
+        );
+        if let Some(disp) = open_whisper_tab_disp {
+            self.last_whisper_target = disp.clone();
+            self.open_whisper_tab(&disp, true);
+        } else if matches!(cmd, ClientCommand::Whisper { .. }) {
+            if let Some(peer) = self.active_chat_tab.clone() {
+                self.last_whisper_target = peer;
             }
-        } else if raw.starts_with('=') {
-            // Channel broadcasts (=talz, =news, =fun, etc.)
-            ClientCommand::Raw(raw)
-        } else if raw.starts_with(':') && is_whisper_colon_emote(&raw) {
-            if let Some(peer) = self.active_chat_tab.clone().filter(|_| self.whisper_emote_in_whisper) {
-                self.last_whisper_target = peer.clone();
-                ClientCommand::Whisper {
-                    target: wire_player_name(&peer),
-                    message: raw,
-                }
-            } else {
-                ClientCommand::Raw(raw)
-            }
-        } else if Self::is_bare_furcadia_command(&raw) {
-            let first = raw.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-            if matches!(
-                first.as_str(),
-                "make-cookie"
-                    | "give-cookie"
-                    | "make-secret"
-                    | "secret-cookie"
-                    | "eat-cookie"
-                    | "munch-cookie"
-                    | "buy-cookie"
-                    | "cookies-reject"
-                    | "cookies-accept"
-                    | "cookies-off"
-                    | "cookies-on"
-                    | "give"
-            ) || first.starts_with("give-")
-            {
-                ClientCommand::Say(raw)
-            } else {
-                ClientCommand::Raw(raw)
-            }
-        } else if let Some(peer) = self.active_chat_tab.clone() {
-            self.last_whisper_target = peer.clone();
-            ClientCommand::Whisper {
-                target: wire_player_name(&peer),
-                message: raw,
-            }
-        } else {
-            ClientCommand::Say(raw)
-        };
+        }
 
         if let ClientCommand::Whisper { target, message } = &cmd {
             self.track_pending_whisper_echo(target, message);
@@ -5045,35 +5222,191 @@ impl FurcadiaApp {
     fn is_bare_furcadia_command(raw: &str) -> bool {
         let lower = raw.to_ascii_lowercase();
         let word = lower.split_whitespace().next().unwrap_or("");
-        matches!(
-            word,
-            "whispersoff"
-                | "whisperson"
-                | "unafk"
-                | "desctags"
-                | "dreamurl"
-                | "buy-cookie"
-                | "make-cookie"
-                | "make-secret"
-                | "give-cookie"
-                | "secret-cookie"
-                | "eat-cookie"
-                | "cookies-reject"
-                | "cookies-accept"
-                | "cookies-off"
-                | "cookies-on"
-                | "liedown"
-                | "listgroups"
-                | "listf"
-                | "banish-off"
-                | "banish-list"
-                | "glook"
-                | "chdesc"
-                | "tempbanish"
-                | "<"
-                | ">"
-        ) || matches!(lower.as_str(), "ignore off" | "list ignores" | "m 1" | "m 3" | "m 7" | "m 9")
+        is_hyphenated_speech_furcadia_command(raw)
+            || matches!(
+                word,
+                "whispersoff"
+                    | "whisperson"
+                    | "unafk"
+                    | "desctags"
+                    | "dreamurl"
+                    | "liedown"
+                    | "listgroups"
+                    | "listf"
+                    | "banish-off"
+                    | "banish-list"
+                    | "glook"
+                    | "chdesc"
+                    | "tempbanish"
+                    | "<"
+                    | ">"
+            )
+            || matches!(lower.as_str(), "ignore off" | "list ignores" | "m 1" | "m 3" | "m 7" | "m 9")
     }
+}
+
+/// Hyphenated Furcadia server commands handled via the speech (`"`) wire prefix.
+/// Safe to recognize bare even inside whisper tabs (unlike plain English `"give"`).
+fn is_hyphenated_speech_furcadia_command(raw: &str) -> bool {
+    let first = raw
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        first.as_str(),
+        "make-cookie"
+            | "give-cookie"
+            | "make-secret"
+            | "secret-cookie"
+            | "eat-cookie"
+            | "munch-cookie"
+            | "buy-cookie"
+            | "cookies-reject"
+            | "cookies-accept"
+            | "cookies-off"
+            | "cookies-on"
+    ) || first.starts_with("trade-")
+        || first.starts_with("gift-")
+        || first.starts_with("give-")
+        || first.starts_with("discard-")
+}
+
+/// All Furcadia server commands that require the speech (`"`) wire prefix when invoked
+/// via `/cmd`, `` `cmd ``, `command://`, or UI menus (includes `"give"`).
+fn is_speech_prefixed_furcadia_command(raw: &str) -> bool {
+    if is_hyphenated_speech_furcadia_command(raw) {
+        return true;
+    }
+    raw.split_whitespace()
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("give"))
+}
+
+/// Formats a command passed to `send_raw_cmd` for the Furcadia wire protocol,
+/// prepending `"` for speech-hook commands (`trade-*`, `gift-*`, `give-*`, cookies, etc.).
+fn format_raw_cmd_wire(cmd: &str) -> String {
+    let trimmed = cmd.trim();
+    if is_speech_prefixed_furcadia_command(trimmed) {
+        format!("\"{trimmed}")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Builds a single-line Furcadia trade command (`trade-add <item>`, `trade-remove <item>`,
+/// `trade-reason <text>`), sanitizing embedded newlines and returning `None` if empty.
+fn build_trade_command(verb: &str, arg: &str) -> Option<String> {
+    let cleaned = arg.replace(['\r', '\n'], " ");
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("{verb} {trimmed}"))
+    }
+}
+
+/// Classifies trimmed user chat input into `(ClientCommand, Option<open_whisper_tab_display_name>)`.
+fn classify_chat_input(
+    raw: &str,
+    active_whisper_peer: Option<&str>,
+    whisper_emote_in_whisper: bool,
+) -> (ClientCommand, Option<String>) {
+    let mut open_whisper_tab_disp = None;
+    let cmd = if let Some(raw_cmd) = raw.strip_prefix('`') {
+        let trimmed = raw_cmd.trim();
+        if is_speech_prefixed_furcadia_command(trimmed) {
+            ClientCommand::Say(trimmed.to_owned())
+        } else {
+            ClientCommand::Raw(raw_cmd.to_owned())
+        }
+    } else if let Some(after_slash) = raw.strip_prefix('/') {
+        if after_slash.starts_with("%%") || after_slash.starts_with('%') {
+            // Offline message (/%%name msg) or exact-name whisper (/%name msg).
+            ClientCommand::Raw(raw.to_owned())
+        } else if let Some(rest) = after_slash.strip_prefix('"') {
+            // Quoted whisper: /"furre name" message
+            if let Some((target, msg)) = rest.split_once('"') {
+                let msg = msg.trim_start();
+                open_whisper_tab_disp = Some(target.replace('|', " "));
+                ClientCommand::Whisper {
+                    target: wire_player_name(target),
+                    message: msg.to_owned(),
+                }
+            } else {
+                ClientCommand::Raw(raw.to_owned())
+            }
+        } else if let Some(rest) = after_slash
+            .strip_prefix("wh ")
+            .or_else(|| after_slash.strip_prefix("w "))
+        {
+            if let Some((target, msg)) = rest.split_once(' ') {
+                open_whisper_tab_disp = Some(target.replace('|', " "));
+                ClientCommand::Whisper {
+                    target: wire_player_name(target),
+                    message: msg.to_owned(),
+                }
+            } else {
+                ClientCommand::Raw(raw.to_owned())
+            }
+        } else if let Some(name) = after_slash.strip_prefix("onln ") {
+            ClientCommand::OnlineCheck(wire_player_name(name))
+        } else if let Some(name) = after_slash.strip_prefix("glook ") {
+            ClientCommand::Glook(wire_player_name(name))
+        } else if after_slash.eq_ignore_ascii_case("who") {
+            ClientCommand::Who
+        } else if let Some(line) = after_slash.strip_prefix("raw ") {
+            ClientCommand::Raw(line.to_owned())
+        } else if is_speech_prefixed_furcadia_command(after_slash) {
+            ClientCommand::Say(after_slash.trim().to_owned())
+        } else if let Some((target, msg)) = after_slash.split_once(' ') {
+            let first_lower = target.to_ascii_lowercase();
+            if matches!(
+                first_lower.as_str(),
+                "help" | "look" | "ignore" | "banish" | "tempbanish" | "summon" | "join"
+                    | "lead" | "follow" | "desc" | "chdesc" | "roll" | "m" | "jg" | "chat"
+                    | "afk" | "fdl"
+            ) {
+                ClientCommand::Raw(after_slash.to_owned())
+            } else {
+                // Furcadia `/furrename message` shorthand whisper
+                open_whisper_tab_disp = Some(target.replace('|', " "));
+                ClientCommand::Whisper {
+                    target: wire_player_name(target),
+                    message: msg.to_owned(),
+                }
+            }
+        } else {
+            // Single-word `/command` such as `/info`, `/time`, `/sit`, `/dreamurl`, etc.
+            ClientCommand::Raw(after_slash.to_owned())
+        }
+    } else if raw.starts_with('=') {
+        // Channel broadcasts (=talz, =news, =fun, etc.)
+        ClientCommand::Raw(raw.to_owned())
+    } else if raw.starts_with(':') && is_whisper_colon_emote(raw) {
+        if let Some(peer) = active_whisper_peer.filter(|_| whisper_emote_in_whisper) {
+            ClientCommand::Whisper {
+                target: wire_player_name(peer),
+                message: raw.to_owned(),
+            }
+        } else {
+            ClientCommand::Raw(raw.to_owned())
+        }
+    } else if FurcadiaApp::is_bare_furcadia_command(raw) {
+        if is_hyphenated_speech_furcadia_command(raw) {
+            ClientCommand::Say(raw.to_owned())
+        } else {
+            ClientCommand::Raw(raw.to_owned())
+        }
+    } else if let Some(peer) = active_whisper_peer {
+        ClientCommand::Whisper {
+            target: wire_player_name(peer),
+            message: raw.to_owned(),
+        }
+    } else {
+        ClientCommand::Say(raw.to_owned())
+    };
+    (cmd, open_whisper_tab_disp)
 }
 
 impl eframe::App for FurcadiaApp {
@@ -5714,7 +6047,7 @@ impl FurcadiaApp {
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let accent = self.theme.accent();
-        ui.heading(RichText::new("⚙ Native Client Settings & Configuration").strong().color(accent));
+        ui.heading(RichText::new("Native Client Settings & Configuration").strong().color(accent));
         ui.add_space(4.0);
         ui.label(RichText::new("Configure your appearance, audio, map behavior, cloud sync, and imported data.").color(Color32::LIGHT_GRAY));
         ui.add_space(8.0);
@@ -5989,6 +6322,64 @@ impl FurcadiaApp {
                 self.open_log_viewer();
             }
             ui.separator();
+            ui.label(RichText::new("Cached Downloads").strong().color(accent));
+            if self.cache_usage.is_none() {
+                self.refresh_cache_usage();
+            }
+            if let Some(((sf, sb), (df, db))) = self.cache_usage {
+                ui.label(
+                    RichText::new(format!(
+                        "Avatars, portraits & images: {sf} file(s) ({})",
+                        format_bytes(sb)
+                    ))
+                    .size(11.5)
+                    .color(Color32::LIGHT_GRAY),
+                );
+                ui.label(
+                    RichText::new(format!("Dream packages: {df} file(s) ({})", format_bytes(db)))
+                        .size(11.5)
+                        .color(Color32::LIGHT_GRAY),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Flush & Redownload Avatars/Portraits").clicked() {
+                    self.clear_avatar_download_cache();
+                    ctx.request_repaint();
+                }
+                if ui.button("Flush & Redownload Dreams").clicked() {
+                    self.clear_dream_download_cache();
+                    ctx.request_repaint();
+                }
+                if ui.button("Flush All & Redownload").clicked() {
+                    self.clear_all_download_caches();
+                    ctx.request_repaint();
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button("Refresh").clicked() {
+                    self.refresh_cache_usage();
+                }
+                if ui.small_button("Open Cache Folder").clicked() {
+                    if let Some(dir) = AssetLocator::cache_root_dir() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        #[cfg(target_os = "windows")]
+                        let _ = furcadia_client::sys::command("explorer").arg(&dir).spawn();
+                        #[cfg(not(target_os = "windows"))]
+                        let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+                    }
+                }
+            });
+            ui.label(
+                RichText::new(
+                    "Deletes downloaded species, custom portraits, chat images, and dream packages so they download fresh. Your settings, logs, and imported Windows Furcadia assets are kept.",
+                )
+                .size(11.0)
+                .color(Color32::GRAY),
+            );
+            if let Some(report) = &self.cache_report {
+                ui.colored_label(Color32::from_rgb(130, 225, 145), report);
+            }
+            ui.separator();
             ui.label(RichText::new("Windows Importer").strong().color(accent));
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.import_path_input).desired_width(240.0));
@@ -6075,9 +6466,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                     .and_then(|n| n.to_str())
                                     .is_some_and(|n| n == "whispers");
                                 let display = if is_whisper {
-                                    format!("💬 {label}")
+                                    format!("[W] {label}")
                                 } else {
-                                    format!("📄 {label}")
+                                    label.to_owned()
                                 };
                                 let sel = self.log_viewer_selected.as_ref() == Some(path);
                                 if ui.selectable_label(sel, display).clicked() {
@@ -6831,28 +7222,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
 
     fn send_raw_cmd(&self, cmd: &str) {
         if self.is_connected {
-            let trimmed = cmd.trim();
-            let first = trimmed.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-            let wire = if matches!(
-                first.as_str(),
-                "make-cookie"
-                    | "give-cookie"
-                    | "make-secret"
-                    | "secret-cookie"
-                    | "eat-cookie"
-                    | "munch-cookie"
-                    | "buy-cookie"
-                    | "cookies-reject"
-                    | "cookies-accept"
-                    | "cookies-off"
-                    | "cookies-on"
-                    | "give"
-            ) || first.starts_with("give-")
-            {
-                format!("\"{trimmed}")
-            } else {
-                trimmed.to_owned()
-            };
+            let wire = format_raw_cmd_wire(cmd);
             let _ = self.to_net.send(UiToNet::Send(ClientCommand::Raw(wire)));
         }
     }
@@ -6996,7 +7366,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             if ui.small_button("×").clicked() {
                                 to_remove = Some(name.clone());
                             }
-                            if ui.small_button("💬").on_hover_text("Whisper").clicked() {
+                            if ui.small_button("Wh").on_hover_text("Whisper").clicked() {
                                 to_whisper = Some(name.clone());
                             }
                             if self.is_connected && ui.small_button("Look").clicked() {
@@ -7205,11 +7575,16 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
             }
             if let Some(msg) = send_msg {
                 if self.is_connected {
-                    self.track_pending_whisper_echo(&peer, &msg);
-                    let _ = self.to_net.send(UiToNet::Send(ClientCommand::Whisper {
-                        target: wire_player_name(&peer),
-                        message: msg,
-                    }));
+                    let cmd = if is_hyphenated_speech_furcadia_command(&msg) {
+                        ClientCommand::Say(msg)
+                    } else {
+                        self.track_pending_whisper_echo(&peer, &msg);
+                        ClientCommand::Whisper {
+                            target: wire_player_name(&peer),
+                            message: msg,
+                        }
+                    };
+                    let _ = self.to_net.send(UiToNet::Send(cmd));
                 }
             }
             if dock_back {
@@ -7425,7 +7800,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 } else {
                                     ui.allocate_ui(psize, |ui| {
                                         ui.centered_and_justified(|ui| {
-                                            ui.label(RichText::new("🐾").size(24.0).color(GOLD_DIM));
+                                            ui.label(RichText::new("Portrait").size(11.0).color(GOLD_DIM));
                                         });
                                     });
                                 }
@@ -7488,11 +7863,11 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         self.trigger_play();
                                     }
                                 });
-                                if ui.small_button("🖼 Change Portrait").clicked() {
+                                if ui.small_button("Change Portrait").clicked() {
                                     self.send_raw_cmd("portrchng");
                                 }
                                 {
-                                    let mut txt = String::from("🍪");
+                                    let mut txt = String::from("Cookies:");
                                     if let Some(c) = self.cookies_collected {
                                         txt.push_str(&format!(" {c} active"));
                                     }
@@ -7500,7 +7875,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         txt.push_str(&format!(" · {t} bank/inactive"));
                                     }
                                     if self.cookies_collected.is_none() && self.cookies_total.is_none() {
-                                        txt.push_str(" Cookies (click to refresh)");
+                                        txt = "Cookies (click to refresh)".to_owned();
                                     }
                                     if ui
                                         .add(
@@ -7605,14 +7980,14 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     .id_salt("sidebar_tab_scroll")
                     .show(ui, |ui| match self.sidebar_tab {
                         SidebarTab::Move => {
-                            ui.label(RichText::new("✦ MOVE & POSTURE").strong().color(accent));
+                            ui.label(RichText::new("MOVE & POSTURE").strong().color(accent));
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     for (idx, lbl, cmd) in [
-                                        (0u8, "🧍 Stand", "stand"),
-                                        (1u8, "🪑 Sit", "sit"),
-                                        (2u8, "🛌 Lie Down", "lie"),
+                                        (0u8, "Stand", "stand"),
+                                        (1u8, "Sit", "sit"),
+                                        (2u8, "Lie Down", "lie"),
                                     ] {
                                         let sel = self.posture == idx;
                                         if ui
@@ -7706,7 +8081,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             ui.horizontal(|ui| {
                                 if ui
                                     .add(
-                                        egui::Button::new(RichText::new("✨ Use (Ctrl-U)").strong().color(Color32::from_rgb(220, 250, 225)))
+                                        egui::Button::new(RichText::new("Use (Ctrl-U)").strong().color(Color32::from_rgb(220, 250, 225)))
                                             .fill(Color32::from_rgb(36, 68, 52))
                                             .stroke(Stroke::new(1.0_f32, Color32::from_rgb(90, 175, 120)))
                                             .min_size(Vec2::new(112.0, 34.0)),
@@ -7717,7 +8092,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 }
                                 if ui
                                     .add(
-                                        egui::Button::new(RichText::new("✋ Get (Ctrl-G)").strong().color(Color32::from_rgb(255, 240, 205)))
+                                        egui::Button::new(RichText::new("Get (Ctrl-G)").strong().color(Color32::from_rgb(255, 240, 205)))
                                             .fill(Color32::from_rgb(72, 54, 34))
                                             .stroke(Stroke::new(1.0_f32, GOLD_DIM))
                                             .min_size(Vec2::new(112.0, 34.0)),
@@ -7730,7 +8105,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             ui.add_space(8.0);
                             if ui
                                 .add(
-                                    egui::Button::new(RichText::new("🚪 EXIT").strong().color(Color32::WHITE))
+                                    egui::Button::new(RichText::new("EXIT").strong().color(Color32::WHITE))
                                         .fill(Color32::from_rgb(120, 40, 54))
                                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(210, 95, 110)))
                                         .min_size(Vec2::new(98.0, 28.0)),
@@ -7744,20 +8119,20 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             }
                         }
                         SidebarTab::GoTo => {
-                            ui.label(RichText::new("🗺 GO TO / MAPS").strong().color(accent));
+                            ui.label(RichText::new("GO TO / MAPS").strong().color(accent));
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
-                                    ("✨ Vinca", "fdl furc://vinca/"),
-                                    ("🎭 Imaginarium", "fdl furc://imaginarium/"),
-                                    ("🌊 Naia", "fdl furc://naiagreen/"),
-                                    ("🏛 Acropolis", "fdl furc://acropolis/"),
-                                    ("⛵ Allegria", "fdl furc://allegria/"),
-                                    ("🌲 Wylde", "fdl furc://wylde/"),
-                                    ("🏘 Olde Towne", "fdl furc://oldetowne/"),
-                                    ("🌿 Hawthorn", "fdl furc://hawthorn/"),
-                                    ("🐾 FurN", "fdl furc://furn/"),
-                                    ("🐱 Meovanni", "fdl furc://meovannivillage/"),
+                                    ("Vinca", "fdl furc://vinca/"),
+                                    ("Imaginarium", "fdl furc://imaginarium/"),
+                                    ("Naia", "fdl furc://naiagreen/"),
+                                    ("Acropolis", "fdl furc://acropolis/"),
+                                    ("Allegria", "fdl furc://allegria/"),
+                                    ("Wylde", "fdl furc://wylde/"),
+                                    ("Olde Towne", "fdl furc://oldetowne/"),
+                                    ("Hawthorn", "fdl furc://hawthorn/"),
+                                    ("FurN", "fdl furc://furn/"),
+                                    ("Meovanni", "fdl furc://meovannivillage/"),
                                 ] {
                                     if ui
                                         .add(
@@ -7775,12 +8150,12 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 if ui.button("↩ BACK").clicked() {
                                     self.send_raw_cmd("goback");
                                 }
-                                if ui.button("👥 WHO").clicked() && self.is_connected {
+                                if ui.button("WHO").clicked() && self.is_connected {
                                     let _ = self.to_net.send(UiToNet::Send(ClientCommand::Who));
                                 }
                             });
                             ui.add_space(6.0);
-                            ui.label(RichText::new("✦ Player Join / Summon").color(accent));
+                            ui.label(RichText::new("Player Join / Summon").color(accent));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.target_player_input)
                                     .hint_text("Player name")
@@ -7788,13 +8163,13 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             );
                             ui.horizontal(|ui| {
                                 let wire = wire_player_name(&self.target_player_input);
-                                if ui.button("➡ JOIN").clicked() && !wire.is_empty() {
+                                if ui.button("JOIN").clicked() && !wire.is_empty() {
                                     self.send_raw_cmd(&format!("join {wire}"));
                                 }
-                                if ui.button("⬅ SUMMON").clicked() && !wire.is_empty() {
+                                if ui.button("SUMMON").clicked() && !wire.is_empty() {
                                     self.send_raw_cmd(&format!("summon {wire}"));
                                 }
-                                if ui.button("👁 LOOK").clicked()
+                                if ui.button("LOOK").clicked()
                                     && !wire.is_empty()
                                     && self.is_connected
                                 {
@@ -7802,20 +8177,20 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 }
                             });
                             ui.add_space(6.0);
-                            ui.label(RichText::new("✦ Dream URL").color(accent));
+                            ui.label(RichText::new("Dream URL").color(accent));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.dream_url_input)
                                     .desired_width(f32::INFINITY),
                             );
                             ui.horizontal(|ui| {
-                                if ui.button("🌀 Enter Dream").clicked() {
+                                if ui.button("Enter Dream").clicked() {
                                     let url = self.dream_url_input.trim().to_owned();
                                     if !url.is_empty() {
                                         self.send_raw_cmd(&format!("fdl {url}"));
                                     }
                                 }
                                 if ui
-                                    .button("⭐ + Save Dream")
+                                    .button("+ Save Dream")
                                     .on_hover_text("Add this Dream URL to your Pounce Saved Dreams list")
                                     .clicked()
                                 {
@@ -7833,43 +8208,43 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
                         }
                         SidebarTab::Edit => {
-                            ui.label(RichText::new("✏ EDIT").strong().color(accent));
+                            ui.label(RichText::new("EDIT").strong().color(accent));
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
                                 if ui
-                                    .add(egui::Button::new("⚙ Edit My Settings").min_size(Vec2::new(112.0, 28.0)))
+                                    .add(egui::Button::new("Edit My Settings").min_size(Vec2::new(112.0, 28.0)))
                                     .clicked()
                                 {
                                     self.show_settings_tab = true;
                                 }
                                 if ui
-                                    .add(egui::Button::new("💤 AFK Settings").min_size(Vec2::new(112.0, 28.0)))
+                                    .add(egui::Button::new("AFK Settings").min_size(Vec2::new(112.0, 28.0)))
                                     .clicked()
                                 {
                                     self.afk_active = !self.afk_active;
                                     self.send_raw_cmd("afk");
                                 }
                                 if ui
-                                    .add(egui::Button::new("🦊 Edit My Furre").min_size(Vec2::new(112.0, 28.0)))
+                                    .add(egui::Button::new("Edit My Furre").min_size(Vec2::new(112.0, 28.0)))
                                     .clicked()
                                 {
                                     ctx.open_url(egui::OpenUrl::new_tab("https://www.furcadia.com/fured"));
                                 }
                                 if ui
-                                    .add(egui::Button::new("✨ PLACE DREAM").min_size(Vec2::new(112.0, 28.0)))
+                                    .add(egui::Button::new("PLACE DREAM").min_size(Vec2::new(112.0, 28.0)))
                                     .clicked()
                                 {
                                     self.send_raw_cmd("dream");
                                 }
                             });
                             ui.add_space(6.0);
-                            ui.label(RichText::new("✦ Live Description").color(accent));
+                            ui.label(RichText::new("Live Description").color(accent));
                             ui.add(
                                 egui::TextEdit::multiline(&mut self.live_desc_input)
                                     .desired_rows(4)
                                     .desired_width(f32::INFINITY),
                             );
-                            if ui.button("📝 Update Description").clicked() && self.is_connected {
+                            if ui.button("Update Description").clicked() && self.is_connected {
                                 let clean_desc = self
                                     .live_desc_input
                                     .trim()
@@ -7891,7 +8266,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             }
                         }
                         SidebarTab::Digo => {
-                            ui.label(RichText::new("💎 DIGO TOGGLES & WINGS").strong().color(accent));
+                            ui.label(RichText::new("DIGO TOGGLES & WINGS").strong().color(accent));
                             if let Some(ch) = self.selected_character() {
                                 ui.label(
                                     RichText::new(format!("Colors: {}", ch.colors))
@@ -7900,13 +8275,13 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 );
                             }
                             ui.horizontal_wrapped(|ui| {
-                                if ui.button("🪽 Cycle Wings").on_hover_text("Cycle owned wings (`wings)").clicked() {
+                                if ui.button("Cycle Wings").on_hover_text("Cycle owned wings (`wings)").clicked() {
                                     self.send_raw_cmd("wings");
                                 }
-                                if ui.button("🏷 Desctags").on_hover_text("List/toggle desctags (`desctags)").clicked() {
+                                if ui.button("Desctags").on_hover_text("List/toggle desctags (`desctags)").clicked() {
                                     self.send_raw_cmd("desctags");
                                 }
-                                if ui.button("💎 Digo Market").on_hover_text("Open Digo Market in browser").clicked() {
+                                if ui.button("Digo Market").on_hover_text("Open Digo Market in browser").clicked() {
                                     ctx.open_url(egui::OpenUrl::new_tab(
                                         "https://www.furcadia.com/digo/",
                                     ));
@@ -8009,20 +8384,20 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
                         }
                         SidebarTab::Emotes => {
-                            ui.label(RichText::new("✨ DIGO ABILITIES & ACTIONS").strong().color(accent));
+                            ui.label(RichText::new("DIGO ABILITIES & ACTIONS").strong().color(accent));
                             ui.add_space(2.0);
                             ui.label(RichText::new("Digo Magic & Effects").size(11.5).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
-                                    ("✨ Magic", "magic"),
-                                    ("🪽 Fly", "fly"),
-                                    ("🔥 Flame", "flame"),
-                                    ("💨 Breath", "breath"),
-                                    ("🌟 Glamour", "glamour"),
-                                    ("💦 Splash", "splash"),
-                                    ("🪨 Stone", "stone"),
-                                    ("☁ Kirin Cloud", "kirincloud"),
-                                    ("🧹 Purify", "purify"),
+                                    ("Magic", "magic"),
+                                    ("Fly", "fly"),
+                                    ("Flame", "flame"),
+                                    ("Breath", "breath"),
+                                    ("Glamour", "glamour"),
+                                    ("Splash", "splash"),
+                                    ("Stone", "stone"),
+                                    ("Kirin Cloud", "kirincloud"),
+                                    ("Purify", "purify"),
                                 ] {
                                     if ui
                                         .add(egui::Button::new(label).min_size(Vec2::new(72.0, 24.0)))
@@ -8055,16 +8430,16 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             ui.label(RichText::new("Social & Actions").size(11.5).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
-                                    ("🤝 Lead", "lead"),
-                                    ("👣 Follow", "follow"),
-                                    ("✋ Stop", "stop"),
-                                    ("✋ Get", "get"),
-                                    ("✨ Use", "use"),
-                                    ("ℹ Info", "info"),
-                                    ("⬅ Summon", "summon"),
-                                    ("➡ Join", "join"),
-                                    ("🚫 Decline", "decline"),
-                                    ("🍪 Cookie", "buy-cookie"),
+                                    ("Lead", "lead"),
+                                    ("Follow", "follow"),
+                                    ("Stop", "stop"),
+                                    ("Get", "get"),
+                                    ("Use", "use"),
+                                    ("Info", "info"),
+                                    ("Summon", "summon"),
+                                    ("Join", "join"),
+                                    ("Decline", "decline"),
+                                    ("Cookie", "buy-cookie"),
                                 ] {
                                     if ui
                                         .add(egui::Button::new(label).min_size(Vec2::new(68.0, 24.0)))
@@ -8102,35 +8477,35 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
                         }
                         SidebarTab::Misc => {
-                            ui.label(RichText::new("✦ MISC & TOOLS").strong().color(accent));
+                            ui.label(RichText::new("MISC & TOOLS").strong().color(accent));
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
                                 if ui
-                                    .add(egui::Button::new("📜 View Log").min_size(Vec2::new(112.0, 26.0)))
+                                    .add(egui::Button::new("View Log").min_size(Vec2::new(112.0, 26.0)))
                                     .clicked()
                                 {
                                     self.open_log_viewer();
                                 }
                                 if ui
-                                    .add(egui::Button::new("💬 Forums").min_size(Vec2::new(112.0, 26.0)))
+                                    .add(egui::Button::new("Forums").min_size(Vec2::new(112.0, 26.0)))
                                     .clicked()
                                 {
                                     ctx.open_url(egui::OpenUrl::new_tab("https://forums.furcadia.com/"));
                                 }
                                 if ui
-                                    .add(egui::Button::new("📰 News").min_size(Vec2::new(112.0, 26.0)))
+                                    .add(egui::Button::new("News").min_size(Vec2::new(112.0, 26.0)))
                                     .clicked()
                                 {
                                     ctx.open_url(egui::OpenUrl::new_tab("https://www.furcadia.com/news/"));
                                 }
                                 if ui
-                                    .add(egui::Button::new("💎 Digo Market").min_size(Vec2::new(112.0, 26.0)))
+                                    .add(egui::Button::new("Digo Market").min_size(Vec2::new(112.0, 26.0)))
                                     .clicked()
                                 {
                                     ctx.open_url(egui::OpenUrl::new_tab("https://www.furcadia.com/digo/"));
                                 }
                                 if ui
-                                    .add(egui::Button::new("📸 Screenshot").min_size(Vec2::new(112.0, 26.0)))
+                                    .add(egui::Button::new("Screenshot").min_size(Vec2::new(112.0, 26.0)))
                                     .clicked()
                                 {
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
@@ -8139,9 +8514,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 if ui
                                     .add(
                                         egui::Button::new(if self.sound_enabled {
-                                            "🔊 Sound: ON"
+                                            "Sound: ON"
                                         } else {
-                                            "🔇 Sound: OFF"
+                                            "Sound: OFF"
                                         })
                                         .min_size(Vec2::new(112.0, 26.0)),
                                     )
@@ -8156,9 +8531,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 if ui
                                     .add(
                                         egui::Button::new(if self.music_enabled {
-                                            "🎵 Music: ON"
+                                            "Music: ON"
                                         } else {
-                                            "🎵 Music: OFF"
+                                            "Music: OFF"
                                         })
                                         .min_size(Vec2::new(112.0, 26.0)),
                                     )
@@ -8177,7 +8552,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             ui.add_space(6.0);
                             if ui
                                 .add(
-                                    egui::Button::new(RichText::new("⚙ Settings & Windows Importer").strong())
+                                    egui::Button::new(RichText::new("Settings & Windows Importer").strong())
                                         .min_size(Vec2::new(ui.available_width(), 28.0)),
                                 )
                                 .clicked()
@@ -8777,19 +9152,19 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
             .entries()
             .any(|e| e.name.eq_ignore_ascii_case(peer) || wire_player_name(&e.name).eq_ignore_ascii_case(&wire));
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button("👁 Look").on_hover_text(format!("Look at {peer}")).clicked() {
+            if ui.small_button("Look").on_hover_text(format!("Look at {peer}")).clicked() {
                 self.request_player_look(&wire);
                 self.focus_chat_input = true;
             }
-            if ui.small_button("➡ Join").on_hover_text(format!("Join {peer}")).clicked() {
+            if ui.small_button("Join").on_hover_text(format!("Join {peer}")).clicked() {
                 self.send_raw_cmd(&format!("join {wire}"));
                 self.focus_chat_input = true;
             }
-            if ui.small_button("⬅ Summon").on_hover_text(format!("Summon {peer}")).clicked() {
+            if ui.small_button("Summon").on_hover_text(format!("Summon {peer}")).clicked() {
                 self.send_raw_cmd(&format!("summon {wire}"));
                 self.focus_chat_input = true;
             }
-            if ui.small_button("👣 Follow").on_hover_text(format!("Follow {peer}")).clicked() {
+            if ui.small_button("Follow").on_hover_text(format!("Follow {peer}")).clicked() {
                 self.send_raw_cmd(&format!("follow {wire}"));
                 self.focus_chat_input = true;
             }
@@ -8810,11 +9185,11 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 }
                 self.focus_chat_input = true;
             }
-            if ui.small_button("🚫 Ignore").on_hover_text(format!("Ignore / Unignore {peer}")).clicked() {
+            if ui.small_button("Ignore").on_hover_text(format!("Ignore / Unignore {peer}")).clicked() {
                 self.send_raw_cmd(&format!("ignore {wire}"));
                 self.focus_chat_input = true;
             }
-            if ui.small_button("📜 History").on_hover_text(format!("View whisper logs with {peer}")).clicked() {
+            if ui.small_button("History").on_hover_text(format!("View whisper logs with {peer}")).clicked() {
                 if self.shared_logs_mode {
                     self.log_viewer_char = SHARED_LOG_GROUP.to_owned();
                 }
@@ -8946,9 +9321,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             .as_deref()
                                             .is_some_and(|a| a.eq_ignore_ascii_case(&w.peer));
                                         let label = if w.unread > 0 && !sel {
-                                            format!("💬 {} ({})", name_display_clean(&w.peer), w.unread)
+                                            format!("{} ({})", name_display_clean(&w.peer), w.unread)
                                         } else {
-                                            format!("💬 {}", name_display_clean(&w.peer))
+                                            name_display_clean(&w.peer)
                                         };
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 2.0;
@@ -9062,14 +9437,14 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         self.chat_input.push_str("<u></u>");
                     }
                     if ui
-                        .selectable_label(self.smiley_picker_open, "☺")
+                        .selectable_label(self.smiley_picker_open, ":)")
                         .on_hover_text("Insert Smiley")
                         .clicked()
                     {
                         self.smiley_picker_open = !self.smiley_picker_open;
                     }
                     if ui
-                        .selectable_label(self.link_builder_open, "🔗 Link")
+                        .selectable_label(self.link_builder_open, "Link")
                         .on_hover_text("Create a clickable link for chat")
                         .clicked()
                     {
@@ -9086,7 +9461,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     let dice_button = ui
                         .add_enabled(
                             self.is_connected && dice_ready,
-                            egui::Button::new(format!("🎲 {dice}")),
+                            egui::Button::new(format!("Roll {dice}")),
                         )
                         .on_hover_text(if dice_ready {
                             format!("Roll {dice} (configurable in Settings → Whispers & Chat)")
@@ -9148,16 +9523,16 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 }
                 if self.smiley_picker_open {
                     ui.horizontal_wrapped(|ui| {
-                        let fallback_emoji = [
-                            ('A', "😊"), ('B', "😁"), ('C', "😉"), ('D', "😢"),
-                            ('E', "😛"), ('F', "😮"), ('G', "😠"), ('H', "😎"),
-                            ('I', "😳"), ('J', "😇"), ('K', "😈"), ('L', "❤️"),
-                            ('M', "💔"), ('N', "🌹"), ('O', "❤️"), ('P', "🎵"),
-                            ('Q', "🎉"), ('R', "💤"), ('S', "🤔"), ('T', "😂"),
-                            ('U', "😘"), ('V', "🙄"), ('W', "😬"), ('X', "😴"),
-                            ('Y', "👍"), ('Z', "👎"),
+                        let fallback_labels = [
+                            ('A', ":)"), ('B', ":D"), ('C', ";)"), ('D', ":("),
+                            ('E', ":P"), ('F', ":O"), ('G', ">:("), ('H', "B)"),
+                            ('I', ":$"), ('J', "O:)"), ('K', ">:)"), ('L', "<3"),
+                            ('M', "</3"), ('N', "Rose"), ('O', "<3"), ('P', "#SP"),
+                            ('Q', "#SQ"), ('R', "Zzz"), ('S', ":/"), ('T', "XD"),
+                            ('U', ":*"), ('V', "8|"), ('W', ":S"), ('X', "-_-"),
+                            ('Y', "+1"), ('Z', "-1"),
                         ];
-                        for (ch, emoji) in fallback_emoji {
+                        for (ch, fallback_label) in fallback_labels {
                             let code = format!("#S{ch}");
                             let tex_opt = smiley_index_for_code(ch)
                                 .and_then(|idx| self.smiley_textures.get(idx))
@@ -9183,7 +9558,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 resp
                             } else {
                                 ui.add(
-                                    egui::Button::new(emoji)
+                                    egui::Button::new(fallback_label)
                                         .fill(Color32::from_rgb(218, 212, 232))
                                         .min_size(Vec2::new(26.0, 26.0)),
                                 )
@@ -10657,7 +11032,7 @@ Light: {} | Amb: {} | Elev: {:?}",
                 let (mapped_sp, mapped_gender) =
                     self.world.local_species_remap[(sp - 1001) as usize];
                 if mapped_sp == 0 {
-                    None
+                    Some((sp, appearance.gender))
                 } else {
                     Some((mapped_sp, mapped_gender))
                 }
@@ -10803,15 +11178,20 @@ Light: {} | Amb: {} | Elev: {:?}",
                             if self.is_connected
                                 && !display_name.eq_ignore_ascii_case(&self.active_character_name())
                             {
+                                let target_wire = if snapshot.short_name.trim().is_empty() {
+                                    wire_player_name(&display_name)
+                                } else {
+                                    wire_player_name(&snapshot.short_name)
+                                };
                                 ui.menu_button("Cookie", |ui| {
                                     for (lbl, cmd, tip) in [
                                         (
-                                            "🍪 Make Cookie",
+                                            "Make Cookie",
                                             "make-cookie",
                                             "Bake a daily cookie for this player",
                                         ),
                                         (
-                                            "🤲 Give Cookie",
+                                            "Give Cookie",
                                             "give-cookie",
                                             "Give one of your held cookies",
                                         ),
@@ -10827,11 +11207,6 @@ Light: {} | Amb: {} | Elev: {:?}",
                                         ),
                                     ] {
                                         if ui.button(lbl).on_hover_text(tip).clicked() {
-                                            let target_wire = if snapshot.short_name.trim().is_empty() {
-                                                wire_player_name(&display_name)
-                                            } else {
-                                                wire_player_name(&snapshot.short_name)
-                                            };
                                             self.send_raw_cmd(&format!("{cmd} {target_wire}"));
                                             self.push_system_line(
                                                 "emit",
@@ -10843,7 +11218,7 @@ Light: {} | Amb: {} | Elev: {:?}",
                                 });
                                 ui.menu_button("Gift", |ui| {
                                     for (lbl, cmd) in [
-                                        ("✋ Give Item", "give"),
+                                        ("Give Item", "give"),
                                         ("Rose", "give-rose"),
                                         ("Red Rose", "give-red-rose"),
                                         ("Black Rose", "give-black-rose"),
@@ -10855,11 +11230,6 @@ Light: {} | Amb: {} | Elev: {:?}",
                                         ("Flaming Sword", "give-flaming-sword"),
                                     ] {
                                         if ui.button(lbl).clicked() {
-                                            let target_wire = if snapshot.short_name.trim().is_empty() {
-                                                wire_player_name(&display_name)
-                                            } else {
-                                                wire_player_name(&snapshot.short_name)
-                                            };
                                             self.send_raw_cmd(&format!("{cmd} {target_wire}"));
                                             self.push_system_line(
                                                 "emit",
@@ -10868,6 +11238,166 @@ Light: {} | Amb: {} | Elev: {:?}",
                                             ui.close_menu();
                                         }
                                     }
+                                });
+                                ui.menu_button("Trade", |ui| {
+                                    fn send_trade_cmd(
+                                        app: &mut FurcadiaApp,
+                                        ui: &mut egui::Ui,
+                                        cmd: &str,
+                                    ) {
+                                        app.send_raw_cmd(cmd);
+                                        app.push_system_line(
+                                            "emit",
+                                            &format!("Trade Sent `{cmd}`"),
+                                        );
+                                        ui.close_menu();
+                                    }
+                                    fn trade_action_button(
+                                        app: &mut FurcadiaApp,
+                                        ui: &mut egui::Ui,
+                                        label: impl Into<egui::WidgetText>,
+                                        tip: &str,
+                                        cmd: &str,
+                                    ) {
+                                        if ui.button(label).on_hover_text(tip).clicked() {
+                                            send_trade_cmd(app, ui, cmd);
+                                        }
+                                    }
+
+                                    ui.set_min_width(240.0);
+                                    trade_action_button(
+                                        self,
+                                        ui,
+                                        "Start Trade",
+                                        &format!(
+                                            "Start or join a secure trade with {display_name} (`trade-start {target_wire}`)"
+                                        ),
+                                        &format!("trade-start {target_wire}"),
+                                    );
+                                    trade_action_button(
+                                        self,
+                                        ui,
+                                        "Trade Status",
+                                        "Show items currently in the active trade (`trade-status`)",
+                                        "trade-status",
+                                    );
+                                    ui.separator();
+                                    trade_action_button(
+                                        self,
+                                        ui,
+                                        "Add Portrait Space",
+                                        "Add an unused portrait space (`trade-add portrait`)",
+                                        "trade-add portrait",
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [46.0, 18.0],
+                                            egui::Label::new(RichText::new("Item:").size(11.5)),
+                                        );
+                                        let item_resp = ui.add(
+                                            egui::TextEdit::singleline(&mut self.trade_item_input)
+                                                .hint_text("portrait, GD 50...")
+                                                .desired_width(118.0),
+                                        );
+                                        let item_cmd_add =
+                                            build_trade_command("trade-add", &self.trade_item_input);
+                                        let item_cmd_rem = build_trade_command(
+                                            "trade-remove",
+                                            &self.trade_item_input,
+                                        );
+                                        let enter_add = item_resp.lost_focus()
+                                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                        let clicked_add = ui
+                                            .add_enabled(
+                                                item_cmd_add.is_some(),
+                                                egui::Button::new("+Add").small(),
+                                            )
+                                            .on_hover_text(
+                                                "Add item or DragonScales (`trade-add <item>`)",
+                                            )
+                                            .clicked();
+                                        let clicked_rem = ui
+                                            .add_enabled(
+                                                item_cmd_rem.is_some(),
+                                                egui::Button::new("-Rem").small(),
+                                            )
+                                            .on_hover_text(
+                                                "Remove item from trade (`trade-remove <item>`)",
+                                            )
+                                            .clicked();
+                                        let chosen = if clicked_add || enter_add {
+                                            item_cmd_add
+                                        } else if clicked_rem {
+                                            item_cmd_rem
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(cmd) = chosen {
+                                            send_trade_cmd(self, ui, &cmd);
+                                            self.trade_item_input.clear();
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [46.0, 18.0],
+                                            egui::Label::new(RichText::new("Reason:").size(11.5)),
+                                        );
+                                        let reason_resp = ui.add(
+                                            egui::TextEdit::singleline(
+                                                &mut self.trade_reason_input,
+                                            )
+                                            .hint_text("reason for trade...")
+                                            .desired_width(150.0),
+                                        );
+                                        let reason_cmd = build_trade_command(
+                                            "trade-reason",
+                                            &self.trade_reason_input,
+                                        );
+                                        let enter_reason = reason_resp.lost_focus()
+                                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                        let clicked_reason = ui
+                                            .add_enabled(
+                                                reason_cmd.is_some(),
+                                                egui::Button::new("Set").small(),
+                                            )
+                                            .on_hover_text(
+                                                "Log a trade reason (`trade-reason <text>`)",
+                                            )
+                                            .clicked();
+                                        if (clicked_reason || enter_reason)
+                                            && reason_cmd.is_some()
+                                        {
+                                            if let Some(cmd) = reason_cmd {
+                                                send_trade_cmd(self, ui, &cmd);
+                                                self.trade_reason_input.clear();
+                                            }
+                                        }
+                                    });
+                                    ui.separator();
+                                    trade_action_button(
+                                        self,
+                                        ui,
+                                        RichText::new("Accept Trade")
+                                            .color(Color32::from_rgb(130, 225, 145)),
+                                        "Finalize and accept the trade offer — cannot be undone once both players accept (`trade-accept`)",
+                                        "trade-accept",
+                                    );
+                                    trade_action_button(
+                                        self,
+                                        ui,
+                                        RichText::new("Reject Trade")
+                                            .color(Color32::from_rgb(240, 195, 115)),
+                                        "Reject the current trade offer (`trade-reject`)",
+                                        "trade-reject",
+                                    );
+                                    trade_action_button(
+                                        self,
+                                        ui,
+                                        RichText::new("End Trade")
+                                            .color(Color32::from_rgb(235, 130, 130)),
+                                        "Cancel and end the active trade session (`trade-end`)",
+                                        "trade-end",
+                                    );
                                 });
                             }
                         });
@@ -12207,11 +12737,11 @@ fn render_chat_image_span(
     }
 
     let (glyph, color): (&str, Color32) = if lower_alt == "@emit" || lower_alt == "emit" {
-        ("[◆]", Color32::from_rgb(245, 205, 110))
+        ("[*]", Color32::from_rgb(245, 205, 110))
     } else if lower_alt == "@events" || lower_alt == "events" || lower_alt.contains("star") {
-        ("★", GOLD)
+        ("*", GOLD)
     } else if lower_alt == "@paw" || lower_alt.contains("paw") {
-        ("🐾", Color32::from_rgb(175, 195, 235))
+        ("[paw]", Color32::from_rgb(175, 195, 235))
     } else if !trimmed_alt.is_empty() {
         ui.label(
             RichText::new(format!("[{trimmed_alt}]")).color(Color32::from_rgb(170, 175, 195)),
@@ -12220,13 +12750,13 @@ fn render_chat_image_span(
     } else if let Some(idx_str) = lower_src.strip_prefix("fsh://system.fsh:") {
         match idx_str.trim() {
             "86" => ("›", Color32::from_rgb(232, 160, 228)),
-            "85" => ("🐾", Color32::from_rgb(175, 195, 235)),
-            "84" => ("◆", Color32::from_rgb(245, 205, 110)),
-            "81" | "82" | "83" => ("★", GOLD),
+            "85" => ("[paw]", Color32::from_rgb(175, 195, 235)),
+            "84" => ("*", Color32::from_rgb(245, 205, 110)),
+            "81" | "82" | "83" => ("*", GOLD),
             _ => ("•", Color32::from_rgb(170, 175, 195)),
         }
     } else if lower_src.contains("smiley") || lower_src.contains("#s") {
-        ("☺", Color32::from_rgb(245, 215, 120))
+        (":)", Color32::from_rgb(245, 215, 120))
     } else {
         ("•", Color32::from_rgb(170, 175, 195))
     };
@@ -12385,10 +12915,20 @@ fn render_chat_line(
                         .color
                         .as_deref()
                         .is_some_and(|c| c.eq_ignore_ascii_case("emote"));
-                    if is_emote && style.link.is_none() && text.contains('"') {
+                    let is_fallback_peer = style.link.is_none()
+                        && fallback_peer
+                            .as_deref()
+                            .is_some_and(|peer| !peer.is_empty() && text.contains(peer));
+                    let split_quotes = is_emote && style.link.is_none() && text.contains('"');
+                    let highlight_brackets = !is_fallback_peer
+                        && should_highlight_brackets(style)
+                        && text.contains('[')
+                        && text.contains(']');
+                    if split_quotes || highlight_brackets {
                         let font_id = egui::TextStyle::Body.resolve(ui.style());
-                        let segments = split_emote_quotes(text);
-                        for (seg, is_quoted) in segments {
+                        let segments =
+                            split_chat_segments(text, split_quotes, highlight_brackets);
+                        for (seg, kind) in segments {
                             if seg.is_empty() {
                                 continue;
                             }
@@ -12402,10 +12942,27 @@ fn render_chat_line(
                                         if style.underline {
                                             rt = rt.underline();
                                         }
-                                        if is_quoted {
-                                            rt = rt.color(Color32::from_rgb(242, 245, 250));
-                                        } else {
-                                            rt = rt.italics().color(map_chat_color("emote"));
+                                        match kind {
+                                            ChatSegmentKind::Bracketed => {
+                                                if style.italic && !is_emote {
+                                                    rt = rt.italics();
+                                                }
+                                                rt = rt.color(CHAT_BRACKET_BLUE);
+                                            }
+                                            ChatSegmentKind::EmoteQuote => {
+                                                rt = rt.color(Color32::from_rgb(242, 245, 250));
+                                            }
+                                            ChatSegmentKind::Normal => {
+                                                if style.italic || is_emote {
+                                                    rt = rt.italics();
+                                                }
+                                                let col = style
+                                                    .color
+                                                    .as_deref()
+                                                    .map(map_chat_color)
+                                                    .unwrap_or(Color32::from_rgb(232, 236, 244));
+                                                rt = rt.color(col);
+                                            }
                                         }
                                         ui.label(rt);
                                     }
@@ -12442,8 +12999,6 @@ fn render_chat_line(
                     }
                     if let Some(color_name) = &style.color {
                         rt = rt.color(map_chat_color(color_name));
-                    } else if text.trim().starts_with('[') && text.trim().ends_with(']') {
-                        rt = rt.color(Color32::from_rgb(115, 195, 255));
                     } else {
                         rt = rt.color(Color32::from_rgb(232, 236, 244));
                     }
@@ -12599,9 +13154,6 @@ fn render_linked_inline_codes(
                 let mut rich = RichText::new(segment);
                 if style.bold {
                     rich = rich.strong();
-                }
-                if segment.trim().starts_with('[') && segment.trim().ends_with(']') {
-                    rich = rich.color(Color32::from_rgb(115, 195, 255));
                 }
                 if style.italic || style.color.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("emote")) {
                     rich = rich.italics();
@@ -12770,8 +13322,126 @@ fn map_chat_color(name: &str) -> Color32 {
     }
 }
 
+/// Matches the blue fill of the selected `"Map Size"` toggle button (`Color32::from_rgb(0, 92, 128)`).
+const CHAT_BRACKET_BLUE: Color32 = Color32::from_rgb(0, 92, 128);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatSegmentKind {
+    Normal,
+    EmoteQuote,
+    Bracketed,
+}
+
+/// Returns whether inline `[...]` segments in a non-link chat/whisper span should be colored blue.
+fn should_highlight_brackets(style: &furcadia_client::ChatStyle) -> bool {
+    if style.link.is_some() {
+        return false;
+    }
+    match style.color.as_deref() {
+        None => true,
+        Some(c) => matches!(
+            c.trim().to_ascii_lowercase().as_str(),
+            "speech" | "myspeech" | "emote" | "whisper" | "shout"
+        ),
+    }
+}
+
+/// Finds the exclusive byte end index of the `]` matching `s[open_idx] == '['`,
+/// requiring at least one byte between `[` and `]` (so empty `[]` is ignored).
+fn find_matching_bracket(s: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (rel, b) in s[open_idx..].bytes().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (rel > 1).then_some(open_idx + rel + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Splits a chat/whisper text span into `Normal`, `EmoteQuote` (`"..."` in emotes),
+/// and `Bracketed` (`[...]`) segments while keeping unmatched delimiters normal.
+fn split_chat_segments(
+    text: &str,
+    split_quotes: bool,
+    highlight_brackets: bool,
+) -> Vec<(&str, ChatSegmentKind)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    let mut in_quote = false;
+
+    while i < bytes.len() {
+        if highlight_brackets && bytes[i] == b'[' {
+            let limit = if in_quote {
+                text[i + 1..]
+                    .find('"')
+                    .map_or(text.len(), |rel| i + 1 + rel)
+            } else {
+                text.len()
+            };
+            if let Some(end) = find_matching_bracket(&text[..limit], i) {
+                if i > seg_start {
+                    out.push((
+                        &text[seg_start..i],
+                        if in_quote {
+                            ChatSegmentKind::EmoteQuote
+                        } else {
+                            ChatSegmentKind::Normal
+                        },
+                    ));
+                }
+                out.push((&text[i..end], ChatSegmentKind::Bracketed));
+                i = end;
+                seg_start = end;
+                continue;
+            }
+        }
+        if split_quotes && bytes[i] == b'"' {
+            if !in_quote {
+                if text[i + 1..].find('"').is_some() {
+                    if i > seg_start {
+                        out.push((&text[seg_start..i], ChatSegmentKind::Normal));
+                    }
+                    seg_start = i;
+                    in_quote = true;
+                    i += 1;
+                    continue;
+                }
+            } else {
+                out.push((&text[seg_start..=i], ChatSegmentKind::EmoteQuote));
+                i += 1;
+                seg_start = i;
+                in_quote = false;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    if seg_start < text.len() {
+        out.push((
+            &text[seg_start..],
+            if in_quote {
+                ChatSegmentKind::EmoteQuote
+            } else {
+                ChatSegmentKind::Normal
+            },
+        ));
+    }
+    out
+}
+
 /// Splits an emote string into `(segment, is_quoted_speech)` pairs so `"..."` spoken text
 /// renders as normal non-italicized speech while surrounding motion stays italicized.
+#[cfg(test)]
 fn split_emote_quotes(text: &str) -> Vec<(&str, bool)> {
     let mut out = Vec::new();
     let mut pos = 0;
@@ -13646,56 +14316,143 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                     let dl_tx = tx.clone();
                     let dl_ctx = ctx.clone();
                     thread::spawn(move || {
+                        let suffix = format!("{:?}", std::thread::current().id())
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric())
+                            .collect::<String>();
+                        let is_dynamic = file_id >= DYNAMIC_AVATAR_CACHE_BASE;
+                        if !is_dynamic {
+                            // Stock species (`speciesN.fox`, 1..1000) and local species
+                            // (`localN.fox`, 1001..1004) come from the official web-client asset
+                            // host. NOTE: `apollo.../species/AvatarN.zip` is the *dynamic avatar*
+                            // `DPlayerN.fox`, a different namespace — never use it for stock species.
+                            let fname = if file_id > 1000 {
+                                format!("local{}.fox", file_id - 1000)
+                            } else {
+                                format!("species{file_id}.fox")
+                            };
+                            let final_path = AssetLocator::stock_species_cache_dir().and_then(|dir| {
+                                std::fs::create_dir_all(&dir).ok()?;
+                                let dest_path = dir.join(&fname);
+                                let tmp_path = dir.join(format!("{fname}.{suffix}.tmp"));
+                                let _ = std::fs::remove_file(&tmp_path);
+                                let mut cmd = furcadia_client::sys::command("curl");
+                                cmd.args(["-fsSL", "--max-time", "25"]);
+                                if let Some(ref existing) = if_newer_than {
+                                    if existing.is_file() {
+                                        cmd.arg("-z").arg(existing);
+                                    }
+                                }
+                                let curl_ok = cmd
+                                    .arg("-o")
+                                    .arg(&tmp_path)
+                                    .arg(AssetLocator::stock_species_url(&fname))
+                                    .output()
+                                    .is_ok_and(|o| o.status.success());
+                                let valid = curl_ok
+                                    && tmp_path.is_file()
+                                    && FoxArchive::load(&tmp_path).is_ok();
+                                if !valid {
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    return None;
+                                }
+                                replace_file_atomically(&tmp_path, &dest_path).ok()?;
+                                Some(dest_path)
+                            });
+                            let _ = dl_tx.send(NetToUi::SpeciesDownloaded {
+                                file_id,
+                                path: final_path,
+                            });
+                            dl_ctx.request_repaint();
+                            return;
+                        }
                         let Some(species_dir) = AssetLocator::species_cache_dir() else {
                             let _ = dl_tx.send(NetToUi::SpeciesDownloaded {
                                 file_id,
                                 path: None,
                             });
+                            dl_ctx.request_repaint();
                             return;
                         };
                         let _ = std::fs::create_dir_all(&species_dir);
-                        let is_dynamic = file_id >= DYNAMIC_AVATAR_CACHE_BASE;
-                        let avatar_id = if is_dynamic {
-                            file_id - DYNAMIC_AVATAR_CACHE_BASE
-                        } else {
-                            file_id
-                        };
-                        let dest_name = if is_dynamic {
-                            format!("dplayer{avatar_id}.fox")
-                        } else {
-                            format!("species{avatar_id}.fox")
-                        };
+                        let avatar_id = file_id - DYNAMIC_AVATAR_CACHE_BASE;
+                        let dest_name = format!("dplayer{avatar_id}.fox");
                         let dest_path = species_dir.join(&dest_name);
-                        let zip_path = species_dir.join(format!("Avatar{avatar_id}.zip.tmp"));
-                        let stage_dir = species_dir.join(format!("stage_{file_id}"));
-                        let _ = std::fs::remove_file(&zip_path);
-                        let _ = std::fs::remove_dir_all(&stage_dir);
                         let srv = server_code
                             .filter(|c| *c != ' ' && c.is_ascii_alphanumeric())
                             .map(|c| c.to_string())
                             .unwrap_or_default();
-                        let url = format!(
-                            "https://apollo.furcadia.com/species{srv}/Avatar{avatar_id}.zip"
+                        let mut final_path = None;
+
+                        // 1. Try direct DPlayer<id>.fox first (matches official web client).
+                        let direct_tmp = species_dir.join(format!("dplayer{avatar_id}_{suffix}.tmp"));
+                        let _ = std::fs::remove_file(&direct_tmp);
+                        let direct_url = format!(
+                            "https://apollo.furcadia.com/species{srv}/DPlayer{avatar_id}.fox"
                         );
-                        let mut cmd = furcadia_client::sys::command("curl");
-                        cmd.args(["-fsSL", "--max-time", "25"]);
+                        let mut direct_cmd = furcadia_client::sys::command("curl");
+                        direct_cmd.args(["-fsSL", "--max-time", "25"]);
+                        let has_existing = if_newer_than.as_ref().is_some_and(|p| p.is_file());
                         if let Some(ref existing) = if_newer_than {
                             if existing.is_file() {
-                                cmd.arg("-z").arg(existing);
+                                direct_cmd.arg("-z").arg(existing);
                             }
                         }
-                        let curl_ok = cmd
+                        let direct_ok = direct_cmd
                             .arg("-o")
-                            .arg(&zip_path)
-                            .arg(&url)
+                            .arg(&direct_tmp)
+                            .arg(&direct_url)
                             .output()
                             .is_ok_and(|o| o.status.success());
-                        let mut final_path = None;
-                        if curl_ok && zip_path.is_file() {
-                            let _ = std::fs::create_dir_all(&stage_dir);
-                            let unzip_ok = extract_zip_archive(&zip_path, &stage_dir).is_ok();
-                            if unzip_ok {
-                                let found = FurcadiaApp::find_file_case_insensitive(&stage_dir, &dest_name)
+                        if direct_ok && has_existing && !direct_tmp.is_file() {
+                            // HTTP 304 Not Modified: keep cached file and skip .zip fallback.
+                            let _ = std::fs::remove_file(&direct_tmp);
+                            let _ = dl_tx.send(NetToUi::SpeciesDownloaded {
+                                file_id,
+                                path: None,
+                            });
+                            dl_ctx.request_repaint();
+                            return;
+                        }
+                        if direct_ok
+                            && direct_tmp.is_file()
+                            && FoxArchive::load(&direct_tmp).is_ok()
+                        {
+                            if replace_file_atomically(&direct_tmp, &dest_path).is_ok() {
+                                final_path = Some(dest_path.clone());
+                            }
+                        } else {
+                            let _ = std::fs::remove_file(&direct_tmp);
+                            // 2. Fallback to Avatar<id>.zip if direct .fox failed or was invalid.
+                            let zip_path =
+                                species_dir.join(format!("Avatar{avatar_id}_{suffix}.zip.tmp"));
+                            let stage_dir = species_dir.join(format!("stage_{file_id}_{suffix}"));
+                            let _ = std::fs::remove_file(&zip_path);
+                            let _ = std::fs::remove_dir_all(&stage_dir);
+                            let url = format!(
+                                "https://apollo.furcadia.com/species{srv}/Avatar{avatar_id}.zip"
+                            );
+                            let mut cmd = furcadia_client::sys::command("curl");
+                            cmd.args(["-fsSL", "--max-time", "25"]);
+                            if let Some(ref existing) = if_newer_than {
+                                if existing.is_file() {
+                                    cmd.arg("-z").arg(existing);
+                                }
+                            }
+                            let curl_ok = cmd
+                                .arg("-o")
+                                .arg(&zip_path)
+                                .arg(&url)
+                                .output()
+                                .is_ok_and(|o| o.status.success());
+                            if curl_ok && zip_path.is_file() {
+                                let _ = std::fs::create_dir_all(&stage_dir);
+                                let unzip_ok = extract_zip_archive(&zip_path, &stage_dir).is_ok();
+                                if unzip_ok {
+                                    let found = FurcadiaApp::find_file_case_insensitive(
+                                        &stage_dir,
+                                        &dest_name,
+                                    )
                                     .or_else(|| {
                                         std::fs::read_dir(&stage_dir).ok().and_then(|rd| {
                                             rd.flatten()
@@ -13703,21 +14460,25 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                                                 .find(|p| {
                                                     p.extension()
                                                         .and_then(|s| s.to_str())
-                                                        .is_some_and(|e| e.eq_ignore_ascii_case("fox"))
+                                                        .is_some_and(|e| {
+                                                            e.eq_ignore_ascii_case("fox")
+                                                        })
                                                 })
                                         })
                                     });
-                                if let Some(src) = found {
-                                    if std::fs::rename(&src, &dest_path).is_ok()
-                                        || std::fs::copy(&src, &dest_path).is_ok()
-                                    {
-                                        final_path = Some(dest_path);
+                                    if let Some(src) = found {
+                                        if FoxArchive::load(&src).is_ok()
+                                            && replace_file_atomically(&src, &dest_path).is_ok()
+                                        {
+                                            final_path = Some(dest_path);
+                                        }
                                     }
                                 }
                             }
+                            let _ = std::fs::remove_file(&zip_path);
+                            let _ = std::fs::remove_dir_all(&stage_dir);
                         }
-                        let _ = std::fs::remove_file(&zip_path);
-                        let _ = std::fs::remove_dir_all(&stage_dir);
+                        let _ = std::fs::remove_file(&direct_tmp);
                         let _ = dl_tx.send(NetToUi::SpeciesDownloaded {
                             file_id,
                             path: final_path,
@@ -14160,6 +14921,21 @@ fn decompress_furcadia_lzw(src: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn replace_file_atomically(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if std::fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    if dst.exists() {
+        let _ = std::fs::remove_file(dst);
+        if std::fs::rename(src, dst).is_ok() {
+            return Ok(());
+        }
+    }
+    std::fs::copy(src, dst)?;
+    let _ = std::fs::remove_file(src);
+    Ok(())
+}
+
 fn extract_zip_archive(zip_path: &std::path::Path, dest_dir: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let out = furcadia_client::sys::command("tar")
@@ -14478,5 +15254,286 @@ mod tests {
         let encoded = [0x80 ^ 0xff, 0x10 ^ 0xff, 0x48 ^ 0xff, 0x50 ^ 0xff, 0x28 ^ 0xff, 0x08 ^ 0xff];
         let dec = decompress_furcadia_lzw(&encoded).expect("should decompress LZW");
         assert_eq!(dec, b"ABAB");
+    }
+
+    #[test]
+    fn parse_dynamic_avatar_details_uses_species_minus_135_and_separates_hop_flag() {
+        // Payload after `]M`: '%' + server_code ' ' + three 8-byte entries.
+        let mut data = vec![b'%', b' '];
+        // Entry 0: species_id = 164 (lo = 164, hi_and_flag = 1 -> hop=true)
+        data.extend_from_slice(&[36, 35, 35 + 164, 35 + 1, 35, 35, 35, 35]);
+        // Entry 1: species_id = 260 (220 * 1 + 40, hi_and_flag = 2 -> hop=false)
+        data.extend_from_slice(&[36, 35, 35 + 40, 35 + 2, 35, 35, 35, 35]);
+        // Entry 2: species_id = 10 (<= 135 -> skipped)
+        data.extend_from_slice(&[36, 35, 35 + 10, 35, 35, 35, 35, 35]);
+
+        let (srv, entries) = parse_dynamic_avatar_details(&data).expect("should parse ]M%");
+        assert_eq!(srv, None);
+        assert_eq!(entries, vec![(164, 29, true), (260, 125, false)]);
+    }
+
+    #[test]
+    fn resolve_species_spec_handles_stock_local_morphs_and_dynamic_avatars() {
+        let empty = HashMap::new();
+        assert_eq!(resolve_species_spec_with_dynamic(0, &empty), (1, 0));
+        assert_eq!(resolve_species_spec_with_dynamic(4, &empty), (4, 0));
+        assert_eq!(resolve_species_spec_with_dynamic(97, &empty), (104, 1));
+        assert_eq!(resolve_species_spec_with_dynamic(98, &empty), (106, 1));
+        assert_eq!(resolve_species_spec_with_dynamic(99, &empty), (119, 1));
+        assert_eq!(resolve_species_spec_with_dynamic(108, &empty), (108, 0));
+        assert_eq!(resolve_species_spec_with_dynamic(2104, &empty), (104, 1));
+        assert_eq!(resolve_species_spec_with_dynamic(1001, &empty), (1001, 0));
+        assert_eq!(
+            resolve_species_spec_with_dynamic(136, &empty),
+            (DYNAMIC_AVATAR_CACHE_BASE + 1, 0)
+        );
+        assert_eq!(
+            resolve_species_spec_with_dynamic(164, &empty),
+            (DYNAMIC_AVATAR_CACHE_BASE + 29, 0)
+        );
+
+        let with_hop = HashMap::from([(164u16, (29usize, true))]);
+        assert_eq!(
+            resolve_species_spec_with_dynamic(164, &with_hop),
+            (DYNAMIC_AVATAR_CACHE_BASE + 29, 0)
+        );
+        assert_eq!(
+            resolve_species_spec_with_dynamic(2164, &with_hop),
+            (DYNAMIC_AVATAR_CACHE_BASE + 29, 1)
+        );
+    }
+
+    #[test]
+    fn format_bytes_formats_human_readable_sizes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MB");
+    }
+
+    #[test]
+    fn split_chat_segments_highlights_brackets_in_chat_whispers_and_emotes() {
+        assert_eq!(
+            split_chat_segments("Hello [contained in these brackets] world", false, true),
+            vec![
+                ("Hello ", ChatSegmentKind::Normal),
+                ("[contained in these brackets]", ChatSegmentKind::Bracketed),
+                (" world", ChatSegmentKind::Normal),
+            ]
+        );
+        assert_eq!(
+            split_chat_segments("[ooc] hi [brb]", false, true),
+            vec![
+                ("[ooc]", ChatSegmentKind::Bracketed),
+                (" hi ", ChatSegmentKind::Normal),
+                ("[brb]", ChatSegmentKind::Bracketed),
+            ]
+        );
+        assert_eq!(
+            split_chat_segments("hey [outer [inner] end] ok", false, true),
+            vec![
+                ("hey ", ChatSegmentKind::Normal),
+                ("[outer [inner] end]", ChatSegmentKind::Bracketed),
+                (" ok", ChatSegmentKind::Normal),
+            ]
+        );
+        assert_eq!(
+            split_chat_segments("[oops [ok]", false, true),
+            vec![
+                ("[oops ", ChatSegmentKind::Normal),
+                ("[ok]", ChatSegmentKind::Bracketed),
+            ]
+        );
+        assert_eq!(
+            split_chat_segments("empty [] stays plain", false, true),
+            vec![("empty [] stays plain", ChatSegmentKind::Normal)]
+        );
+        assert_eq!(
+            split_chat_segments("waves \"hi [ooc] there\" [brb]", true, true),
+            vec![
+                ("waves ", ChatSegmentKind::Normal),
+                ("\"hi ", ChatSegmentKind::EmoteQuote),
+                ("[ooc]", ChatSegmentKind::Bracketed),
+                (" there\"", ChatSegmentKind::EmoteQuote),
+                (" ", ChatSegmentKind::Normal),
+                ("[brb]", ChatSegmentKind::Bracketed),
+            ]
+        );
+        assert_eq!(
+            split_chat_segments("waves [ooc: \"test\"]", true, true),
+            vec![
+                ("waves ", ChatSegmentKind::Normal),
+                ("[ooc: \"test\"]", ChatSegmentKind::Bracketed),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_highlight_brackets_only_targets_chat_and_whisper_styles() {
+        let base = furcadia_client::ChatStyle::default();
+        assert!(should_highlight_brackets(&base));
+
+        for name in ["speech", "myspeech", "emote", "whisper", "shout"] {
+            let st = furcadia_client::ChatStyle {
+                color: Some(name.to_owned()),
+                ..base.clone()
+            };
+            assert!(should_highlight_brackets(&st), "expected {name} to highlight brackets");
+        }
+
+        for name in ["success", "warning", "error", "emit", "system"] {
+            let st = furcadia_client::ChatStyle {
+                color: Some(name.to_owned()),
+                ..base.clone()
+            };
+            assert!(!should_highlight_brackets(&st), "did not expect {name} to highlight brackets");
+        }
+
+        let linked = furcadia_client::ChatStyle {
+            color: Some("speech".to_owned()),
+            link: Some("https://example.com".to_owned()),
+            ..base
+        };
+        assert!(!should_highlight_brackets(&linked));
+    }
+
+    #[test]
+    fn trade_and_gift_commands_route_as_speech_prefixed_commands() {
+        let assert_say = |raw: &str, peer: Option<&str>, expected_text: &str| {
+            let (cmd, open_tab) = classify_chat_input(raw, peer, false);
+            assert!(
+                open_tab.is_none(),
+                "unexpected whisper tab open for {raw:?}: {open_tab:?}"
+            );
+            match &cmd {
+                ClientCommand::Say(text) => {
+                    assert_eq!(text, expected_text, "input {raw:?}");
+                    assert_eq!(
+                        cmd.encode().unwrap(),
+                        format!("\"{expected_text}\n"),
+                        "wire encode for {raw:?}"
+                    );
+                }
+                other => panic!(
+                    "expected ClientCommand::Say for {raw:?}, got {:?}",
+                    other.encode()
+                ),
+            }
+        };
+
+        // Bare trade/gift/give-* commands in Main Chat.
+        for cmd_text in [
+            "trade-accept",
+            "trade-start Bentlay|Karthorn",
+            "trade-add portrait",
+            "trade-reason test",
+            "trade-status",
+            "gift-portrait Bentlay|Karthorn hi",
+            "give-rose Bentlay|Karthorn",
+        ] {
+            assert_say(cmd_text, None, cmd_text);
+        }
+
+        // Bare trade/gift/give-* commands in a Whisper tab must still send as speech, not whisper.
+        for cmd_text in [
+            "trade-accept",
+            "trade-start Bentlay|Karthorn",
+            "gift-portrait Bentlay|Karthorn hi",
+            "give-rose Bentlay|Karthorn",
+        ] {
+            assert_say(cmd_text, Some("Bentlay Karthorn"), cmd_text);
+        }
+
+        // Plain English starting with "give" or normal text in a Whisper tab must whisper.
+        for msg in ["give me a minute", "hello"] {
+            let (cmd, open_tab) = classify_chat_input(msg, Some("Bentlay Karthorn"), false);
+            assert!(open_tab.is_none());
+            match cmd {
+                ClientCommand::Whisper { target, message } => {
+                    assert_eq!(target, "Bentlay|Karthorn");
+                    assert_eq!(message, msg);
+                }
+                other => panic!(
+                    "expected ClientCommand::Whisper for {msg:?}, got {:?}",
+                    other.encode()
+                ),
+            }
+        }
+
+        // Slash-prefixed trade/gift/give commands strip '/' and route as speech.
+        for (input, expected) in [
+            ("/trade-accept", "trade-accept"),
+            ("/trade-add portrait", "trade-add portrait"),
+            ("/trade-start Bentlay|Karthorn", "trade-start Bentlay|Karthorn"),
+            ("/gift-portrait Bentlay|Karthorn hi", "gift-portrait Bentlay|Karthorn hi"),
+            ("/give Bentlay|Karthorn", "give Bentlay|Karthorn"),
+        ] {
+            assert_say(input, None, expected);
+            assert_say(input, Some("Bentlay Karthorn"), expected);
+        }
+
+        // Backtick-prefixed speech commands vs raw server commands.
+        for (input, expected) in [
+            ("`trade-accept", "trade-accept"),
+            ("`gift-portrait Bentlay|Karthorn", "gift-portrait Bentlay|Karthorn"),
+        ] {
+            assert_say(input, None, expected);
+        }
+        for (input, expected) in [("`info", "info"), ("`who", "who")] {
+            let (cmd, open_tab) = classify_chat_input(input, None, false);
+            assert!(open_tab.is_none());
+            match cmd {
+                ClientCommand::Raw(text) => assert_eq!(text, expected, "input {input:?}"),
+                other => panic!(
+                    "expected ClientCommand::Raw for {input:?}, got {:?}",
+                    other.encode()
+                ),
+            }
+        }
+
+        // Escape hatch /raw sends verbatim ClientCommand::Raw.
+        let (raw_cmd, open_tab) = classify_chat_input("/raw trade-accept", None, false);
+        assert!(open_tab.is_none());
+        match raw_cmd {
+            ClientCommand::Raw(text) => assert_eq!(text, "trade-accept"),
+            other => panic!("expected ClientCommand::Raw, got {:?}", other.encode()),
+        }
+
+        // command:// links and helper menus format wire string appropriately.
+        assert_eq!(format_raw_cmd_wire("trade-accept"), "\"trade-accept");
+        assert_eq!(format_raw_cmd_wire("gift-portrait Foo"), "\"gift-portrait Foo");
+        assert_eq!(format_raw_cmd_wire("info"), "info");
+    }
+
+    #[test]
+    fn trade_menu_command_building_and_wire_encoding() {
+        assert_eq!(
+            build_trade_command("trade-add", " portrait ").as_deref(),
+            Some("trade-add portrait")
+        );
+        assert_eq!(
+            build_trade_command("trade-add", " GD 50 ").as_deref(),
+            Some("trade-add GD 50")
+        );
+        assert_eq!(
+            build_trade_command("trade-reason", "art\ncommission\r\n").as_deref(),
+            Some("trade-reason art commission")
+        );
+        assert_eq!(build_trade_command("trade-remove", "   \n\t "), None);
+
+        for cmd in [
+            "trade-start Kari#SO",
+            "trade-start Bentlay|Karthorn",
+            "trade-status",
+            "trade-add portrait",
+            "trade-add GD 50",
+            "trade-remove portrait",
+            "trade-reason commission",
+            "trade-accept",
+            "trade-reject",
+            "trade-end",
+        ] {
+            assert_eq!(format_raw_cmd_wire(cmd), format!("\"{cmd}"));
+        }
     }
 }
