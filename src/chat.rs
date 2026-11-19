@@ -124,15 +124,21 @@ pub fn parse_chat_line(input: &str) -> ChatLine {
             }
             let after_lt = &rest[lt + 1..];
             if let Some(gt) = after_lt.find('>') {
-                let raw_tag = after_lt[..gt].trim();
-                rest = &after_lt[gt + 1..];
-                handle_tag(raw_tag, &mut channel, &mut spans, &mut style_stack, &mut in_name_tag);
-            } else {
-                let decoded = unescape_html(&rest[lt..]);
-                let clean = clean_furcadia_text(&decoded, in_name_tag > 0);
-                push_text(&mut spans, &clean, style_stack.last().unwrap());
-                break;
+                let raw_tag = &after_lt[..gt];
+                if is_plausible_html_tag(raw_tag) {
+                    rest = &after_lt[gt + 1..];
+                    handle_tag(
+                        raw_tag.trim(),
+                        &mut channel,
+                        &mut spans,
+                        &mut style_stack,
+                        &mut in_name_tag,
+                    );
+                    continue;
+                }
             }
+            push_text(&mut spans, "<", style_stack.last().unwrap());
+            rest = after_lt;
         } else {
             let decoded = unescape_html(rest);
             let clean = clean_furcadia_text(&decoded, in_name_tag > 0);
@@ -142,6 +148,33 @@ pub fn parse_chat_line(input: &str) -> ChatLine {
     }
 
     ChatLine { channel, spans }
+}
+
+/// Returns `true` only when the slice between `<` and `>` looks like an actual
+/// HTML/Furcadia markup tag (e.g. `font color='whisper'`, `/name`, `br/`), so
+/// literal `<` characters in chat (like `>.<`, `<3`, or `a < b`) do not swallow
+/// subsequent text or real tags such as `<name ...>`.
+fn is_plausible_html_tag(raw: &str) -> bool {
+    if raw.is_empty() || raw.contains('<') {
+        return false;
+    }
+    let body = raw.strip_prefix('/').unwrap_or(raw);
+    let mut chars = body.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    for ch in chars {
+        if ch.is_ascii_whitespace() || ch == '/' {
+            break;
+        }
+        if !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':')) {
+            return false;
+        }
+    }
+    true
 }
 
 fn push_text(spans: &mut Vec<ChatSpan>, text: &str, style: &ChatStyle) {
@@ -467,5 +500,34 @@ mod tests {
 
         let no_double = parse_chat_line("&amp;#39;");
         assert_eq!(no_double.to_plain_text(), "&#39;");
+    }
+
+    #[test]
+    fn parse_whisper_with_literal_less_than_preserves_name_tag() {
+        let raw = "<font color='whisper'>[ You whisper \"oops >.<\" to <name shortname='harryhardacre'>Harry|Hardacre</name>. ]</font>";
+        let parsed = parse_chat_line(raw);
+        assert_eq!(
+            parsed.to_plain_text(),
+            "[ You whisper \"oops >.<\" to Harry Hardacre. ]"
+        );
+        assert!(parsed.spans.iter().any(|s| matches!(
+            s,
+            ChatSpan::Text { text, style }
+                if text == "Harry Hardacre" && style.link.as_deref() == Some("name://harryhardacre")
+        )));
+
+        let incoming = "<font color='whisper'>[ <name shortname='harryhardacre'>Harry|Hardacre</name> whispers, \"a < b and <3 and >.<\" to you. ]</font>";
+        let parsed_in = parse_chat_line(incoming);
+        assert_eq!(
+            parsed_in.to_plain_text(),
+            "[ Harry Hardacre whispers, \"a < b and <3 and >.<\" to you. ]"
+        );
+
+        let unclosed_alpha = "<font color='whisper'>[ You whisper \"hi <foo\" to <name shortname='bob'>Bob</name>. ]</font>";
+        let parsed_alpha = parse_chat_line(unclosed_alpha);
+        assert_eq!(
+            parsed_alpha.to_plain_text(),
+            "[ You whisper \"hi <foo\" to Bob. ]"
+        );
     }
 }

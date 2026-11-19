@@ -285,10 +285,58 @@ fn ensure_single_line(s: &str) -> Result<(), ProtocolError> {
     }
 }
 
-/// Furcadia treats a literal `<3` as the start of a markup tag unless the
-/// angle bracket is entity-escaped on the wire.
-fn escape_analogue_heart(text: &str) -> String {
-    text.replace("<3", "&lt;3")
+/// Furcadia parses raw `<` in say/whisper payloads as HTML markup, so any
+/// literal `<` (such as `>.<`, `<3`, `a < b`, or `<blushes>`) breaks the
+/// server's surrounding `<name>`/`</font>` tags unless entity-escaped on the
+/// wire. Preserve player formatting tags (`<b>`, `<i>`, `<u>`, `<strong>`,
+/// `<em>`, `<a href=...>`, and their closing tags).
+fn escape_chat_markup(text: &str) -> String {
+    if !text.contains('<') {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let after_lt = &rest[lt + 1..];
+        if let Some(gt) = after_lt.find('>') {
+            let inside = &after_lt[..gt];
+            if is_allowed_chat_tag(inside) {
+                out.push('<');
+                out.push_str(inside);
+                out.push('>');
+                rest = &after_lt[gt + 1..];
+                continue;
+            }
+        }
+        out.push_str("&lt;");
+        rest = after_lt;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_allowed_chat_tag(inside: &str) -> bool {
+    if inside.is_empty() || inside.contains('<') {
+        return false;
+    }
+    let trimmed = inside.trim();
+    if let Some(closing) = trimmed.strip_prefix('/') {
+        let name = closing.trim().to_ascii_lowercase();
+        return matches!(name.as_str(), "b" | "i" | "u" | "strong" | "em" | "a");
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(lower.as_str(), "b" | "i" | "u" | "strong" | "em") {
+        return true;
+    }
+    if let Some(rest) = lower.strip_prefix('a') {
+        return rest
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_whitespace())
+            && rest.contains("href=");
+    }
+    false
 }
 
 const PW_BASE_INFO: &str = "IP=192.168.0.3 H=155d414c R=16587 D=2087772 U=8242621 T=bcgfefdfa M=1600x900 V=31.2-Final ";
@@ -502,7 +550,7 @@ impl ClientCommand {
             }
             Self::Say(text) => {
                 ensure_single_line(text)?;
-                format!("\"{}", escape_analogue_heart(text))
+                format!("\"{}", escape_chat_markup(text))
             }
             Self::Whisper { target, message } => {
                 if target.trim().is_empty() {
@@ -510,7 +558,7 @@ impl ClientCommand {
                 }
                 ensure_single_line(target)?;
                 ensure_single_line(message)?;
-                format!("wh {target} {}", escape_analogue_heart(message))
+                format!("wh {target} {}", escape_chat_markup(message))
             }
             Self::Move(dir) => format!("m {dir}"),
             Self::OnlineCheck(name) => {
@@ -686,5 +734,33 @@ mod tests {
         assert_eq!(sig.len(), 32);
         let expected_sig = md5_hex(format!("{prefix}P={PW_CLIENT_SALT}").as_bytes());
         assert_eq!(sig, expected_sig);
+    }
+
+    #[test]
+    fn encode_chat_and_whisper_escapes_literal_lt_but_keeps_formatting_tags() {
+        assert_eq!(
+            ClientCommand::Whisper {
+                target: "Harry|Hardacre".into(),
+                message: "oops >.<".into(),
+            }
+            .encode()
+            .unwrap(),
+            "wh Harry|Hardacre oops >.&lt;\n"
+        );
+        assert_eq!(
+            ClientCommand::Whisper {
+                target: "Harry|Hardacre".into(),
+                message: "<b>bold</b> and <i>italic >.<</i> <3 a < b".into(),
+            }
+            .encode()
+            .unwrap(),
+            "wh Harry|Hardacre <b>bold</b> and <i>italic >.&lt;</i> &lt;3 a &lt; b\n"
+        );
+        assert_eq!(
+            ClientCommand::Say("<a href='https://example.com'>hi</a> <blushes>".into())
+                .encode()
+                .unwrap(),
+            "\"<a href='https://example.com'>hi</a> &lt;blushes>\n"
+        );
     }
 }
