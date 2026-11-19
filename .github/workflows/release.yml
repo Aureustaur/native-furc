@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v1.2.0 — Taskbar Flash, Nickname Mentions & Polish"
+          name: "Furcadia Native Client v1.2.1 — Whisper '<' Fix & Ctrl+W Tab Closing"
           body: |
-            ## Furcadia Native Client v1.2.0 — Taskbar Flash, Nickname Mentions & Polish
+            ## Furcadia Native Client v1.2.1 — Whisper '<' Fix & Ctrl+W Tab Closing
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -100,28 +100,26 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.2.0
-            - **Taskbar Flash (`RequestUserAttention`)**: flashes/highlights the taskbar when unfocused on incoming whispers and mentions (configurable ON/OFF in **Settings -> General**), with an optional toggle to also flash on any Main Chat message and automatic reset on window focus.
-            - **Main Chat Mention & Nickname Watcher**: watches Main Chat across both active and background character tabs for your character's name plus custom comma-separated **Nicknames to alert on**, using word-boundary matching to avoid partial-word false positives and ignoring self/system lines.
-            - **Quick `Mentions: ON / OFF` Toggle**: added a one-click mention-alert toggle right alongside `+Char Window` and `+Char Tab` in the left sidebar.
-            - Includes the `v1.1.8` posture fix (`Ctrl+L`, sidebar **Lie Down**, and self-menu **Lay Down** sending `liedown` with live server pose syncing).
+            ### What's New in v1.2.1
+            - **Fixed literal `<` breaking whispers** (such as `>.<`, `<3`, or `a < b`): incoming markup parsing now only treats plausible HTML/Furcadia tags as tags so literal `<` no longer swallows `" to <name ...>` or drops whispers into Main Chat, and outgoing `Say` / `Whisper` wire encoding escapes non-formatting `<` to `&lt;` while preserving `<b>`, `<i>`, `<u>`, `<strong>`, `<em>`, and `<a href=...>`.
+            - **`Ctrl+W` closes active tabs**: closes the active whisper tab (switching to the adjacent open whisper tab or Main Chat without ever disconnecting your character), closes focused detached whisper windows, and closes the Settings tab. `F4` remains the shortcut for **Who**.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.2.0-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.2.1-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.2.0_amd64.deb
+            sudo apt install ./furcadia-native_1.2.1_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.2.0-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.2.1-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

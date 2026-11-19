@@ -8008,6 +8008,13 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 if v_ctx.input(|i| i.viewport().close_requested()) {
                     dock_back = true;
                 }
+                if v_ctx.input(|i| {
+                    (i.modifiers.ctrl || i.modifiers.command)
+                        && !i.modifiers.shift
+                        && i.key_pressed(egui::Key::W)
+                }) {
+                    close_win = true;
+                }
                 if let Some(w) = self
                     .whispers
                     .iter_mut()
@@ -9207,7 +9214,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         ),
                         (
                             "Audio, Views & System",
-                            "Ctrl+P: Toggle sound  |  Ctrl+O: Toggle music  |  Ctrl+Y: Test/re-init sound\nCtrl+N: Reload dream patches  |  F11: Cycle animation speed (Full/Half/Off)\nCtrl+D: Switch chat/whisper tab  |  Ctrl+F: Font picker  |  F4 / Ctrl+W: Who",
+                            "Ctrl+P: Toggle sound  |  Ctrl+O: Toggle music  |  Ctrl+Y: Test/re-init sound\nCtrl+N: Reload dream patches  |  F11: Cycle animation speed (Full/Half/Off)\nCtrl+D: Switch chat/whisper tab  |  Ctrl+W: Close active tab  |  Ctrl+F: Font picker  |  F4: Who",
                         ),
                     ] {
                         ui.label(RichText::new(cat).strong().color(accent));
@@ -9310,6 +9317,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         let mut cycle_anim = false;
         let mut cycle_posture = false;
         let mut switch_chat_tab = false;
+        let mut close_active_tab = false;
         let mut toggle_font = false;
         let mut toggle_help = false;
         let mut clear_input = false;
@@ -9333,8 +9341,10 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 raw_cmd = Some("get");
             } else if i.key_pressed(egui::Key::F3) || (ctrl && i.key_pressed(egui::Key::U)) {
                 raw_cmd = Some("use");
-            } else if i.key_pressed(egui::Key::F4) || (ctrl && i.key_pressed(egui::Key::W)) {
+            } else if i.key_pressed(egui::Key::F4) {
                 send_who = true;
+            } else if ctrl && !shift && i.key_pressed(egui::Key::W) {
+                close_active_tab = true;
             } else if i.key_pressed(egui::Key::F5) {
                 self.chat_scroll_delta += 140.0;
             } else if i.key_pressed(egui::Key::F6) {
@@ -9523,6 +9533,11 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 self.switch_chat_tab(Some(w.peer.clone()));
             }
         }
+        if close_active_tab {
+            if let Some(peer) = self.active_chat_tab.clone() {
+                self.close_whisper_tab(&peer);
+            }
+        }
         if toggle_font {
             self.font_popup_open = !self.font_popup_open;
         }
@@ -9534,7 +9549,65 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         }
     }
 
+    fn close_whisper_tab(&mut self, peer: &str) {
+        let was_active = self
+            .active_chat_tab
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(peer));
+        let docked_peers: Vec<String> = self
+            .whispers
+            .iter()
+            .filter(|w| !w.detached)
+            .map(|w| w.peer.clone())
+            .collect();
+        let closed_docked_idx = docked_peers
+            .iter()
+            .position(|p| p.eq_ignore_ascii_case(peer));
+
+        self.whispers
+            .retain(|w| !w.peer.eq_ignore_ascii_case(peer));
+
+        if was_active {
+            let remaining_docked: Vec<String> = self
+                .whispers
+                .iter()
+                .filter(|w| !w.detached)
+                .map(|w| w.peer.clone())
+                .collect();
+            let next_tab = closed_docked_idx.and_then(|idx| {
+                remaining_docked
+                    .get(idx)
+                    .or_else(|| idx.checked_sub(1).and_then(|prev| remaining_docked.get(prev)))
+                    .cloned()
+            });
+            if let Some(ref next_peer) = next_tab {
+                if let Some(w) = self
+                    .whispers
+                    .iter_mut()
+                    .find(|w| w.peer.eq_ignore_ascii_case(next_peer))
+                {
+                    w.unread = 0;
+                }
+            } else {
+                self.main_chat_unread = 0;
+            }
+            self.switch_chat_tab(next_tab);
+            self.focus_chat_input = true;
+        }
+    }
+
     fn render_in_game_screen(&mut self, ctx: &egui::Context) {
+        let mut closed_settings_this_frame = false;
+        if self.show_settings_tab
+            && ctx.input(|i| {
+                (i.modifiers.ctrl || i.modifiers.command)
+                    && !i.modifiers.shift
+                    && i.key_pressed(egui::Key::W)
+            })
+        {
+            self.show_settings_tab = false;
+            closed_settings_this_frame = true;
+        }
         if self.show_settings_tab {
             self.render_detached_viewports(ctx);
             self.render_sidebar(ctx);
@@ -9549,7 +9622,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 });
             return;
         }
-        self.handle_in_game_hotkeys(ctx);
+        if !closed_settings_this_frame {
+            self.handle_in_game_hotkeys(ctx);
+        }
         self.render_detached_viewports(ctx);
         self.render_sidebar(ctx);
 
@@ -9969,17 +10044,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 });
 
                 if let Some(peer) = close_peer {
-                    if self
-                        .active_chat_tab
-                        .as_deref()
-                        .is_some_and(|a| a.eq_ignore_ascii_case(&peer))
-                    {
-                        self.switch_chat_tab(None);
-                        self.main_chat_unread = 0;
-                        self.focus_chat_input = true;
-                    }
-                    self.whispers
-                        .retain(|w| !w.peer.eq_ignore_ascii_case(&peer));
+                    self.close_whisper_tab(&peer);
                 }
 
                 ui.separator();
