@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "furcadia-client"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "bzip2-rs",
  "eframe",
@@ -1161,6 +1161,7 @@ dependencies = [
  "lzma-rs",
  "openssl",
  "openssl-sys",
+ "zbus",
 ]
 
 [[package]]

@@ -21,7 +21,9 @@ use furcadia_client::{
         load_shared_whisper_log, load_whisper_log, peer_shortname_key, prune_old_logs,
         SHARED_LOG_GROUP,
     },
-    parse_chat_line, unescape_html,
+    parse_chat_line,
+    tray::{spawn_tray, TrayAction, TrayHandle},
+    unescape_html,
     win_import::{discover_default_windows_furcadia_dirs, import_windows_furcadia_dir},
     AccountInfo, AssetLocator, Avatar, AvatarAppearance, ChatLine, ChatSpan, CharacterSummary,
     ClientCommand, ClientConfig, ConnectionConfig, FoxArchive, FoxAvatarShape, FoxFrame, FoxLayer,
@@ -1561,6 +1563,10 @@ struct FurcadiaApp {
     music_enabled: bool,
     minimize_to_tray: bool,
     close_to_tray: bool,
+    tray: TrayHandle,
+    hidden_in_tray: bool,
+    was_minimized: bool,
+    allow_quit: bool,
     font_family: String,
     font_size: u16,
     chat_font_size: u16,
@@ -1917,6 +1923,16 @@ impl FurcadiaApp {
             music_enabled: cfg.music_enabled,
             minimize_to_tray: cfg.minimize_to_tray,
             close_to_tray: cfg.close_to_tray,
+            tray: {
+                let tray_ctx = cc.egui_ctx.clone();
+                spawn_tray(
+                    include_bytes!("../../packaging/linux/furcadia-native.png"),
+                    move || tray_ctx.request_repaint(),
+                )
+            },
+            hidden_in_tray: false,
+            was_minimized: false,
+            allow_quit: false,
             font_family: cfg.font_family.clone(),
             font_size: cfg.font_size,
             chat_font_size: cfg.chat_font_size,
@@ -2846,6 +2862,24 @@ impl FurcadiaApp {
     }
 
     fn load_log_file_into_viewer(&mut self, path: std::path::PathBuf) {
+        let is_whisper = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("whispers"));
+        if self.log_viewer_char == SHARED_LOG_GROUP && is_whisper {
+            if let (Some(root), Some(stem)) = (
+                default_logs_root(),
+                path.file_stem().and_then(|s| s.to_str()),
+            ) {
+                let merged = load_shared_whisper_log(&root, stem, usize::MAX);
+                if !merged.is_empty() {
+                    self.log_viewer_content = merged.join("\n");
+                    self.log_viewer_selected = Some(path);
+                    return;
+                }
+            }
+        }
         self.log_viewer_content = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| format!("Failed to read {}: {e}", path.display()));
         self.log_viewer_selected = Some(path);
@@ -3037,15 +3071,6 @@ impl FurcadiaApp {
                             )
                         };
                         if let Some(peer) = peer {
-                            if self.logging_enabled && self.log_whispers {
-                                if let Some(dir) = default_logs_dir() {
-                                    if self.shared_logs_mode {
-                                        let _ = append_shared_whisper_log(&dir, &sess.char_name, &peer, &plain);
-                                    } else {
-                                        let _ = append_whisper_log(&dir, &sess.char_name, &peer, &plain);
-                                    }
-                                }
-                            }
                             sess.unread_count += 1;
                             let formatted =
                                 format_whisper_tab_line(&sess.char_name, &peer, &plain, &line);
@@ -3068,6 +3093,15 @@ impl FurcadiaApp {
                                 w.unread = 1;
                                 w.lines.push(formatted);
                                 sess.whispers.push(w);
+                            }
+                            if self.logging_enabled && self.log_whispers {
+                                if let Some(dir) = default_logs_dir() {
+                                    if self.shared_logs_mode {
+                                        let _ = append_shared_whisper_log(&dir, &sess.char_name, &peer, &plain);
+                                    } else {
+                                        let _ = append_whisper_log(&dir, &sess.char_name, &peer, &plain);
+                                    }
+                                }
                             }
                             if !plain.starts_with("[ You whisper ") && !plain.starts_with("You whisper ") {
                                 events_for_notify.push((
@@ -4971,10 +5005,10 @@ impl FurcadiaApp {
                     )
                 };
                 if let Some(peer) = peer {
-                    self.log_whisper_line(&peer, &plain);
                     let self_name = self.active_character_name();
                     let formatted = format_whisper_tab_line(&self_name, &peer, &plain, &line);
                     let idx = self.open_whisper_tab(&peer, false);
+                    self.log_whisper_line(&peer, &plain);
                     let is_focused = !self.whispers[idx].detached
                         && self
                             .active_chat_tab
@@ -5716,14 +5750,67 @@ fn classify_chat_input(
     (cmd, open_whisper_tab_disp)
 }
 
+impl FurcadiaApp {
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        if self.tray.is_active() {
+            self.hidden_in_tray = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+    }
+
+    fn show_from_tray(&mut self, ctx: &egui::Context) {
+        self.hidden_in_tray = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    fn poll_tray_events(&mut self, ctx: &egui::Context) {
+        while let Some(action) = self.tray.try_recv() {
+            match action {
+                TrayAction::Toggle => {
+                    let is_minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+                    if self.hidden_in_tray || is_minimized {
+                        self.show_from_tray(ctx);
+                    } else {
+                        self.hide_to_tray(ctx);
+                    }
+                }
+                TrayAction::Show => self.show_from_tray(ctx),
+                TrayAction::Hide => self.hide_to_tray(ctx),
+                TrayAction::Quit => {
+                    self.allow_quit = true;
+                    self.hidden_in_tray = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+}
+
 impl eframe::App for FurcadiaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_font_settings(ctx);
+        self.poll_tray_events(ctx);
         self.window_focused = ctx.input(|i| i.focused);
-        if self.close_to_tray && ctx.input(|i| i.viewport().close_requested()) {
+        if self.close_to_tray && !self.allow_quit && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.hide_to_tray(ctx);
         }
+        let is_minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+        if self.minimize_to_tray
+            && is_minimized
+            && !self.was_minimized
+            && !self.hidden_in_tray
+            && self.tray.is_active()
+        {
+            self.hide_to_tray(ctx);
+        }
+        self.was_minimized = is_minimized;
 
         self.handle_net_events(ctx);
         self.poll_bg_sessions();
@@ -6038,6 +6125,7 @@ impl FurcadiaApp {
                         .spawn()
                     {
                         Ok(_) => {
+                            self.allow_quit = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                         Err(e) => {
@@ -6291,7 +6379,10 @@ impl FurcadiaApp {
                                         // exits immediately, keep this window open and show why.
                                         thread::sleep(Duration::from_millis(600));
                                         match child.try_wait() {
-                                            Ok(None) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                                            Ok(None) => {
+                                                self.allow_quit = true;
+                                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                            }
                                             Ok(Some(status)) => {
                                                 self.update_install_state = UpdateInstallState::Failed(
                                                     format!("The updated client exited during startup ({status})."),
@@ -6747,6 +6838,7 @@ impl FurcadiaApp {
                         .clicked()
                     {
                         self.shared_logs_mode = true;
+                        self.log_viewer_char = SHARED_LOG_GROUP.to_owned();
                         self.save_config();
                     }
                     if ui
@@ -6754,6 +6846,7 @@ impl FurcadiaApp {
                         .clicked()
                     {
                         self.shared_logs_mode = false;
+                        self.log_viewer_char = self.active_character_wire_name();
                         self.save_config();
                     }
                 });
@@ -9048,6 +9141,16 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 {
                                     self.open_log_viewer();
                                 }
+                                if self.tray.is_active()
+                                    && ui
+                                        .add(
+                                            egui::Button::new("Hide to Tray")
+                                                .min_size(Vec2::new(112.0, 26.0)),
+                                        )
+                                        .clicked()
+                                {
+                                    self.hide_to_tray(ctx);
+                                }
                                 if ui
                                     .add(egui::Button::new("Forums").min_size(Vec2::new(112.0, 26.0)))
                                     .clicked()
@@ -9684,9 +9787,6 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     ui.separator();
                     if ui.small_button("Who").on_hover_text("Who is online (F4)").clicked() && self.is_connected {
                         let _ = self.to_net.send(UiToNet::Send(ClientCommand::Who));
-                    }
-                    if ui.small_button("Time").on_hover_text("Furcadia Standard Time").clicked() && self.is_connected {
-                        let _ = self.to_net.send(UiToNet::Send(ClientCommand::Raw("time".into())));
                     }
                     let anim_label = format!("Anim: {}", self.anim_mode);
                     if ui.small_button(anim_label).on_hover_text("Cycle animation speed (Full / Half / Off)").clicked() {

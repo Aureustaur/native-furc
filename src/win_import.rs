@@ -376,8 +376,14 @@ pub fn import_windows_furcadia_dir(
         .into_iter()
         .map(|p| (p, 0))
         .collect();
-    let logs_dest =
-        default_logs_dir().map(|d| d.join(crate::logs::sanitize_segment(target_character)));
+    let shared_logs = crate::config::ClientConfig::load_default().shared_logs_mode;
+    let logs_dest = default_logs_dir().map(|d| {
+        if shared_logs {
+            d
+        } else {
+            d.join(crate::logs::sanitize_segment(target_character))
+        }
+    });
 
     while let Some((dir, depth)) = stack.pop() {
         if depth > 12 {
@@ -438,7 +444,12 @@ pub fn import_windows_furcadia_dir(
                                     path.file_stem().and_then(|s| s.to_str()).unwrap_or(fname),
                                 )
                             });
-                        Some(dest_root.join("whispers").join(format!("{peer}.txt")))
+                        let file_stem = if shared_logs {
+                            crate::logs::peer_shortname_key(&peer)
+                        } else {
+                            crate::logs::sanitize_segment(&peer)
+                        };
+                        Some(dest_root.join("whispers").join(format!("{file_stem}.txt")))
                     } else {
                         imported_log_destination(&path, &logs_root, dest_root)
                     };
@@ -463,9 +474,14 @@ pub fn import_windows_furcadia_dir(
                             if let Ok(bytes) = fs::read(&path) {
                                 let converted = convert_windows_html_log(&decode_windows_log(&bytes));
                                 let peer = whisper_peer_name(&converted, target_character, stem);
+                                let file_stem = if shared_logs {
+                                    crate::logs::peer_shortname_key(&peer)
+                                } else {
+                                    crate::logs::sanitize_segment(&peer)
+                                };
                                 let dest = dest_root
                                     .join("whispers")
-                                    .join(format!("{}.txt", crate::logs::sanitize_segment(&peer)));
+                                    .join(format!("{file_stem}.txt"));
                                 if let Some(parent) = dest.parent() {
                                     let _ = fs::create_dir_all(parent);
                                 }

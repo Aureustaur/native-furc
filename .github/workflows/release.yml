@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v1.2.1 — Whisper '<' Fix & Ctrl+W Tab Closing"
+          name: "Furcadia Native Client v1.2.2 — Furcadia-Style Logs, Linux System Tray & Polish"
           body: |
-            ## Furcadia Native Client v1.2.1 — Whisper '<' Fix & Ctrl+W Tab Closing
+            ## Furcadia Native Client v1.2.2 — Furcadia-Style Logs, Linux System Tray & Polish
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -100,26 +100,30 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.2.1
-            - **Fixed literal `<` breaking whispers** (such as `>.<`, `<3`, or `a < b`): incoming markup parsing now only treats plausible HTML/Furcadia tags as tags so literal `<` no longer swallows `" to <name ...>` or drops whispers into Main Chat, and outgoing `Say` / `Whisper` wire encoding escapes non-formatting `<` to `&lt;` while preserving `<b>`, `<i>`, `<u>`, `<strong>`, `<em>`, and `<a href=...>`.
-            - **`Ctrl+W` closes active tabs**: closes the active whisper tab (switching to the adjacent open whisper tab or Main Chat without ever disconnecting your character), closes focused detached whisper windows, and closes the Settings tab. `F4` remains the shortcut for **Who**.
+            ### What's New in v1.2.2
+            - **Fixed Furcadia-style logging & missing latest whisper logs**:
+              - Whisper history loading now parses timestamps chronologically across `MM/DD/YY HH:MM:SS`, `MM/DD/YYYY HH:MM:SS`, and legacy `[YYYY-MM-DD HH:MM:SS]` formats so older years (e.g. Dec 2025) and legacy bracketed lines no longer sort after or evict today's latest whispers.
+              - Whisper logs now use local time (`MM/DD/YY HH:MM:SS`, no `*` suffix) and official Furcadia format (`<Speaker>: <message>` and `* <Speaker> <emote>`), preserving your active character name across shared logs.
+              - Shared Log Viewer (`Shared (All Characters)`) and the whisper tab `History` button now deduplicate whisper peers and display the full merged chronological history; Windows log imports now respect shared-log mode.
+            - **Linux System Tray (`StatusNotifierItem`)**: added a native D-Bus tray icon and context menu (**Show / Hide Furcadia**, **Quit Furcadia**) for KDE Plasma / Wayland, Waybar, Hyprland, GNOME AppIndicator, and XFCE, wiring up **Close to tray**, **Minimize to tray**, and a **Misc -> Hide to Tray** button.
+            - **UI Cleanup**: removed the non-functional **Time** button from the top bar.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.2.1-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.2.2-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.2.1_amd64.deb
+            sudo apt install ./furcadia-native_1.2.2_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.2.1-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.2.2-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

@@ -16,6 +16,7 @@ pub mod pounce;
 pub mod protocol;
 pub mod rch;
 pub mod sys;
+pub mod tray;
 pub mod win_import;
 pub mod world;
 
