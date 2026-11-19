@@ -159,11 +159,10 @@ pub fn append_chat_log(base_dir: &Path, character: &str, text: &str) -> io::Resu
 }
 
 /// Appends a timestamped line to `<logs_dir>/YYYY-MM-DD.txt` (Furcadia-style shared chat log).
-pub fn append_shared_chat_log(base_dir: &Path, character: &str, text: &str) -> io::Result<()> {
+pub fn append_shared_chat_log(base_dir: &Path, _character: &str, text: &str) -> io::Result<()> {
     let now = SystemTime::now();
     let (y, m, d, _, _, _) = system_time_to_ymd_hms(now);
     let file = base_dir.join(format!("{y:04}-{m:02}-{d:02}.txt"));
-    let _ = append_chat_log(base_dir, character, text);
     append_line_to(&file, &format!("{} {text}", default_client_timestamp(now)))
 }
 
@@ -188,17 +187,16 @@ pub fn append_whisper_log(
 }
 
 /// Appends a timestamped whisper line to the Furcadia-style shared folder `<logs_dir>/whispers/<peer_shortname>.txt`
-/// (and also updates the per-character whisper file so switching modes never loses lines).
+/// (without duplicating into per-character whisper folders).
 pub fn append_shared_whisper_log(
     base_dir: &Path,
-    character: &str,
+    _character: &str,
     peer: &str,
     text: &str,
 ) -> io::Result<()> {
     let now = SystemTime::now();
     let stamp = default_client_timestamp(now);
     let formatted = format!("{stamp} {text}");
-    let _ = append_whisper_log(base_dir, character, peer, text);
     let peer_key = peer_shortname_key(peer);
     let shared_file = base_dir.join("whispers").join(format!("{peer_key}.txt"));
     append_line_to(&shared_file, &formatted)
@@ -364,6 +362,14 @@ pub fn prune_old_logs(base_dir: &Path, retention_days: u32) -> usize {
     removed
 }
 
+fn has_log_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log"))
+}
+
 fn has_shared_root_logs(base_dir: &Path) -> bool {
     if !all_whisper_dirs(base_dir).is_empty() {
         return true;
@@ -373,12 +379,19 @@ fn has_shared_root_logs(base_dir: &Path) -> bool {
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        if p.is_file()
-            && p.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log"))
-        {
+        if has_log_file(&p) {
             return true;
+        }
+        if p.is_dir()
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("device-"))
+        {
+            if let Ok(sub_entries) = fs::read_dir(&p) {
+                if sub_entries.flatten().any(|sub| has_log_file(&sub.path())) {
+                    return true;
+                }
+            }
         }
     }
     false
@@ -598,5 +611,38 @@ mod tests {
         assert!(shared_loaded.iter().any(|l| l.ends_with("Shared whisper line")));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn shared_logs_write_single_bucket_without_character_dirs() {
+        let base = std::env::temp_dir().join(format!(
+            "furc_shared_logs_test_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&base);
+
+        append_shared_chat_log(&base, "Amala|Devi", "Shared chat line").unwrap();
+        append_shared_whisper_log(&base, "Amala|Devi", "Sunni McCalister", "Shared whisper").unwrap();
+
+        assert_eq!(list_log_characters(&base), vec![SHARED_LOG_GROUP.to_owned()]);
+        assert!(!base.join("Amala_Devi").exists());
+        assert!(!base.join("Amala|Devi").exists());
+
+        let files = list_log_files(&base, SHARED_LOG_GROUP);
+        assert_eq!(files.len(), 2);
+
+        let loaded = load_shared_whisper_log(&base, "sunnimccalister", 10);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].ends_with("Shared whisper"));
+
+        let synced = base.join("synced_only");
+        append_line_to(&synced.join("device-test").join("2026-11-19.txt"), "Synced chat").unwrap();
+        assert_eq!(list_log_characters(&synced), vec![SHARED_LOG_GROUP.to_owned()]);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

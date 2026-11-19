@@ -51,7 +51,7 @@ Alongside the graphical desktop client (`furc-gui`), the repository provides a s
 - Look at any player to open their portrait card with one-click **Whisper**, **Join**, **Summon**, **Follow**, and **+Pounce / -Pounce** controls.
 - **Cookie menu**: run `Make Cookie`, `Give Cookie`, `Make Secret Cookie`, and `Give Secret Cookie` straight from a player's card, with per-character active and bank cookie counts preserved across alt tabs (no more stray `info` output on tab switches).
 - **Gift menu**: quickly send `Give Item`, roses, bouquets, bracelets, snugs, and other items directly to the looked-at player.
-- **Trade menu**: initiate and complete secure trades cleanly from the other-character card (`Start Trade`, `Trade Status`, `Add Portrait Space`, inline `Item` `+Add` / `-Rem` for items or DragonScales like `GD 50`, inline `Reason` `Set`, `Accept Trade`, `Reject Trade`, and `End Trade`).
+- **Trade menu**: initiate and complete secure trades cleanly from the other-character card (`Start Trade`, `Trade Status`, `Add Common Item` dropdown for portraits/wings/gifts/DragonScales, inline `Item` `+Add` / `-Rem` for any custom item or currency like `GD 50`, inline `Reason` `Set`, `Accept Trade`, `Reject Trade`, and `End Trade`).
 - Proper Furcadia speech-prefix (`"`) wire routing for `trade-*`, `gift-*`, `give-*`, `discard-*`, and cookie commands whether entered in Main Chat, Whisper tabs, detached whisper windows, `/cmd`, `` `cmd ``, or player menus — without breaking ordinary whisper messages like `"give me a minute"`.
 
 ### Chat, Whispers, and Roleplay Tools
@@ -72,12 +72,12 @@ Alongside the graphical desktop client (`furc-gui`), the repository provides a s
 ### Logging and Cloud Folder Sync
 
 - Local chat and whisper logging with a searchable in-client log viewer and configurable retention.
-- Choose between **per-character logs** or **Furcadia-style shared logging mode** (combining logs across characters).
+- Logs default to a single **Furcadia-style shared folder** across all characters, with an optional **per-character folder** mode in Settings.
 - Sync preferences and logs between computers via any folder-sync tool you already use — **Nextcloud**, **Google Drive for desktop**, **Dropbox**, or similar — without special account linking inside the client.
 
 ### Interface, Settings, and Cache Tools
 
-- Dedicated Settings tab to adjust chat font, text and portrait sizing, colors, themes, audio, notifications, spell check, and Windows asset import.
+- Dedicated Settings tab with full **Colors** customization (live preview, opaque RGB pickers, cloud-synced color profiles, and one-click resets covering regular chat, `[bracket text]`, your speech, emotes, whispers/trade, emits/links, shouts, dice rolls, system/warnings/errors, typed input, active/unread/inactive tabs, and custom window/panel/accent colors), plus font/portrait sizing, themes, audio, notifications, spell check, and Windows asset import.
 - **Cached Downloads** manager in Settings to inspect avatar and dream cache disk usage and flush or re-download cached avatars, dreams, or all downloads with one click if downloaded files ever need a fresh copy.
 - Clean emoji-free text/ASCII UI controls across every menu, tab, and toolbar, plus automatic update checks when a newer GitHub release is published.
 

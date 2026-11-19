@@ -43,6 +43,26 @@ pub struct ClientConfig {
     pub chat_font_size: u16,
     pub chat_text_color: u32,
     pub input_text_color: u32,
+    pub my_speech_color: u32,
+    pub bracket_text_color: u32,
+    pub emote_text_color: u32,
+    pub whisper_text_color: u32,
+    pub emit_text_color: u32,
+    pub shout_text_color: u32,
+    pub roll_text_color: u32,
+    pub success_text_color: u32,
+    pub warning_text_color: u32,
+    pub error_text_color: u32,
+    pub tab_active_bg: u32,
+    pub tab_active_text: u32,
+    pub tab_unread_bg: u32,
+    pub tab_unread_text: u32,
+    pub tab_inactive_bg: u32,
+    pub tab_inactive_text: u32,
+    pub custom_ui_bg: bool,
+    pub chat_bg_color: u32,
+    pub panel_bg_color: u32,
+    pub accent_color: u32,
     pub autocorrect: bool,
     pub anim_mode: String,
     pub theme: String,
@@ -94,8 +114,28 @@ impl Default for ClientConfig {
             font_family: "Proportional".to_owned(),
             font_size: 13,
             chat_font_size: 13,
-            chat_text_color: 0xfff8d7,
+            chat_text_color: 0xf2f5fa,
             input_text_color: 0xffffff,
+            my_speech_color: 0xfff8d7,
+            bracket_text_color: 0x005c80,
+            emote_text_color: 0xe8a0e4,
+            whisper_text_color: 0xcd82eb,
+            emit_text_color: 0x64d2e6,
+            shout_text_color: 0x7daffa,
+            roll_text_color: 0xc3e191,
+            success_text_color: 0x64dc78,
+            warning_text_color: 0xf0c35a,
+            error_text_color: 0xf06464,
+            tab_active_bg: 0x82c8ff,
+            tab_active_text: 0x181006,
+            tab_unread_bg: 0xfadc32,
+            tab_unread_text: 0x140e06,
+            tab_inactive_bg: 0x2a1e44,
+            tab_inactive_text: 0xe6e0f0,
+            custom_ui_bg: false,
+            chat_bg_color: 0x170e2e,
+            panel_bg_color: 0x221644,
+            accent_color: 0xd4a94a,
             autocorrect: false,
             anim_mode: "Full".to_owned(),
             theme: "ClassicPurple".to_owned(),
@@ -268,6 +308,26 @@ impl ClientConfig {
         self.chat_font_size = shared.chat_font_size;
         self.chat_text_color = shared.chat_text_color;
         self.input_text_color = shared.input_text_color;
+        self.my_speech_color = shared.my_speech_color;
+        self.bracket_text_color = shared.bracket_text_color;
+        self.emote_text_color = shared.emote_text_color;
+        self.whisper_text_color = shared.whisper_text_color;
+        self.emit_text_color = shared.emit_text_color;
+        self.shout_text_color = shared.shout_text_color;
+        self.roll_text_color = shared.roll_text_color;
+        self.success_text_color = shared.success_text_color;
+        self.warning_text_color = shared.warning_text_color;
+        self.error_text_color = shared.error_text_color;
+        self.tab_active_bg = shared.tab_active_bg;
+        self.tab_active_text = shared.tab_active_text;
+        self.tab_unread_bg = shared.tab_unread_bg;
+        self.tab_unread_text = shared.tab_unread_text;
+        self.tab_inactive_bg = shared.tab_inactive_bg;
+        self.tab_inactive_text = shared.tab_inactive_text;
+        self.custom_ui_bg = shared.custom_ui_bg;
+        self.chat_bg_color = shared.chat_bg_color;
+        self.panel_bg_color = shared.panel_bg_color;
+        self.accent_color = shared.accent_color;
         self.autocorrect = shared.autocorrect;
         self.anim_mode = shared.anim_mode.clone();
         self.theme = shared.theme.clone();
@@ -303,6 +363,12 @@ impl ClientConfig {
             let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
         }
         Ok(())
+    }
+
+    fn parse_hex_rgb(raw: &str, fallback: u32) -> u32 {
+        u32::from_str_radix(raw.trim().trim_start_matches('#'), 16)
+            .map(|v| v & 0xffffff)
+            .unwrap_or(fallback)
     }
 
     pub fn parse(text: &str) -> Self {
@@ -367,16 +433,68 @@ impl ClientConfig {
                         }
                     }
                     "chat_text_color" => {
-                        cfg.chat_text_color =
-                            u32::from_str_radix(v.trim().trim_start_matches('#'), 16)
-                                .unwrap_or(cfg.chat_text_color)
-                                & 0xffffff
+                        cfg.chat_text_color = Self::parse_hex_rgb(v, cfg.chat_text_color);
                     }
                     "input_text_color" => {
-                        cfg.input_text_color =
-                            u32::from_str_radix(v.trim().trim_start_matches('#'), 16)
-                                .unwrap_or(cfg.input_text_color)
-                                & 0xffffff
+                        cfg.input_text_color = Self::parse_hex_rgb(v, cfg.input_text_color);
+                    }
+                    "my_speech_color" => {
+                        cfg.my_speech_color = Self::parse_hex_rgb(v, cfg.my_speech_color);
+                    }
+                    "bracket_text_color" => {
+                        cfg.bracket_text_color = Self::parse_hex_rgb(v, cfg.bracket_text_color);
+                    }
+                    "emote_text_color" => {
+                        cfg.emote_text_color = Self::parse_hex_rgb(v, cfg.emote_text_color);
+                    }
+                    "whisper_text_color" => {
+                        cfg.whisper_text_color = Self::parse_hex_rgb(v, cfg.whisper_text_color);
+                    }
+                    "emit_text_color" => {
+                        cfg.emit_text_color = Self::parse_hex_rgb(v, cfg.emit_text_color);
+                    }
+                    "shout_text_color" => {
+                        cfg.shout_text_color = Self::parse_hex_rgb(v, cfg.shout_text_color);
+                    }
+                    "roll_text_color" => {
+                        cfg.roll_text_color = Self::parse_hex_rgb(v, cfg.roll_text_color);
+                    }
+                    "success_text_color" => {
+                        cfg.success_text_color = Self::parse_hex_rgb(v, cfg.success_text_color);
+                    }
+                    "warning_text_color" => {
+                        cfg.warning_text_color = Self::parse_hex_rgb(v, cfg.warning_text_color);
+                    }
+                    "error_text_color" => {
+                        cfg.error_text_color = Self::parse_hex_rgb(v, cfg.error_text_color);
+                    }
+                    "tab_active_bg" => {
+                        cfg.tab_active_bg = Self::parse_hex_rgb(v, cfg.tab_active_bg);
+                    }
+                    "tab_active_text" => {
+                        cfg.tab_active_text = Self::parse_hex_rgb(v, cfg.tab_active_text);
+                    }
+                    "tab_unread_bg" => {
+                        cfg.tab_unread_bg = Self::parse_hex_rgb(v, cfg.tab_unread_bg);
+                    }
+                    "tab_unread_text" => {
+                        cfg.tab_unread_text = Self::parse_hex_rgb(v, cfg.tab_unread_text);
+                    }
+                    "tab_inactive_bg" => {
+                        cfg.tab_inactive_bg = Self::parse_hex_rgb(v, cfg.tab_inactive_bg);
+                    }
+                    "tab_inactive_text" => {
+                        cfg.tab_inactive_text = Self::parse_hex_rgb(v, cfg.tab_inactive_text);
+                    }
+                    "custom_ui_bg" => cfg.custom_ui_bg = v.trim() == "true",
+                    "chat_bg_color" => {
+                        cfg.chat_bg_color = Self::parse_hex_rgb(v, cfg.chat_bg_color);
+                    }
+                    "panel_bg_color" => {
+                        cfg.panel_bg_color = Self::parse_hex_rgb(v, cfg.panel_bg_color);
+                    }
+                    "accent_color" => {
+                        cfg.accent_color = Self::parse_hex_rgb(v, cfg.accent_color);
                     }
                     "autocorrect" => cfg.autocorrect = v.trim() == "true",
                     "anim_mode" => {
@@ -455,7 +573,7 @@ impl ClientConfig {
             ""
         };
         format!(
-            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
+            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nmy_speech_color={:06x}\nbracket_text_color={:06x}\nemote_text_color={:06x}\nwhisper_text_color={:06x}\nemit_text_color={:06x}\nshout_text_color={:06x}\nroll_text_color={:06x}\nsuccess_text_color={:06x}\nwarning_text_color={:06x}\nerror_text_color={:06x}\ntab_active_bg={:06x}\ntab_active_text={:06x}\ntab_unread_bg={:06x}\ntab_unread_text={:06x}\ntab_inactive_bg={:06x}\ntab_inactive_text={:06x}\ncustom_ui_bg={}\nchat_bg_color={:06x}\npanel_bg_color={:06x}\naccent_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
@@ -481,6 +599,26 @@ impl ClientConfig {
             self.chat_font_size,
             self.chat_text_color,
             self.input_text_color,
+            self.my_speech_color,
+            self.bracket_text_color,
+            self.emote_text_color,
+            self.whisper_text_color,
+            self.emit_text_color,
+            self.shout_text_color,
+            self.roll_text_color,
+            self.success_text_color,
+            self.warning_text_color,
+            self.error_text_color,
+            self.tab_active_bg,
+            self.tab_active_text,
+            self.tab_unread_bg,
+            self.tab_unread_text,
+            self.tab_inactive_bg,
+            self.tab_inactive_text,
+            self.custom_ui_bg,
+            self.chat_bg_color,
+            self.panel_bg_color,
+            self.accent_color,
             self.autocorrect,
             self.anim_mode,
             self.theme,
@@ -537,6 +675,26 @@ mod tests {
             chat_font_size: 15,
             chat_text_color: 0xaabbcc,
             input_text_color: 0xddeeff,
+            my_speech_color: 0x112233,
+            bracket_text_color: 0x223344,
+            emote_text_color: 0x334455,
+            whisper_text_color: 0x445566,
+            emit_text_color: 0x556677,
+            shout_text_color: 0x667788,
+            roll_text_color: 0x778899,
+            success_text_color: 0x8899aa,
+            warning_text_color: 0x99aabb,
+            error_text_color: 0xbbccdd,
+            tab_active_bg: 0x102030,
+            tab_active_text: 0x203040,
+            tab_unread_bg: 0x304050,
+            tab_unread_text: 0x405060,
+            tab_inactive_bg: 0x506070,
+            tab_inactive_text: 0x607080,
+            custom_ui_bg: true,
+            chat_bg_color: 0x050607,
+            panel_bg_color: 0x08090a,
+            accent_color: 0x0b0c0d,
             autocorrect: true,
             anim_mode: "Half".into(),
             theme: "DragonHoard".into(),
@@ -561,5 +719,18 @@ mod tests {
         let s = cfg.serialize();
         let parsed = ClientConfig::parse(&s);
         assert_eq!(cfg, parsed);
+    }
+
+    #[test]
+    fn legacy_config_without_extended_colors_uses_defaults() {
+        let parsed = ClientConfig::parse("chat_text_color=010203\ntheme=KitterMagic\n");
+        let defaults = ClientConfig::default();
+        assert_eq!(parsed.chat_text_color, 0x010203);
+        assert_eq!(parsed.theme, "KitterMagic");
+        assert_eq!(parsed.bracket_text_color, defaults.bracket_text_color);
+        assert_eq!(parsed.tab_active_bg, defaults.tab_active_bg);
+        assert_eq!(parsed.tab_unread_bg, defaults.tab_unread_bg);
+        assert!(!parsed.custom_ui_bg);
+        assert_eq!(parsed.chat_bg_color, defaults.chat_bg_color);
     }
 }

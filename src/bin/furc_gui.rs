@@ -262,6 +262,7 @@ fn render_whisper_history_lines(
     player_badge_colors: &HashMap<String, Color32>,
     player_badges: &HashMap<String, TextureHandle>,
     self_name_key: &str,
+    colors: &UiColors,
 ) {
     if history_lines.is_empty() {
         return;
@@ -291,6 +292,7 @@ fn render_whisper_history_lines(
                     player_badge_colors,
                     player_badges,
                     self_name_key,
+                    colors,
                 );
             });
         } else {
@@ -1559,8 +1561,7 @@ struct FurcadiaApp {
     font_family: String,
     font_size: u16,
     chat_font_size: u16,
-    chat_text_color: Color32,
-    input_text_color: Color32,
+    colors: UiColors,
     autocorrect: bool,
     fonts_configured: bool,
     applied_font_family: String,
@@ -1782,6 +1783,7 @@ impl FurcadiaApp {
             }
         }
 
+        let colors = UiColors::from_config(&cfg);
         let mut app = Self {
             screen: AppScreen::Login,
             email: cfg.email,
@@ -1910,8 +1912,7 @@ impl FurcadiaApp {
             font_family: cfg.font_family.clone(),
             font_size: cfg.font_size,
             chat_font_size: cfg.chat_font_size,
-            chat_text_color: rgb_from_packed(cfg.chat_text_color),
-            input_text_color: rgb_from_packed(cfg.input_text_color),
+            colors,
             autocorrect: cfg.autocorrect,
             fonts_configured: false,
             applied_font_family: String::new(),
@@ -2002,7 +2003,7 @@ impl FurcadiaApp {
             DreamTheme::KitterMagic => "KitterMagic",
             DreamTheme::FerianWylde => "FerianWylde",
         };
-        ClientConfig {
+        let mut cfg = ClientConfig {
             email: self.email.clone(),
             character,
             password: self.password.clone(),
@@ -2026,8 +2027,6 @@ impl FurcadiaApp {
             font_family: self.font_family.clone(),
             font_size: self.font_size,
             chat_font_size: self.chat_font_size,
-            chat_text_color: packed_from_rgb(self.chat_text_color),
-            input_text_color: packed_from_rgb(self.input_text_color),
             autocorrect: self.autocorrect,
             anim_mode: self.anim_mode.clone(),
             theme: theme_name.to_owned(),
@@ -2052,7 +2051,10 @@ impl FurcadiaApp {
             sync_folder: self.sync_folder.clone(),
             sync_device_id: self.sync_device_id.clone(),
             sync_updated_at: 0,
-        }
+            ..ClientConfig::default()
+        };
+        self.colors.write_to_config(&mut cfg);
+        cfg
     }
 
 #[allow(dead_code)]
@@ -2361,7 +2363,34 @@ impl FurcadiaApp {
         }
     }
 
+    fn ui_bg(&self) -> Color32 {
+        if self.colors.custom_ui_bg {
+            self.colors.chat_bg
+        } else {
+            self.theme.bg()
+        }
+    }
+
+    fn ui_panel(&self) -> Color32 {
+        if self.colors.custom_ui_bg {
+            self.colors.panel_bg
+        } else {
+            self.theme.panel()
+        }
+    }
+
+    fn ui_accent(&self) -> Color32 {
+        if self.colors.custom_ui_bg {
+            self.colors.accent
+        } else {
+            self.theme.accent()
+        }
+    }
+
     fn effective_colors(&self) -> (Color32, Color32, Color32) {
+        if self.colors.custom_ui_bg {
+            return (self.colors.chat_bg, self.colors.panel_bg, self.colors.accent);
+        }
         if self.allow_dream_skins {
             if let Some((bg, panel, accent)) = self.custom_dream_skin {
                 return (bg, panel, accent);
@@ -5306,6 +5335,47 @@ fn build_trade_command(verb: &str, arg: &str) -> Option<String> {
     }
 }
 
+/// Common Furcadia Secure Trade items grouped for the `Trade -> Add Common Item` submenu.
+const COMMON_TRADE_ITEM_GROUPS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Portraits",
+        &[
+            ("Portrait Space", "portrait"),
+            ("Animated Portrait", "animated-portrait"),
+        ],
+    ),
+    (
+        "Wings",
+        &[
+            ("Classic Wings", "classicwings"),
+            ("Butterfly Wings", "butterflywings"),
+            ("Bat Wings", "batwings"),
+            ("Prime Wings", "primewings"),
+            ("Tri-Wings", "triwings"),
+        ],
+    ),
+    (
+        "Gifts & Desctags",
+        &[
+            ("Kitterdust", "kitterdust"),
+            ("Bouquet", "bouquet"),
+            ("Red Rose", "red-rose"),
+            ("Black Rose", "black-rose"),
+            ("White Rose", "white-rose"),
+            ("Purple Rose", "purple-rose"),
+            ("Yellow Rose", "yellow-rose"),
+            ("Flaming Sword", "flaming-sword"),
+            ("Sword", "sword"),
+            ("Magic Wand", "magic-wand"),
+            ("Snug", "snug"),
+            ("Friendship Bracelet", "friendship-bracelet"),
+            ("Candy Cane", "candy-cane"),
+            ("Valentine", "valentine"),
+            ("Fancy Valentine", "valentine-fancy"),
+        ],
+    ),
+];
+
 /// Classifies trimmed user chat input into `(ClientCommand, Option<open_whisper_tab_display_name>)`.
 fn classify_chat_input(
     raw: &str,
@@ -5748,7 +5818,7 @@ impl FurcadiaApp {
     }
 
     fn render_first_setup_window(&mut self, ctx: &egui::Context) {
-        let accent = self.theme.accent();
+        let accent = self.ui_accent();
         let mut open = self.first_setup_open;
         egui::Window::new("Welcome — First-Time Setup")
             .open(&mut open)
@@ -5872,7 +5942,7 @@ impl FurcadiaApp {
             self.update_popup_open = false;
             return;
         };
-        let accent = self.theme.accent();
+        let accent = self.ui_accent();
         let mut open = self.update_popup_open;
         egui::Window::new("Update Available")
             .open(&mut open)
@@ -6046,7 +6116,7 @@ impl FurcadiaApp {
     }
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let accent = self.theme.accent();
+        let accent = self.ui_accent();
         ui.heading(RichText::new("Native Client Settings & Configuration").strong().color(accent));
         ui.add_space(4.0);
         ui.label(RichText::new("Configure your appearance, audio, map behavior, cloud sync, and imported data.").color(Color32::LIGHT_GRAY));
@@ -6063,14 +6133,22 @@ impl FurcadiaApp {
                     DreamTheme::KitterMagic,
                     DreamTheme::FerianWylde,
                 ] {
-                    if ui.radio(self.theme == t, t.label()).clicked() {
+                    if ui.radio(!self.colors.custom_ui_bg && self.theme == t, t.label()).clicked() {
                         self.theme = t;
+                        self.colors.custom_ui_bg = false;
                         self.save_config();
                     }
                 }
             });
+            if self.colors.custom_ui_bg {
+                ui.label(
+                    RichText::new("(Custom window colors below are currently overriding the skin)")
+                        .size(11.0)
+                        .color(Color32::GRAY),
+                );
+            }
             ui.separator();
-            ui.label(RichText::new("Fonts & Colors").strong().color(accent));
+            ui.label(RichText::new("Fonts & Size").strong().color(accent));
             ui.horizontal(|ui| {
                 ui.label("Font Family:");
                 for fam in ["Proportional", "Monospace", "Fixedsys"] {
@@ -6092,14 +6170,6 @@ impl FurcadiaApp {
                     self.save_config();
                 }
             });
-            ui.horizontal(|ui| {
-                ui.label("Chat text color:");
-                if ui.color_edit_button_srgba(&mut self.chat_text_color).changed() { self.save_config(); }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Typed text color:");
-                if ui.color_edit_button_srgba(&mut self.input_text_color).changed() { self.save_config(); }
-            });
             if ui.checkbox(&mut self.autocorrect, "Auto-correct common typing mistakes when sending").changed() {
                 self.save_config();
             }
@@ -6116,6 +6186,196 @@ impl FurcadiaApp {
                     self.save_config();
                 }
             });
+            ui.separator();
+
+            fn render_color_pairs_grid(
+                ui: &mut egui::Ui,
+                id: &str,
+                pairs: &mut [((&str, &mut Color32), (&str, &mut Color32))],
+                changed: &mut bool,
+            ) {
+                egui::Grid::new(id)
+                    .num_columns(4)
+                    .spacing([14.0, 6.0])
+                    .show(ui, |ui| {
+                        for ((l1, c1), (l2, c2)) in pairs {
+                            ui.label(*l1);
+                            if edit_rgb_color(ui, c1) {
+                                *changed = true;
+                            }
+                            ui.label(*l2);
+                            if edit_rgb_color(ui, c2) {
+                                *changed = true;
+                            }
+                            ui.end_row();
+                        }
+                    });
+            }
+
+            let mut colors_changed = false;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Colors").strong().color(accent));
+                if ui.small_button("Reset All Colors").clicked() {
+                    self.colors = UiColors::default();
+                    colors_changed = true;
+                }
+            });
+
+            let preview = self.colors;
+            let (preview_bg, _, preview_accent) = self.effective_colors();
+            egui::Frame::none()
+                .fill(preview_bg)
+                .stroke(Stroke::new(1.0_f32, preview_accent))
+                .rounding(4.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Regular chat").color(preview.chat_text));
+                        ui.label(RichText::new("[bracket text]").color(preview.bracket_text));
+                        ui.label(RichText::new("Your speech").color(preview.my_speech));
+                        ui.label(RichText::new("*Emote*").italics().color(preview.emote_text));
+                        ui.label(RichText::new("Whisper").color(preview.whisper_text));
+                        ui.label(RichText::new("Emit").color(preview.emit_text));
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let _ = ui.add(
+                            egui::Button::new(
+                                RichText::new("Active")
+                                    .strong()
+                                    .color(preview.tab_active_text),
+                            )
+                            .fill(preview.tab_active_bg),
+                        );
+                        let _ = ui.add(
+                            egui::Button::new(
+                                RichText::new("Unread (2)")
+                                    .strong()
+                                    .color(preview.tab_unread_text),
+                            )
+                            .fill(preview.tab_unread_bg)
+                            .stroke(Stroke::new(1.5_f32, preview.tab_unread_bg)),
+                        );
+                        let _ = ui.add(
+                            egui::Button::new(
+                                RichText::new("Inactive").color(preview.tab_inactive_text),
+                            )
+                            .fill(preview.tab_inactive_bg),
+                        );
+                    });
+                });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Chat & Message Colors").strong());
+                if ui.small_button("Reset Chat").clicked() {
+                    self.colors.reset_chat_colors();
+                    colors_changed = true;
+                }
+            });
+            let mut chat_pairs = [
+                (
+                    ("Regular chat:", &mut self.colors.chat_text),
+                    ("Your speech:", &mut self.colors.my_speech),
+                ),
+                (
+                    ("[Bracket text]:", &mut self.colors.bracket_text),
+                    ("Emotes:", &mut self.colors.emote_text),
+                ),
+                (
+                    ("Whispers & Trade:", &mut self.colors.whisper_text),
+                    ("Emits & Links:", &mut self.colors.emit_text),
+                ),
+                (
+                    ("Shouts:", &mut self.colors.shout_text),
+                    ("Dice rolls:", &mut self.colors.roll_text),
+                ),
+                (
+                    ("System / Success:", &mut self.colors.success_text),
+                    ("Warnings:", &mut self.colors.warning_text),
+                ),
+                (
+                    ("Errors:", &mut self.colors.error_text),
+                    ("Typed input:", &mut self.colors.input_text),
+                ),
+            ];
+            render_color_pairs_grid(
+                ui,
+                "settings_chat_colors_grid",
+                &mut chat_pairs,
+                &mut colors_changed,
+            );
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Tab Colors (Chat, Whisper & Character)").strong());
+                if ui.small_button("Reset Tabs").clicked() {
+                    self.colors.reset_tab_colors();
+                    colors_changed = true;
+                }
+            });
+            let mut tab_pairs = [
+                (
+                    ("Active tab fill:", &mut self.colors.tab_active_bg),
+                    ("Active tab text:", &mut self.colors.tab_active_text),
+                ),
+                (
+                    ("Unread tab fill:", &mut self.colors.tab_unread_bg),
+                    ("Unread tab text:", &mut self.colors.tab_unread_text),
+                ),
+                (
+                    ("Inactive tab fill:", &mut self.colors.tab_inactive_bg),
+                    ("Inactive tab text:", &mut self.colors.tab_inactive_text),
+                ),
+            ];
+            render_color_pairs_grid(
+                ui,
+                "settings_tab_colors_grid",
+                &mut tab_pairs,
+                &mut colors_changed,
+            );
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Window & Background Colors").strong());
+                if ui.small_button("Copy Current Skin").clicked() {
+                    self.colors.chat_bg = self.theme.bg();
+                    self.colors.panel_bg = self.theme.panel();
+                    self.colors.accent = self.theme.accent();
+                    self.colors.custom_ui_bg = true;
+                    colors_changed = true;
+                }
+                if ui.small_button("Reset Window").clicked() {
+                    self.colors.reset_window_colors();
+                    colors_changed = true;
+                }
+            });
+            if ui
+                .checkbox(
+                    &mut self.colors.custom_ui_bg,
+                    "Use custom background & accent colors",
+                )
+                .changed()
+            {
+                colors_changed = true;
+            }
+            ui.add_enabled_ui(self.colors.custom_ui_bg, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (label, col) in [
+                        ("Chat background:", &mut self.colors.chat_bg),
+                        ("Panel / sidebar:", &mut self.colors.panel_bg),
+                        ("Accent / headings:", &mut self.colors.accent),
+                    ] {
+                        ui.label(label);
+                        if edit_rgb_color(ui, col) {
+                            colors_changed = true;
+                        }
+                    }
+                });
+            });
+            if colors_changed {
+                self.save_config();
+            }
             ui.separator();
             ui.label(RichText::new("Animations & Map").strong().color(accent));
             ui.horizontal(|ui| {
@@ -6217,30 +6477,33 @@ impl FurcadiaApp {
             }
             ui.separator();
             ui.label(RichText::new("Chat & Whisper Logs").strong().color(accent));
-            if ui.checkbox(&mut self.logging_enabled, "Save daily chat logs per character").changed() { self.save_config(); }
-            if ui.checkbox(&mut self.log_whispers, "Save separate per-player whisper logs").changed() { self.save_config(); }
-            ui.horizontal(|ui| {
-                ui.label("Logging style:");
-                if ui
-                    .radio(
-                        self.shared_logs_mode,
-                        "Furcadia-style shared logs (all characters share whisper history)",
-                    )
-                    .clicked()
-                {
-                    self.shared_logs_mode = true;
+            if ui.checkbox(&mut self.logging_enabled, "Save chat logs").changed() {
+                self.save_config();
+            }
+            ui.add_enabled_ui(self.logging_enabled, |ui| {
+                if ui.checkbox(&mut self.log_whispers, "Save whisper logs").changed() {
                     self.save_config();
                 }
-                if ui
-                    .radio(
-                        !self.shared_logs_mode,
-                        "Individual character logs (separate per character)",
-                    )
-                    .clicked()
-                {
-                    self.shared_logs_mode = false;
-                    self.save_config();
-                }
+                ui.horizontal(|ui| {
+                    ui.label("Log folders:");
+                    if ui
+                        .radio(
+                            self.shared_logs_mode,
+                            "Shared (Furcadia-style, one folder for all characters)",
+                        )
+                        .clicked()
+                    {
+                        self.shared_logs_mode = true;
+                        self.save_config();
+                    }
+                    if ui
+                        .radio(!self.shared_logs_mode, "Separate folder per character")
+                        .clicked()
+                    {
+                        self.shared_logs_mode = false;
+                        self.save_config();
+                    }
+                });
             });
             ui.horizontal(|ui| {
                 ui.label("Keep logs:");
@@ -6396,7 +6659,7 @@ impl FurcadiaApp {
 
 fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         let mut open = self.log_viewer_open;
-        let accent = self.theme.accent();
+        let accent = self.ui_accent();
         egui::Window::new("Furcadia Chat & Whisper Logs")
             .open(&mut open)
             .resizable(true)
@@ -6437,7 +6700,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 }
 
                 ui.horizontal(|ui| {
-                    ui.label("Character:");
+                    ui.label("Logs:");
                     for ch in &chars {
                         if ui.selectable_label(&self.log_viewer_char == ch, ch).clicked() {
                             self.log_viewer_char = ch.clone();
@@ -7240,7 +7503,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
     }
 
     fn render_pounce_contents(&mut self, ui: &mut egui::Ui, is_detached: bool) {
-        let accent = self.theme.accent();
+        let accent = self.ui_accent();
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Pounce").color(accent));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -7366,7 +7629,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             if ui.small_button("×").clicked() {
                                 to_remove = Some(name.clone());
                             }
-                            if ui.small_button("Wh").on_hover_text("Whisper").clicked() {
+                            if ui.small_button("💬").on_hover_text("Whisper").clicked() {
                                 to_whisper = Some(name.clone());
                             }
                             if self.is_connected && ui.small_button("Look").clicked() {
@@ -7454,8 +7717,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 if v_ctx.input(|i| i.viewport().close_requested()) {
                     self.pounce_detached = false;
                 }
+                let pounce_panel = self.ui_panel();
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::none().fill(self.theme.panel()).inner_margin(10.0))
+                    .frame(egui::Frame::none().fill(pounce_panel).inner_margin(10.0))
                     .show(v_ctx, |ui| {
                         self.render_pounce_contents(ui, true);
                     });
@@ -7473,6 +7737,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         } else {
             self.current_player_badge_textures(ctx)
         };
+        let win_bg = self.ui_bg();
+        let win_accent = self.ui_accent();
+        let win_colors = self.colors;
 
         for peer in detached_peers {
             let vp_id = egui::ViewportId::from_hash_of(("furc_whisper", &peer));
@@ -7495,12 +7762,12 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 {
                     w.unread = 0;
                     egui::CentralPanel::default()
-                        .frame(egui::Frame::none().fill(self.theme.bg()).inner_margin(8.0))
+                        .frame(egui::Frame::none().fill(win_bg).inner_margin(8.0))
                         .show(v_ctx, |ui| {
                             ui.horizontal(|ui| {
                                 ui.heading(
                                     RichText::new(format!("Whisper: {}", w.peer))
-                                        .color(self.theme.accent()),
+                                        .color(win_accent),
                                 );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
@@ -7534,6 +7801,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         &self.player_badge_colors,
                                         &player_badges,
                                         &self_name_key,
+                                        &win_colors,
                                     );
                                     for line in &w.lines {
                                         render_chat_line(
@@ -7546,6 +7814,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             &self.player_badge_colors,
                                             &player_badges,
                                             &self_name_key,
+                                            &win_colors,
                                         );
                                     }
                                 });
@@ -7604,8 +7873,8 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
     }
 
     fn render_sidebar(&mut self, ctx: &egui::Context) {
-        let panel_bg = self.theme.panel();
-        let accent = self.theme.accent();
+        let panel_bg = self.ui_panel();
+        let accent = self.ui_accent();
 
         let sidebar_w = (256.0 + (self.portrait_size - 64.0).max(0.0)).min(360.0);
         egui::SidePanel::left("furc_sidebar")
@@ -7678,9 +7947,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         RichText::new(&active_name)
                                             .size(11.0)
                                             .strong()
-                                            .color(Color32::from_rgb(24, 16, 6)),
+                                            .color(self.colors.tab_active_text),
                                     )
-                                    .fill(accent)
+                                    .fill(self.colors.tab_active_bg)
                                     .sense(Sense::click_and_drag()),
                                 );
                                 if resp.drag_started() {
@@ -7708,9 +7977,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             RichText::new(lbl)
                                                 .size(11.0)
                                                 .strong()
-                                                .color(Color32::from_rgb(20, 14, 6)),
+                                                .color(self.colors.tab_unread_text),
                                         )
-                                        .fill(Color32::from_rgb(235, 180, 60))
+                                        .fill(self.colors.tab_unread_bg)
                                         .sense(Sense::click_and_drag()),
                                     )
                                 } else {
@@ -7718,9 +7987,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         egui::Button::new(
                                             RichText::new(lbl)
                                                 .size(11.0)
-                                                .color(Color32::from_rgb(230, 224, 240)),
+                                                .color(self.colors.tab_inactive_text),
                                         )
-                                        .fill(Color32::from_rgb(42, 30, 68))
+                                        .fill(self.colors.tab_inactive_bg)
                                         .sense(Sense::click_and_drag()),
                                     )
                                 };
@@ -7781,7 +8050,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 ui.add_space(4.0);
                 let self_port = self.self_portrait(ctx);
                 egui::Frame::none()
-                    .fill(self.theme.bg())
+                    .fill(self.ui_bg())
                     .stroke(Stroke::new(1.2_f32, GOLD_DIM))
                     .rounding(6.0)
                     .inner_margin(6.0)
@@ -8605,8 +8874,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 DreamTheme::KitterMagic,
                                 DreamTheme::FerianWylde,
                             ] {
-                                if ui.radio(self.theme == t, t.label()).clicked() {
+                                if ui.radio(!self.colors.custom_ui_bg && self.theme == t, t.label()).clicked() {
                                     self.theme = t;
+                                    self.colors.custom_ui_bg = false;
                                     self.save_config();
                                 }
                             }
@@ -8987,7 +9257,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
             self.render_detached_viewports(ctx);
             self.render_sidebar(ctx);
             egui::CentralPanel::default()
-                .frame(egui::Frame::none().fill(self.theme.bg()).inner_margin(16.0))
+                .frame(egui::Frame::none().fill(self.ui_bg()).inner_margin(16.0))
                 .show(ctx, |ui| {
                     if ui.button("← Back to Game").clicked() {
                         self.show_settings_tab = false;
@@ -9006,7 +9276,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 .min_width(220.0)
                 .frame(
                     egui::Frame::none()
-                        .fill(self.theme.panel())
+                        .fill(self.ui_panel())
                         .stroke(Stroke::new(1.5_f32, GOLD_DIM))
                         .inner_margin(8.0),
                 )
@@ -9133,7 +9403,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(self.theme.bg())
+                        .fill(self.ui_bg())
                         .stroke(Stroke::new(
                             if self.is_connected { 2.0_f32 } else { 2.5_f32 },
                             if self.is_connected { accent } else { Color32::from_rgb(225, 55, 65) },
@@ -9235,14 +9505,14 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
     }
 
     fn render_chat_panel_contents(&mut self, ui: &mut egui::Ui) {
-        let accent = self.theme.accent();
+        let accent = self.ui_accent();
         let mut chat_style = (**ui.style()).clone();
         let body_family = chat_style.text_styles[&egui::TextStyle::Body].family.clone();
         chat_style.text_styles.insert(
             egui::TextStyle::Body,
             FontId::new(self.chat_font_size as f32, body_family),
         );
-        chat_style.visuals.override_text_color = Some(self.chat_text_color);
+        chat_style.visuals.override_text_color = Some(self.colors.chat_text);
         ui.set_style(chat_style);
         if !self.is_connected {
             egui::Frame::none()
@@ -9292,17 +9562,29 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             egui::Button::new(
                                                 RichText::new(main_label)
                                                     .strong()
-                                                    .color(Color32::from_rgb(20, 14, 6)),
+                                                    .color(self.colors.tab_unread_text),
                                             )
-                                            .fill(Color32::from_rgb(250, 220, 50))
-                                            .stroke(Stroke::new(
-                                                1.5_f32,
-                                                Color32::from_rgb(255, 225, 130),
-                                            )),
+                                            .fill(self.colors.tab_unread_bg)
+                                            .stroke(Stroke::new(1.5_f32, self.colors.tab_unread_bg)),
                                         )
                                         .clicked()
                                     } else {
-                                        ui.add(egui::Button::new(if main_sel { RichText::new(main_label).strong().color(Color32::from_rgb(24, 16, 6)) } else { RichText::new(main_label) }).fill(if main_sel { Color32::from_rgb(130, 200, 255) } else { Color32::from_rgb(42, 30, 68) })).clicked()
+                                        ui.add(
+                                            egui::Button::new(if main_sel {
+                                                RichText::new(main_label)
+                                                    .strong()
+                                                    .color(self.colors.tab_active_text)
+                                            } else {
+                                                RichText::new(main_label)
+                                                    .color(self.colors.tab_inactive_text)
+                                            })
+                                            .fill(if main_sel {
+                                                self.colors.tab_active_bg
+                                            } else {
+                                                self.colors.tab_inactive_bg
+                                            }),
+                                        )
+                                        .clicked()
                                     };
                                     if main_clicked {
                                         self.main_chat_unread = 0;
@@ -9332,12 +9614,12 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                                     egui::Button::new(
                                                         RichText::new(label)
                                                             .strong()
-                                                            .color(Color32::from_rgb(20, 14, 6)),
+                                                            .color(self.colors.tab_unread_text),
                                                     )
-                                                    .fill(Color32::from_rgb(250, 220, 50))
+                                                    .fill(self.colors.tab_unread_bg)
                                                     .stroke(Stroke::new(
                                                         1.5_f32,
-                                                        Color32::from_rgb(255, 225, 130),
+                                                        self.colors.tab_unread_bg,
                                                     ))
                                                     .sense(Sense::click_and_drag()),
                                                 )
@@ -9346,16 +9628,19 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                                     egui::Button::new(
                                                         RichText::new(label)
                                                             .strong()
-                                                            .color(Color32::from_rgb(24, 16, 6)),
+                                                            .color(self.colors.tab_active_text),
                                                     )
-                                                    .fill(Color32::from_rgb(130, 200, 255))
+                                                    .fill(self.colors.tab_active_bg)
                                                     .sense(Sense::click_and_drag()),
                                                 )
                                             } else {
                                                 ui.add(
-                                                    egui::Button::new(label)
-                                                        .fill(Color32::from_rgb(42, 30, 68))
-                                                        .sense(Sense::click_and_drag()),
+                                                    egui::Button::new(
+                                                        RichText::new(label)
+                                                            .color(self.colors.tab_inactive_text),
+                                                    )
+                                                    .fill(self.colors.tab_inactive_bg)
+                                                    .sense(Sense::click_and_drag()),
                                                 )
                                             };
                                             if resp.drag_started() {
@@ -9609,7 +9894,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         &self.chat_input,
                         (input_w - 12.0).max(60.0),
                         &self.spell_misspelled,
-                        self.input_text_color,
+                        self.colors.input_text,
                     );
                     ui.fonts(|f| f.layout_job(job)).size().y
                 };
@@ -9658,6 +9943,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         &self.player_badge_colors,
                                         &player_badges,
                                         &self_name_key,
+                                        &self.colors,
                                     );
                                     for line in &w.lines {
                                         render_chat_line(
@@ -9670,6 +9956,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             &self.player_badge_colors,
                                             &player_badges,
                                             &self_name_key,
+                                            &self.colors,
                                         );
                                     }
                                 }
@@ -9686,6 +9973,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                     &self.player_badge_colors,
                                     &player_badges,
                                     &self_name_key,
+                                    &self.colors,
                                 );
                             }
                         }
@@ -9761,7 +10049,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     let enter = ui.memory(|m| m.has_focus(chat_input_id))
                         && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                     let misspelled_snapshot = self.spell_misspelled.clone();
-                    let input_text_color = self.input_text_color;
+                    let input_text_color = self.colors.input_text;
                     let mut layouter = move |ui: &egui::Ui, text: &str, wrap_width: f32| {
                         let job = build_spellcheck_layout_job(
                             ui,
@@ -9907,7 +10195,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         self.add_word_to_dictionary(&w);
                     }
                     let send_btn = egui::Button::new(RichText::new("Send").color(Color32::WHITE))
-                        .fill(self.theme.panel())
+                        .fill(self.ui_panel())
                         .stroke(Stroke::new(1.0_f32, accent));
                     if ui.add(send_btn).clicked() || enter {
                         self.send_chat_input();
@@ -10992,7 +11280,7 @@ Light: {} | Amb: {} | Elev: {:?}",
                     ui.label(
                         RichText::new(name_display_clean(&target.display_name))
                             .strong()
-                            .color(self.theme.accent()),
+                            .color(self.ui_accent()),
                     );
                     ui.separator();
                     chosen_action =
@@ -11092,7 +11380,7 @@ Light: {} | Amb: {} | Elev: {:?}",
             }
         }
 
-        let accent = self.theme.accent();
+        let accent = self.ui_accent();
         let display_name = snapshot.info.name.replace('|', " ");
         let in_pounce = self.pounce.contains(&display_name);
         let mut close_card = false;
@@ -11282,13 +11570,59 @@ Light: {} | Amb: {} | Elev: {:?}",
                                         "trade-status",
                                     );
                                     ui.separator();
-                                    trade_action_button(
-                                        self,
-                                        ui,
-                                        "Add Portrait Space",
-                                        "Add an unused portrait space (`trade-add portrait`)",
-                                        "trade-add portrait",
-                                    );
+                                    ui.menu_button("Add Common Item", |ui| {
+                                        ui.set_min_width(185.0);
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("trade_common_items_scroll")
+                                            .max_height(320.0)
+                                            .show(ui, |ui| {
+                                                for (idx, (group_name, items)) in
+                                                    COMMON_TRADE_ITEM_GROUPS.iter().enumerate()
+                                                {
+                                                    if idx > 0 {
+                                                        ui.separator();
+                                                    }
+                                                    ui.label(
+                                                        RichText::new(*group_name)
+                                                            .size(11.0)
+                                                            .strong()
+                                                            .color(Color32::GRAY),
+                                                    );
+                                                    for (label, keyword) in *items {
+                                                        let cmd = format!("trade-add {keyword}");
+                                                        trade_action_button(
+                                                            self,
+                                                            ui,
+                                                            *label,
+                                                            &format!("Add {label} (`{cmd}`)"),
+                                                            &cmd,
+                                                        );
+                                                    }
+                                                }
+                                                ui.separator();
+                                                ui.label(
+                                                    RichText::new("DragonScales (enter amount)")
+                                                        .size(11.0)
+                                                        .strong()
+                                                        .color(Color32::GRAY),
+                                                );
+                                                for (label, prefix) in [
+                                                    ("Golden DragonScales (GD)", "GD "),
+                                                    ("Silver DragonScales (SD)", "SD "),
+                                                    ("Copper DragonScales (CD)", "CD "),
+                                                ] {
+                                                    if ui
+                                                        .button(label)
+                                                        .on_hover_text(format!(
+                                                            "Prefill `{prefix}` in the Item box below, then type an amount"
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        self.trade_item_input = prefix.to_owned();
+                                                    }
+                                                }
+                                            });
+                                    });
                                     ui.horizontal(|ui| {
                                         ui.add_sized(
                                             [46.0, 18.0],
@@ -12867,6 +13201,7 @@ fn render_chat_line(
     player_badge_colors: &HashMap<String, Color32>,
     player_badges: &HashMap<String, TextureHandle>,
     self_name_key: &str,
+    colors: &UiColors,
 ) {
     let has_name_link = line.spans.iter().any(|s| {
         matches!(
@@ -12947,10 +13282,10 @@ fn render_chat_line(
                                                 if style.italic && !is_emote {
                                                     rt = rt.italics();
                                                 }
-                                                rt = rt.color(CHAT_BRACKET_BLUE);
+                                                rt = rt.color(colors.bracket_text);
                                             }
                                             ChatSegmentKind::EmoteQuote => {
-                                                rt = rt.color(Color32::from_rgb(242, 245, 250));
+                                                rt = rt.color(colors.chat_text);
                                             }
                                             ChatSegmentKind::Normal => {
                                                 if style.italic || is_emote {
@@ -12959,8 +13294,8 @@ fn render_chat_line(
                                                 let col = style
                                                     .color
                                                     .as_deref()
-                                                    .map(map_chat_color)
-                                                    .unwrap_or(Color32::from_rgb(232, 236, 244));
+                                                    .map(|c| colors.map_chat_color(c))
+                                                    .unwrap_or(colors.chat_text);
                                                 rt = rt.color(col);
                                             }
                                         }
@@ -12998,9 +13333,9 @@ fn render_chat_line(
                         rt = rt.underline();
                     }
                     if let Some(color_name) = &style.color {
-                        rt = rt.color(map_chat_color(color_name));
+                        rt = rt.color(colors.map_chat_color(color_name));
                     } else {
-                        rt = rt.color(Color32::from_rgb(232, 236, 244));
+                        rt = rt.color(colors.chat_text);
                     }
                     if let Some(url) = &style.link {
                         if text.contains("#S") || text.contains("#C") {
@@ -13014,6 +13349,7 @@ fn render_chat_line(
                                 desctags,
                                 player_badge_colors,
                                 self_name_key,
+                                colors,
                             );
                             continue;
                         }
@@ -13101,9 +13437,9 @@ fn render_chat_line(
                                         seg_rt = seg_rt.underline();
                                     }
                                     if let Some(color_name) = &style.color {
-                                        seg_rt = seg_rt.color(map_chat_color(color_name));
+                                        seg_rt = seg_rt.color(colors.map_chat_color(color_name));
                                     } else {
-                                        seg_rt = seg_rt.color(Color32::from_rgb(232, 236, 244));
+                                        seg_rt = seg_rt.color(colors.chat_text);
                                     }
                                     ui.label(seg_rt);
                                 }
@@ -13145,6 +13481,7 @@ fn render_linked_inline_codes(
     desctags: &[Option<TextureHandle>],
     player_badge_colors: &HashMap<String, Color32>,
     self_name_key: &str,
+    colors: &UiColors,
 ) {
     let font_id = egui::TextStyle::Body.resolve(ui.style());
     let lower_url = url.to_ascii_lowercase();
@@ -13162,9 +13499,9 @@ fn render_linked_inline_codes(
                     rich = rich.underline();
                 }
                 if let Some(color_name) = &style.color {
-                    rich = rich.color(map_chat_color(color_name));
+                    rich = rich.color(colors.map_chat_color(color_name));
                 } else {
-                    rich = rich.color(Color32::from_rgb(232, 236, 244));
+                    rich = rich.color(colors.chat_text);
                 }
 
                 if let Some(short) = url.strip_prefix("name://") {
@@ -13252,6 +13589,175 @@ fn packed_from_rgb(color: Color32) -> u32 {
     (u32::from(color.r()) << 16) | (u32::from(color.g()) << 8) | u32::from(color.b())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UiColors {
+    chat_text: Color32,
+    my_speech: Color32,
+    bracket_text: Color32,
+    emote_text: Color32,
+    whisper_text: Color32,
+    emit_text: Color32,
+    shout_text: Color32,
+    roll_text: Color32,
+    success_text: Color32,
+    warning_text: Color32,
+    error_text: Color32,
+    input_text: Color32,
+    tab_active_bg: Color32,
+    tab_active_text: Color32,
+    tab_unread_bg: Color32,
+    tab_unread_text: Color32,
+    tab_inactive_bg: Color32,
+    tab_inactive_text: Color32,
+    custom_ui_bg: bool,
+    chat_bg: Color32,
+    panel_bg: Color32,
+    accent: Color32,
+}
+
+impl Default for UiColors {
+    fn default() -> Self {
+        Self::from_config(&ClientConfig::default())
+    }
+}
+
+impl UiColors {
+    fn from_config(cfg: &ClientConfig) -> Self {
+        Self {
+            chat_text: rgb_from_packed(cfg.chat_text_color),
+            my_speech: rgb_from_packed(cfg.my_speech_color),
+            bracket_text: rgb_from_packed(cfg.bracket_text_color),
+            emote_text: rgb_from_packed(cfg.emote_text_color),
+            whisper_text: rgb_from_packed(cfg.whisper_text_color),
+            emit_text: rgb_from_packed(cfg.emit_text_color),
+            shout_text: rgb_from_packed(cfg.shout_text_color),
+            roll_text: rgb_from_packed(cfg.roll_text_color),
+            success_text: rgb_from_packed(cfg.success_text_color),
+            warning_text: rgb_from_packed(cfg.warning_text_color),
+            error_text: rgb_from_packed(cfg.error_text_color),
+            input_text: rgb_from_packed(cfg.input_text_color),
+            tab_active_bg: rgb_from_packed(cfg.tab_active_bg),
+            tab_active_text: rgb_from_packed(cfg.tab_active_text),
+            tab_unread_bg: rgb_from_packed(cfg.tab_unread_bg),
+            tab_unread_text: rgb_from_packed(cfg.tab_unread_text),
+            tab_inactive_bg: rgb_from_packed(cfg.tab_inactive_bg),
+            tab_inactive_text: rgb_from_packed(cfg.tab_inactive_text),
+            custom_ui_bg: cfg.custom_ui_bg,
+            chat_bg: rgb_from_packed(cfg.chat_bg_color),
+            panel_bg: rgb_from_packed(cfg.panel_bg_color),
+            accent: rgb_from_packed(cfg.accent_color),
+        }
+    }
+
+    fn write_to_config(&self, cfg: &mut ClientConfig) {
+        cfg.chat_text_color = packed_from_rgb(self.chat_text);
+        cfg.my_speech_color = packed_from_rgb(self.my_speech);
+        cfg.bracket_text_color = packed_from_rgb(self.bracket_text);
+        cfg.emote_text_color = packed_from_rgb(self.emote_text);
+        cfg.whisper_text_color = packed_from_rgb(self.whisper_text);
+        cfg.emit_text_color = packed_from_rgb(self.emit_text);
+        cfg.shout_text_color = packed_from_rgb(self.shout_text);
+        cfg.roll_text_color = packed_from_rgb(self.roll_text);
+        cfg.success_text_color = packed_from_rgb(self.success_text);
+        cfg.warning_text_color = packed_from_rgb(self.warning_text);
+        cfg.error_text_color = packed_from_rgb(self.error_text);
+        cfg.input_text_color = packed_from_rgb(self.input_text);
+        cfg.tab_active_bg = packed_from_rgb(self.tab_active_bg);
+        cfg.tab_active_text = packed_from_rgb(self.tab_active_text);
+        cfg.tab_unread_bg = packed_from_rgb(self.tab_unread_bg);
+        cfg.tab_unread_text = packed_from_rgb(self.tab_unread_text);
+        cfg.tab_inactive_bg = packed_from_rgb(self.tab_inactive_bg);
+        cfg.tab_inactive_text = packed_from_rgb(self.tab_inactive_text);
+        cfg.custom_ui_bg = self.custom_ui_bg;
+        cfg.chat_bg_color = packed_from_rgb(self.chat_bg);
+        cfg.panel_bg_color = packed_from_rgb(self.panel_bg);
+        cfg.accent_color = packed_from_rgb(self.accent);
+    }
+
+    fn reset_chat_colors(&mut self) {
+        let d = Self::default();
+        self.chat_text = d.chat_text;
+        self.my_speech = d.my_speech;
+        self.bracket_text = d.bracket_text;
+        self.emote_text = d.emote_text;
+        self.whisper_text = d.whisper_text;
+        self.emit_text = d.emit_text;
+        self.shout_text = d.shout_text;
+        self.roll_text = d.roll_text;
+        self.success_text = d.success_text;
+        self.warning_text = d.warning_text;
+        self.error_text = d.error_text;
+        self.input_text = d.input_text;
+    }
+
+    fn reset_tab_colors(&mut self) {
+        let d = Self::default();
+        self.tab_active_bg = d.tab_active_bg;
+        self.tab_active_text = d.tab_active_text;
+        self.tab_unread_bg = d.tab_unread_bg;
+        self.tab_unread_text = d.tab_unread_text;
+        self.tab_inactive_bg = d.tab_inactive_bg;
+        self.tab_inactive_text = d.tab_inactive_text;
+    }
+
+    fn reset_window_colors(&mut self) {
+        let d = Self::default();
+        self.custom_ui_bg = d.custom_ui_bg;
+        self.chat_bg = d.chat_bg;
+        self.panel_bg = d.panel_bg;
+        self.accent = d.accent;
+    }
+
+    fn map_chat_color(&self, name: &str) -> Color32 {
+        if let Some(hex) = name.trim().strip_prefix('#') {
+            if hex.len() == 6 {
+                if let (Ok(r), Ok(g), Ok(b)) = (
+                    u8::from_str_radix(&hex[0..2], 16),
+                    u8::from_str_radix(&hex[2..4], 16),
+                    u8::from_str_radix(&hex[4..6], 16),
+                ) {
+                    return Color32::from_rgb(r, g, b);
+                }
+            } else if hex.len() == 3 {
+                if let (Ok(r), Ok(g), Ok(b)) = (
+                    u8::from_str_radix(&hex[0..1], 16),
+                    u8::from_str_radix(&hex[1..2], 16),
+                    u8::from_str_radix(&hex[2..3], 16),
+                ) {
+                    return Color32::from_rgb(r * 17, g * 17, b * 17);
+                }
+            }
+        }
+        match name.trim().to_ascii_lowercase().as_str() {
+            "success" | "green" => self.success_text,
+            "warning" | "yellow" | "orange" => self.warning_text,
+            "error" | "danger" | "red" => self.error_text,
+            "whisper" | "purple" | "magenta" | "trade" | "cmdlink" => self.whisper_text,
+            "emote" => self.emote_text,
+            "emit" | "bcast" | "broadcast" | "cyan" | "link" | "furclink" | "dragonspeak" => {
+                self.emit_text
+            }
+            "shout" | "blue" | "notify" | "highlight" | "query" => self.shout_text,
+            "channel" => Color32::from_rgb(175, 150, 240),
+            "desc" | "description" | "history" => Color32::from_rgb(185, 198, 220),
+            "roll" => self.roll_text,
+            "name" => Color32::from_rgb(145, 200, 245),
+            "myspeech" => self.my_speech,
+            _ => self.chat_text,
+        }
+    }
+}
+
+fn edit_rgb_color(ui: &mut egui::Ui, color: &mut Color32) -> bool {
+    let mut rgb = [color.r(), color.g(), color.b()];
+    if ui.color_edit_button_srgb(&mut rgb).changed() {
+        *color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        true
+    } else {
+        false
+    }
+}
+
 fn autocorrect_common_words(text: &str) -> String {
     const WORDS: &[(&str, &str)] = &[
         ("teh", "the"), ("adn", "and"), ("taht", "that"), ("hte", "the"),
@@ -13278,52 +13784,6 @@ fn autocorrect_common_words(text: &str) -> String {
         .collect()
 }
 
-fn map_chat_color(name: &str) -> Color32 {
-    if let Some(hex) = name.trim().strip_prefix('#') {
-        if hex.len() == 6 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
-                u8::from_str_radix(&hex[0..2], 16),
-                u8::from_str_radix(&hex[2..4], 16),
-                u8::from_str_radix(&hex[4..6], 16),
-            ) {
-                return Color32::from_rgb(r, g, b);
-            }
-        } else if hex.len() == 3 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
-                u8::from_str_radix(&hex[0..1], 16),
-                u8::from_str_radix(&hex[1..2], 16),
-                u8::from_str_radix(&hex[2..3], 16),
-            ) {
-                return Color32::from_rgb(r * 17, g * 17, b * 17);
-            }
-        }
-    }
-    match name.trim().to_ascii_lowercase().as_str() {
-        "success" | "green" => Color32::from_rgb(100, 220, 120),
-        "warning" | "yellow" | "orange" => Color32::from_rgb(240, 195, 90),
-        "error" | "danger" | "red" => Color32::from_rgb(240, 100, 100),
-        "whisper" | "purple" | "magenta" | "trade" | "cmdlink" => {
-            Color32::from_rgb(205, 130, 235)
-        }
-        "emote" => Color32::from_rgb(232, 160, 228),
-        "emit" | "bcast" | "broadcast" | "cyan" | "link" | "furclink" | "dragonspeak" => {
-            Color32::from_rgb(100, 210, 230)
-        }
-        "shout" | "blue" | "notify" | "highlight" | "query" => {
-            Color32::from_rgb(125, 175, 250)
-        }
-        "channel" => Color32::from_rgb(175, 150, 240),
-        "desc" | "description" | "history" => Color32::from_rgb(185, 198, 220),
-        "roll" => Color32::from_rgb(195, 225, 145),
-        "name" => Color32::from_rgb(145, 200, 245),
-        "myspeech" => Color32::from_rgb(255, 248, 215),
-        "speech" => Color32::from_rgb(242, 245, 250),
-        _ => Color32::from_rgb(228, 232, 240),
-    }
-}
-
-/// Matches the blue fill of the selected `"Map Size"` toggle button (`Color32::from_rgb(0, 92, 128)`).
-const CHAT_BRACKET_BLUE: Color32 = Color32::from_rgb(0, 92, 128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatSegmentKind {
@@ -15535,5 +15995,93 @@ mod tests {
         ] {
             assert_eq!(format_raw_cmd_wire(cmd), format!("\"{cmd}"));
         }
+
+        for (group_name, items) in COMMON_TRADE_ITEM_GROUPS {
+            assert!(!group_name.trim().is_empty());
+            assert!(!items.is_empty());
+            for (label, keyword) in *items {
+                assert!(!label.trim().is_empty());
+                assert!(!keyword.trim().is_empty());
+                let expected_cmd = format!("trade-add {keyword}");
+                assert_eq!(
+                    build_trade_command("trade-add", keyword).as_deref(),
+                    Some(expected_cmd.as_str()),
+                    "unexpected build_trade_command for {label}"
+                );
+                assert_eq!(
+                    format_raw_cmd_wire(&expected_cmd),
+                    format!("\"{expected_cmd}"),
+                    "unexpected wire command for {label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ui_colors_map_chat_color_and_config_roundtrip() {
+        let defs = UiColors::default();
+        assert_eq!(defs.bracket_text, Color32::from_rgb(0, 92, 128));
+        assert_eq!(defs.tab_active_bg, Color32::from_rgb(130, 200, 255));
+        assert_eq!(defs.tab_unread_bg, Color32::from_rgb(250, 220, 50));
+        assert!(!defs.custom_ui_bg);
+
+        let mut custom = UiColors {
+            chat_text: Color32::from_rgb(10, 20, 30),
+            my_speech: Color32::from_rgb(11, 21, 31),
+            bracket_text: Color32::from_rgb(12, 22, 32),
+            emote_text: Color32::from_rgb(13, 23, 33),
+            whisper_text: Color32::from_rgb(14, 24, 34),
+            emit_text: Color32::from_rgb(15, 25, 35),
+            shout_text: Color32::from_rgb(16, 26, 36),
+            roll_text: Color32::from_rgb(17, 27, 37),
+            success_text: Color32::from_rgb(18, 28, 38),
+            warning_text: Color32::from_rgb(19, 29, 39),
+            error_text: Color32::from_rgb(20, 30, 40),
+            input_text: Color32::from_rgb(21, 31, 41),
+            tab_active_bg: Color32::from_rgb(30, 40, 50),
+            tab_active_text: Color32::from_rgb(31, 41, 51),
+            tab_unread_bg: Color32::from_rgb(32, 42, 52),
+            tab_unread_text: Color32::from_rgb(33, 43, 53),
+            tab_inactive_bg: Color32::from_rgb(34, 44, 54),
+            tab_inactive_text: Color32::from_rgb(35, 45, 55),
+            custom_ui_bg: true,
+            chat_bg: Color32::from_rgb(40, 50, 60),
+            panel_bg: Color32::from_rgb(41, 51, 61),
+            accent: Color32::from_rgb(42, 52, 62),
+        };
+
+        assert_eq!(custom.map_chat_color("speech"), custom.chat_text);
+        assert_eq!(custom.map_chat_color("myspeech"), custom.my_speech);
+        assert_eq!(custom.map_chat_color("emote"), custom.emote_text);
+        assert_eq!(custom.map_chat_color("whisper"), custom.whisper_text);
+        assert_eq!(custom.map_chat_color("emit"), custom.emit_text);
+        assert_eq!(custom.map_chat_color("shout"), custom.shout_text);
+        assert_eq!(custom.map_chat_color("roll"), custom.roll_text);
+        assert_eq!(custom.map_chat_color("success"), custom.success_text);
+        assert_eq!(custom.map_chat_color("warning"), custom.warning_text);
+        assert_eq!(custom.map_chat_color("error"), custom.error_text);
+        assert_eq!(custom.map_chat_color("unknown_tag"), custom.chat_text);
+        assert_eq!(custom.map_chat_color("#112233"), Color32::from_rgb(0x11, 0x22, 0x33));
+        assert_eq!(custom.map_chat_color("#abc"), Color32::from_rgb(0xaa, 0xbb, 0xcc));
+
+        let mut cfg = furcadia_client::config::ClientConfig::default();
+        custom.write_to_config(&mut cfg);
+        let parsed = furcadia_client::config::ClientConfig::parse(&cfg.serialize());
+        let roundtripped = UiColors::from_config(&parsed);
+        assert_eq!(roundtripped, custom);
+
+        custom.reset_chat_colors();
+        assert_eq!(custom.chat_text, defs.chat_text);
+        assert_eq!(custom.bracket_text, defs.bracket_text);
+        assert_eq!(custom.tab_active_bg, Color32::from_rgb(30, 40, 50));
+        assert!(custom.custom_ui_bg);
+
+        custom.reset_tab_colors();
+        assert_eq!(custom.tab_active_bg, defs.tab_active_bg);
+        assert_eq!(custom.tab_unread_bg, defs.tab_unread_bg);
+        assert!(custom.custom_ui_bg);
+
+        custom.reset_window_colors();
+        assert_eq!(custom, defs);
     }
 }
