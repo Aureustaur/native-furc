@@ -424,7 +424,7 @@ fn render_player_menu_buttons(
         for (label, cmd) in [
             ("Stand", "stand"),
             ("Sit", "sit"),
-            ("Lay Down", "lay"),
+            ("Lay Down", "liedown"),
             ("Turn Left", "<"),
             ("Turn Right", ">"),
             ("Get / Drop", "get"),
@@ -4948,7 +4948,22 @@ impl FurcadiaApp {
                 // filename; `;` (UseMap) and `]q`/`]r` carry the actual map/dream package to load.
             }
             ServerMessage::WorldPacket { opcode, data } => {
+                let prev_self_pose = self
+                    .world
+                    .self_uid
+                    .and_then(|uid| self.world.avatars.get(&uid))
+                    .map(|av| av.pose);
                 self.world.apply_world_packet(opcode, &data);
+                if let Some(new_pose) = self
+                    .world
+                    .self_uid
+                    .and_then(|uid| self.world.avatars.get(&uid))
+                    .map(|av| av.pose)
+                {
+                    if prev_self_pose != Some(new_pose) {
+                        self.posture = posture_from_wire_pose(new_pose);
+                    }
+                }
                 self.sync_selected_character_colors();
                 self.refresh_player_badge_colors();
                 let now = Instant::now();
@@ -5320,6 +5335,25 @@ fn format_raw_cmd_wire(cmd: &str) -> String {
         format!("\"{trimmed}")
     } else {
         trimmed.to_owned()
+    }
+}
+
+/// Maps a Furcadia avatar wire pose (`0..=6`) to the UI posture index (`0=Stand`, `1=Sit`, `2=Lie Down`).
+fn posture_from_wire_pose(pose: u8) -> u8 {
+    match pose {
+        3 => 1,
+        6 => 2,
+        _ => 0,
+    }
+}
+
+/// Returns the explicit Furcadia wire command for a UI posture index (`0=Stand`, `1=Sit`, `2=Lie Down`).
+/// Uses `liedown` rather than `lie` (which is the server's toggle command) so lay down is never skipped.
+fn posture_wire_command(posture: u8) -> &'static str {
+    match posture {
+        1 => "sit",
+        2 => "liedown",
+        _ => "stand",
     }
 }
 
@@ -8254,9 +8288,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     for (idx, lbl, cmd) in [
-                                        (0u8, "Stand", "stand"),
-                                        (1u8, "Sit", "sit"),
-                                        (2u8, "Lie Down", "lie"),
+                                        (0u8, "Stand", posture_wire_command(0)),
+                                        (1u8, "Sit", posture_wire_command(1)),
+                                        (2u8, "Lie Down", posture_wire_command(2)),
                                     ] {
                                         let sel = self.posture == idx;
                                         if ui
@@ -8913,7 +8947,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     for (cat, items) in [
                         (
                             "Movement & Posture",
-                            "Arrows / Num 1,3,7,9: Move  |  Shift+Left/Right or < / >: Rotate\nCtrl+L / `lie / `sit / `stand: Posture  |  F2 / Ctrl+G / `get: Pick up/Drop\nF3 / Ctrl+U: Use held item  |  Tab: Toggle avatar names",
+                            "Arrows / Num 1,3,7,9: Move  |  Shift+Left/Right or < / >: Rotate\nCtrl+L / `liedown / `sit / `stand: Posture  |  F2 / Ctrl+G / `get: Pick up/Drop\nF3 / Ctrl+U: Use held item  |  Tab: Toggle avatar names",
                         ),
                         (
                             "Chat & Formatting",
@@ -9227,11 +9261,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         }
         if cycle_posture {
             self.posture = (self.posture + 1) % 3;
-            let cmd = match self.posture {
-                1 => "sit",
-                2 => "lie",
-                _ => "stand",
-            };
+            let cmd = posture_wire_command(self.posture);
             self.send_raw_cmd(cmd);
         }
         if switch_chat_tab {
@@ -16083,5 +16113,18 @@ mod tests {
 
         custom.reset_window_colors();
         assert_eq!(custom, defs);
+    }
+
+    #[test]
+    fn posture_commands_and_wire_pose_mapping() {
+        assert_eq!(posture_wire_command(0), "stand");
+        assert_eq!(posture_wire_command(1), "sit");
+        assert_eq!(posture_wire_command(2), "liedown");
+        assert_eq!(format_raw_cmd_wire(posture_wire_command(2)), "liedown");
+
+        assert_eq!(posture_from_wire_pose(2), 0);
+        assert_eq!(posture_from_wire_pose(4), 0);
+        assert_eq!(posture_from_wire_pose(3), 1);
+        assert_eq!(posture_from_wire_pose(6), 2);
     }
 }
