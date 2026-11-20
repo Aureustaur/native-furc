@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v1.2.3 — KDE/Wayland Tray Fix & Persistent Window Size"
+          name: "Furcadia Native Client v1.2.4 — XWayland/KWin Minimize-to-Tray Fix"
           body: |
-            ## Furcadia Native Client v1.2.3 — KDE/Wayland Tray Fix & Persistent Window Size
+            ## Furcadia Native Client v1.2.4 — XWayland/KWin Minimize-to-Tray Fix
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -100,27 +100,30 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.2.3
-            - **Fixed Minimize-to-Tray & Close-to-Tray on KDE Plasma / Wayland (CachyOS / Arch)**: automatically uses XWayland (`WINIT_UNIX_BACKEND=x11`) when tray hiding is enabled and `DISPLAY` is available so `Visible(false)`, `is_minimized()`, and click-tray-to-restore work natively (avoiding `winit`'s Wayland no-ops), with a restore guard to prevent immediate re-hiding and safe fallback on pure Wayland.
-            - **Persistent Window Size & Maximized State**: remembers your resized window dimensions and maximized state per device across restarts in `config.ini` without clobbering across different monitors via cloud sync.
-            - Includes all `v1.2.2` improvements (chronological Furcadia-style whisper logging, local timestamps, native Linux `StatusNotifierItem` tray icon & context menu, and top-bar cleanup).
+            ### What's New in v1.2.4
+            - **Fixed Minimize-to-Tray on KDE Plasma / Wayland (CachyOS / Arch)**:
+              - Replaced the removed `WINIT_UNIX_BACKEND=x11` env var with `winit::platform::x11::EventLoopBuilderExtX11::with_x11()` via `eframe::NativeOptions::event_loop_builder` so XWayland is actually selected on `winit 0.30` (works immediately without restarting after toggling tray settings).
+              - Detected the active window backend directly from `raw_window_handle` instead of guessing from environment variables.
+              - Added ICCCM §4.1.4 `XWithdrawWindow` (`UnmapWindow` + synthetic `UnmapNotify` to root via `x11rb`) so KWin cleanly removes an iconified/minimized window from the taskbar into the system tray.
+              - Added light 200ms unfocused polling when `Minimize to tray` is enabled so minimize events are always caught even though `winit` ignores `_NET_WM_STATE` `PropertyNotify` events.
+            - Includes all `v1.2.3` improvements (persistent per-device window size & maximized state, native Linux `StatusNotifierItem` tray icon & context menu, and Furcadia-style chronological whisper logging).
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.2.3-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.2.4-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.2.3_amd64.deb
+            sudo apt install ./furcadia-native_1.2.4_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.2.3-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.2.4-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

@@ -1564,6 +1564,9 @@ struct FurcadiaApp {
     minimize_to_tray: bool,
     close_to_tray: bool,
     tray: TrayHandle,
+    is_wayland: bool,
+    #[cfg(target_os = "linux")]
+    x11_window_id: Option<u32>,
     hidden_in_tray: bool,
     was_minimized: bool,
     tray_restore_until: Option<Instant>,
@@ -1935,6 +1938,9 @@ impl FurcadiaApp {
                     move || tray_ctx.request_repaint(),
                 )
             },
+            is_wayland: detect_window_backend(cc).0,
+            #[cfg(target_os = "linux")]
+            x11_window_id: detect_window_backend(cc).1,
             hidden_in_tray: false,
             was_minimized: false,
             tray_restore_until: None,
@@ -5763,26 +5769,72 @@ fn classify_chat_input(
     (cmd, open_whisper_tab_disp)
 }
 
-fn running_on_wayland() -> bool {
+fn detect_window_backend(_cc: &eframe::CreationContext<'_>) -> (bool, Option<u32>) {
     #[cfg(target_os = "linux")]
     {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = _cc.window_handle() {
+            match handle.as_raw() {
+                RawWindowHandle::Wayland(_) => return (true, None),
+                RawWindowHandle::Xlib(h) => return (false, u32::try_from(h.window).ok()),
+                RawWindowHandle::Xcb(h) => return (false, Some(h.window.get())),
+                _ => return (false, None),
+            }
+        }
         let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
-        let forced_x11 = std::env::var("WINIT_UNIX_BACKEND")
-            .map(|v| v.eq_ignore_ascii_case("x11"))
-            .unwrap_or(false);
-        has_wayland && !forced_x11
+        (has_wayland, None)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        false
+        (false, None)
     }
+}
+
+/// Performs an ICCCM §4.1.4 `XWithdrawWindow` (UnmapWindow + synthetic UnmapNotify to root).
+///
+/// `winit`'s X11 `set_visible(false)` only calls `xcb_unmap_window`, which is a no-op when
+/// the window manager (e.g. KWin on KDE Plasma) has already unmapped/iconified the window
+/// on minimize. Sending the synthetic `UnmapNotify` transitions the window from Iconic to
+/// Withdrawn so it actually disappears from the taskbar/panel into the system tray.
+#[cfg(target_os = "linux")]
+fn withdraw_x11_window(window_id: u32) {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{
+        ConnectionExt, EventMask, UnmapNotifyEvent, UNMAP_NOTIFY_EVENT,
+    };
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return;
+    };
+    let Some(screen) = conn.setup().roots.get(screen_num) else {
+        return;
+    };
+    let root = screen.root;
+    let _ = conn.unmap_window(window_id);
+    let event = UnmapNotifyEvent {
+        response_type: UNMAP_NOTIFY_EVENT,
+        sequence: 0,
+        event: root,
+        window: window_id,
+        from_configure: false,
+    };
+    let _ = conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        event,
+    );
+    let _ = conn.flush();
 }
 
 impl FurcadiaApp {
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
-        if self.tray.is_active() && !running_on_wayland() {
+        if self.tray.is_active() && !self.is_wayland {
             self.hidden_in_tray = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            #[cfg(target_os = "linux")]
+            if let Some(win_id) = self.x11_window_id {
+                withdraw_x11_window(win_id);
+            }
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
@@ -5887,11 +5939,21 @@ impl eframe::App for FurcadiaApp {
             && !self.was_minimized
             && !self.hidden_in_tray
             && self.tray.is_active()
-            && !running_on_wayland()
+            && !self.is_wayland
         {
             self.hide_to_tray(ctx);
         }
         self.was_minimized = is_minimized;
+        // winit's X11 backend does not emit a WindowEvent on `_NET_WM_STATE` PropertyNotify,
+        // so poll lightly while unfocused and visible to catch minimize-button / taskbar iconify.
+        if self.minimize_to_tray
+            && !self.hidden_in_tray
+            && self.tray.is_active()
+            && !self.is_wayland
+            && !self.window_focused
+        {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
 
         self.handle_net_events(ctx);
         self.poll_bg_sessions();
@@ -6878,9 +6940,9 @@ impl FurcadiaApp {
             if ui.checkbox(&mut self.pounce_detached, "Detach Pounce into separate window").changed() { self.save_config(); }
             if ui.checkbox(&mut self.minimize_to_tray, "Minimize to tray/panel").changed() { self.save_config(); }
             if ui.checkbox(&mut self.close_to_tray, "Close button minimizes instead of quitting").changed() { self.save_config(); }
-            if (self.minimize_to_tray || self.close_to_tray) && running_on_wayland() {
+            if (self.minimize_to_tray || self.close_to_tray) && self.is_wayland {
                 ui.label(
-                    RichText::new("Restart the client to activate full hide-to-tray & restore on Wayland.")
+                    RichText::new("Running on pure Wayland without XWayland; minimize/hide-to-tray falls back to taskbar minimize.")
                         .size(11.0)
                         .color(Color32::from_rgb(230, 200, 120)),
                 );
@@ -16069,23 +16131,33 @@ fn decode_furcadia_portrait(data: &[u8], palette: &Palette) -> Option<(usize, us
 
 fn main() -> eframe::Result<()> {
     let startup_cfg = ClientConfig::load_default();
-    #[cfg(target_os = "linux")]
-    {
-        let wants_tray = startup_cfg.minimize_to_tray || startup_cfg.close_to_tray;
-        let has_x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
-        let backend_unset = std::env::var_os("WINIT_UNIX_BACKEND").is_none();
-        if wants_tray && has_x11 && backend_unset {
-            // winit's Wayland backend ignores set_visible(false), is_minimized(),
-            // and set_minimized(false). Use X11/XWayland when tray hiding is enabled
-            // so minimize-to-tray, close-to-tray, and click-tray-to-restore work natively.
-            std::env::set_var("WINIT_UNIX_BACKEND", "x11");
-        }
-    }
     let icon = image::load_from_memory(include_bytes!("../../packaging/linux/furcadia-native.png"))
         .expect("application icon must be a valid PNG")
         .to_rgba8();
     let (icon_width, icon_height) = icon.dimensions();
+    #[cfg(target_os = "linux")]
+    let event_loop_builder: Option<eframe::EventLoopBuilderHook> = {
+        let has_x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+        let user_forced_wayland = std::env::var("WINIT_UNIX_BACKEND")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+        if has_x11 && !user_forced_wayland {
+            // winit 0.30 removed WINIT_UNIX_BACKEND and its Wayland backend ignores
+            // set_visible(false), is_minimized(), and set_minimized(false). Use X11/XWayland
+            // via EventLoopBuilderExtX11::with_x11 so minimize-to-tray, close-to-tray,
+            // Hide to Tray, and click-tray-to-restore work natively on KDE/GNOME/Wayland.
+            Some(Box::new(|builder| {
+                use winit::platform::x11::EventLoopBuilderExtX11;
+                builder.with_x11();
+            }))
+        } else {
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let event_loop_builder: Option<eframe::EventLoopBuilderHook> = None;
     let options = eframe::NativeOptions {
+        event_loop_builder,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([
                 f32::from(startup_cfg.window_width),

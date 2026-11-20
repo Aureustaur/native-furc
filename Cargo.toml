@@ -1,6 +1,6 @@
 [package]
 name = "furcadia-client"
-version = "1.2.3"
+version = "1.2.4"
 edition = "2021"
 description = "Native Linux & cross-platform Furcadia client core library, CLI, and GUI"
 license = "CC-BY-NC-SA-4.0"
@@ -28,3 +28,6 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "4", default-features = false, features = ["async-io"] }
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+raw-window-handle = "0.6"
+x11rb = { version = "0.13", default-features = false }
