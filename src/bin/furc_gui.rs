@@ -1566,7 +1566,12 @@ struct FurcadiaApp {
     tray: TrayHandle,
     hidden_in_tray: bool,
     was_minimized: bool,
+    tray_restore_until: Option<Instant>,
     allow_quit: bool,
+    window_width: u16,
+    window_height: u16,
+    window_maximized: bool,
+    window_geometry_dirty_at: Option<Instant>,
     font_family: String,
     font_size: u16,
     chat_font_size: u16,
@@ -1932,7 +1937,12 @@ impl FurcadiaApp {
             },
             hidden_in_tray: false,
             was_minimized: false,
+            tray_restore_until: None,
             allow_quit: false,
+            window_width: cfg.window_width,
+            window_height: cfg.window_height,
+            window_maximized: cfg.window_maximized,
+            window_geometry_dirty_at: None,
             font_family: cfg.font_family.clone(),
             font_size: cfg.font_size,
             chat_font_size: cfg.chat_font_size,
@@ -2080,6 +2090,9 @@ impl FurcadiaApp {
             sync_folder: self.sync_folder.clone(),
             sync_device_id: self.sync_device_id.clone(),
             sync_updated_at: 0,
+            window_width: self.window_width,
+            window_height: self.window_height,
+            window_maximized: self.window_maximized,
             ..ClientConfig::default()
         };
         self.colors.write_to_config(&mut cfg);
@@ -5750,9 +5763,24 @@ fn classify_chat_input(
     (cmd, open_whisper_tab_disp)
 }
 
+fn running_on_wayland() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        let forced_x11 = std::env::var("WINIT_UNIX_BACKEND")
+            .map(|v| v.eq_ignore_ascii_case("x11"))
+            .unwrap_or(false);
+        has_wayland && !forced_x11
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 impl FurcadiaApp {
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
-        if self.tray.is_active() {
+        if self.tray.is_active() && !running_on_wayland() {
             self.hidden_in_tray = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         } else {
@@ -5762,6 +5790,8 @@ impl FurcadiaApp {
 
     fn show_from_tray(&mut self, ctx: &egui::Context) {
         self.hidden_in_tray = false;
+        self.was_minimized = true;
+        self.tray_restore_until = Some(Instant::now() + Duration::from_millis(500));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -5790,6 +5820,44 @@ impl FurcadiaApp {
             }
         }
     }
+    fn track_window_geometry(&mut self, ctx: &egui::Context, is_minimized: bool) {
+        let maximized = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
+        let mut changed = false;
+        if maximized != self.window_maximized {
+            self.window_maximized = maximized;
+            changed = true;
+        }
+        if !maximized && !is_minimized && !self.hidden_in_tray {
+            let size = ctx
+                .input(|i| i.viewport().inner_rect.map(|r| r.size()))
+                .unwrap_or_else(|| ctx.screen_rect().size());
+            if size.x.is_finite() && size.y.is_finite() && size.x >= 640.0 && size.y >= 420.0 {
+                let w = size.x.round().clamp(640.0, 7680.0) as u16;
+                let h = size.y.round().clamp(420.0, 4320.0) as u16;
+                if w != self.window_width || h != self.window_height {
+                    self.window_width = w;
+                    self.window_height = h;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.window_geometry_dirty_at = Some(Instant::now());
+        }
+        let flush_now = self
+            .window_geometry_dirty_at
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(400));
+        if flush_now {
+            self.window_geometry_dirty_at = None;
+            let _ = self.current_config().save_local_default();
+        }
+    }
+
+    fn flush_window_geometry(&mut self) {
+        if self.window_geometry_dirty_at.take().is_some() {
+            let _ = self.current_config().save_local_default();
+        }
+    }
 }
 
 impl eframe::App for FurcadiaApp {
@@ -5797,16 +5865,29 @@ impl eframe::App for FurcadiaApp {
         self.apply_font_settings(ctx);
         self.poll_tray_events(ctx);
         self.window_focused = ctx.input(|i| i.focused);
-        if self.close_to_tray && !self.allow_quit && ctx.input(|i| i.viewport().close_requested()) {
+        let close_req = ctx.input(|i| i.viewport().close_requested());
+        if close_req {
+            self.flush_window_geometry();
+        }
+        if self.close_to_tray && !self.allow_quit && close_req {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_to_tray(ctx);
         }
         let is_minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+        self.track_window_geometry(ctx, is_minimized);
+        let restoring = self
+            .tray_restore_until
+            .is_some_and(|until| Instant::now() < until);
+        if !restoring {
+            self.tray_restore_until = None;
+        }
         if self.minimize_to_tray
+            && !restoring
             && is_minimized
             && !self.was_minimized
             && !self.hidden_in_tray
             && self.tray.is_active()
+            && !running_on_wayland()
         {
             self.hide_to_tray(ctx);
         }
@@ -6797,6 +6878,13 @@ impl FurcadiaApp {
             if ui.checkbox(&mut self.pounce_detached, "Detach Pounce into separate window").changed() { self.save_config(); }
             if ui.checkbox(&mut self.minimize_to_tray, "Minimize to tray/panel").changed() { self.save_config(); }
             if ui.checkbox(&mut self.close_to_tray, "Close button minimizes instead of quitting").changed() { self.save_config(); }
+            if (self.minimize_to_tray || self.close_to_tray) && running_on_wayland() {
+                ui.label(
+                    RichText::new("Restart the client to activate full hide-to-tray & restore on Wayland.")
+                        .size(11.0)
+                        .color(Color32::from_rgb(230, 200, 120)),
+                );
+            }
             ui.separator();
             ui.label(RichText::new("GitHub Updates").strong().color(accent));
             if ui
@@ -15980,13 +16068,30 @@ fn decode_furcadia_portrait(data: &[u8], palette: &Palette) -> Option<(usize, us
 }
 
 fn main() -> eframe::Result<()> {
+    let startup_cfg = ClientConfig::load_default();
+    #[cfg(target_os = "linux")]
+    {
+        let wants_tray = startup_cfg.minimize_to_tray || startup_cfg.close_to_tray;
+        let has_x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+        let backend_unset = std::env::var_os("WINIT_UNIX_BACKEND").is_none();
+        if wants_tray && has_x11 && backend_unset {
+            // winit's Wayland backend ignores set_visible(false), is_minimized(),
+            // and set_minimized(false). Use X11/XWayland when tray hiding is enabled
+            // so minimize-to-tray, close-to-tray, and click-tray-to-restore work natively.
+            std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        }
+    }
     let icon = image::load_from_memory(include_bytes!("../../packaging/linux/furcadia-native.png"))
         .expect("application icon must be a valid PNG")
         .to_rgba8();
     let (icon_width, icon_height) = icon.dimensions();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
+            .with_inner_size([
+                f32::from(startup_cfg.window_width),
+                f32::from(startup_cfg.window_height),
+            ])
+            .with_maximized(startup_cfg.window_maximized)
             .with_title("Furcadia Native Client")
             // Wayland gets the window icon from the matching desktop entry,
             // since its backend ignores per-window icon data.

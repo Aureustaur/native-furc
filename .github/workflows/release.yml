@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v1.2.2 — Furcadia-Style Logs, Linux System Tray & Polish"
+          name: "Furcadia Native Client v1.2.3 — KDE/Wayland Tray Fix & Persistent Window Size"
           body: |
-            ## Furcadia Native Client v1.2.2 — Furcadia-Style Logs, Linux System Tray & Polish
+            ## Furcadia Native Client v1.2.3 — KDE/Wayland Tray Fix & Persistent Window Size
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -100,30 +100,27 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.2.2
-            - **Fixed Furcadia-style logging & missing latest whisper logs**:
-              - Whisper history loading now parses timestamps chronologically across `MM/DD/YY HH:MM:SS`, `MM/DD/YYYY HH:MM:SS`, and legacy `[YYYY-MM-DD HH:MM:SS]` formats so older years (e.g. Dec 2025) and legacy bracketed lines no longer sort after or evict today's latest whispers.
-              - Whisper logs now use local time (`MM/DD/YY HH:MM:SS`, no `*` suffix) and official Furcadia format (`<Speaker>: <message>` and `* <Speaker> <emote>`), preserving your active character name across shared logs.
-              - Shared Log Viewer (`Shared (All Characters)`) and the whisper tab `History` button now deduplicate whisper peers and display the full merged chronological history; Windows log imports now respect shared-log mode.
-            - **Linux System Tray (`StatusNotifierItem`)**: added a native D-Bus tray icon and context menu (**Show / Hide Furcadia**, **Quit Furcadia**) for KDE Plasma / Wayland, Waybar, Hyprland, GNOME AppIndicator, and XFCE, wiring up **Close to tray**, **Minimize to tray**, and a **Misc -> Hide to Tray** button.
-            - **UI Cleanup**: removed the non-functional **Time** button from the top bar.
+            ### What's New in v1.2.3
+            - **Fixed Minimize-to-Tray & Close-to-Tray on KDE Plasma / Wayland (CachyOS / Arch)**: automatically uses XWayland (`WINIT_UNIX_BACKEND=x11`) when tray hiding is enabled and `DISPLAY` is available so `Visible(false)`, `is_minimized()`, and click-tray-to-restore work natively (avoiding `winit`'s Wayland no-ops), with a restore guard to prevent immediate re-hiding and safe fallback on pure Wayland.
+            - **Persistent Window Size & Maximized State**: remembers your resized window dimensions and maximized state per device across restarts in `config.ini` without clobbering across different monitors via cloud sync.
+            - Includes all `v1.2.2` improvements (chronological Furcadia-style whisper logging, local timestamps, native Linux `StatusNotifierItem` tray icon & context menu, and top-bar cleanup).
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.2.2-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.2.3-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.2.2_amd64.deb
+            sudo apt install ./furcadia-native_1.2.3_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.2.2-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.2.3-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

@@ -89,6 +89,12 @@ pub struct ClientConfig {
     pub sync_device_id: String,
     /// Timestamp of this device's last synced preferences snapshot.
     pub sync_updated_at: u64,
+    /// Last saved main window inner width in logical points (device-local).
+    pub window_width: u16,
+    /// Last saved main window inner height in logical points (device-local).
+    pub window_height: u16,
+    /// Whether the main window was maximized (device-local).
+    pub window_maximized: bool,
 }
 
 impl Default for ClientConfig {
@@ -162,6 +168,9 @@ impl Default for ClientConfig {
             sync_folder: String::new(),
             sync_device_id: String::new(),
             sync_updated_at: 0,
+            window_width: 1200,
+            window_height: 800,
+            window_maximized: false,
         }
     }
 }
@@ -560,6 +569,17 @@ impl ClientConfig {
                     "sync_folder" => cfg.sync_folder = v.trim().to_owned(),
                     "sync_device_id" => cfg.sync_device_id = v.trim().to_owned(),
                     "sync_updated_at" => cfg.sync_updated_at = v.trim().parse().unwrap_or(0),
+                    "window_width" => {
+                        if let Ok(w) = v.trim().parse::<u16>() {
+                            cfg.window_width = w.clamp(640, 7680);
+                        }
+                    }
+                    "window_height" => {
+                        if let Ok(h) = v.trim().parse::<u16>() {
+                            cfg.window_height = h.clamp(420, 4320);
+                        }
+                    }
+                    "window_maximized" => cfg.window_maximized = v.trim() == "true",
                     _ => {}
                 }
             }
@@ -585,7 +605,7 @@ impl ClientConfig {
             ""
         };
         format!(
-            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nflash_taskbar_on_message={}\nflash_taskbar_on_main_chat={}\nmention_nicknames={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nmy_speech_color={:06x}\nbracket_text_color={:06x}\nemote_text_color={:06x}\nwhisper_text_color={:06x}\nemit_text_color={:06x}\nshout_text_color={:06x}\nroll_text_color={:06x}\nsuccess_text_color={:06x}\nwarning_text_color={:06x}\nerror_text_color={:06x}\ntab_active_bg={:06x}\ntab_active_text={:06x}\ntab_unread_bg={:06x}\ntab_unread_text={:06x}\ntab_inactive_bg={:06x}\ntab_inactive_text={:06x}\ncustom_ui_bg={}\nchat_bg_color={:06x}\npanel_bg_color={:06x}\naccent_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\n",
+            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nflash_taskbar_on_message={}\nflash_taskbar_on_main_chat={}\nmention_nicknames={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nmy_speech_color={:06x}\nbracket_text_color={:06x}\nemote_text_color={:06x}\nwhisper_text_color={:06x}\nemit_text_color={:06x}\nshout_text_color={:06x}\nroll_text_color={:06x}\nsuccess_text_color={:06x}\nwarning_text_color={:06x}\nerror_text_color={:06x}\ntab_active_bg={:06x}\ntab_active_text={:06x}\ntab_unread_bg={:06x}\ntab_unread_text={:06x}\ntab_inactive_bg={:06x}\ntab_inactive_text={:06x}\ncustom_ui_bg={}\nchat_bg_color={:06x}\npanel_bg_color={:06x}\naccent_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\nwindow_width={}\nwindow_height={}\nwindow_maximized={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
@@ -653,7 +673,10 @@ impl ClientConfig {
             self.dice_roll,
             self.sync_folder,
             self.sync_device_id,
-            self.sync_updated_at
+            self.sync_updated_at,
+            self.window_width,
+            self.window_height,
+            self.window_maximized
         )
     }
 }
@@ -733,6 +756,9 @@ mod tests {
             sync_folder: String::new(),
             sync_device_id: String::new(),
             sync_updated_at: 0,
+            window_width: 1200,
+            window_height: 800,
+            window_maximized: false,
         };
         let s = cfg.serialize();
         let parsed = ClientConfig::parse(&s);
