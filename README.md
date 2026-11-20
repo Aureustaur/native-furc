@@ -21,7 +21,23 @@
 
 ---
 
-![Furcadia Native Client with fictional demo names, sample chat, and four whisper tabs](mockups/demo-chat-screenshot-reference-v2.png)
+![Furcadia Native Client with fictional demo characters, Furcadia-formatted emotes and chat, whisper tabs, Pounce, and Saved Dreams](mockups/demo-chat-screenshot-reference-v3.png)
+
+<details>
+<summary><strong>Screenshots: Settings &amp; Customization (Skins, Fonts, Colors, Alerts, Cloud Sync &amp; Cache)</strong></summary>
+
+<br />
+
+#### Dream Window Skins, Fonts, Portrait Sizing & Full Color Customization
+![Settings — Skins, fonts, portrait sizing, and live-preview chat/tab/window color pickers](mockups/settings-appearance-colors.png)
+
+#### Animations, Whispers, Dice, Audio, Mentions & Window/Tray Behavior
+![Settings — Animations, whisper and dice behavior, audio, mention alerts, taskbar flash, and system tray options](mockups/settings-behavior-alerts.png)
+
+#### Chat & Whisper Logs, Cloud Folder Sync, Cached Downloads & Windows Importer
+![Settings — Shared/per-character log retention, Nextcloud/Drive/Dropbox folder sync, avatar/dream cache manager, and Windows Furcadia importer](mockups/settings-logs-sync-cache.png)
+
+</details>
 
 Furcadia Native Client is an independent, natively compiled Rust client for Furcadia built with `egui`. It runs **standalone out of the box** on both clean Linux and Windows installs — automatically fetching stock species, dynamic Digo avatars, portraits, and dreams without requiring Wine or a pre-existing installation — while still letting you import your existing Windows or Wine Furcadia files whenever you want.
 
@@ -38,7 +54,8 @@ Alongside the graphical desktop client (`furc-gui`), the repository provides a s
 
 ## Features
 
-### Playing, Dreams, and Avatars
+<details>
+<summary><strong>Playing, Dreams, and Avatars</strong></summary>
 
 - Sign in with an account email or individual character credentials, with multi-character support in a single window.
 - Render Furcadia dreams natively (`Fox5`, `FSHX`, `FSH`, and `FR01` archives; map formats `V01.40` and `V01.50`) with Furcadia palette/color remapping, animated avatars, dynamic Digo avatars, remappable/custom portraits, and player badges.
@@ -46,7 +63,10 @@ Alongside the graphical desktop client (`furc-gui`), the repository provides a s
 - Navigate via main map shortcuts, `furc://` Dream URLs, **Saved Dreams** bookmarks, and sidebar Digo controls for wings, toggles, costumes, and Digo abilities.
 - Built-in sound effects and dream music toggles.
 
-### Player Card, Secure Trading, Cookies, and Gifts
+</details>
+
+<details>
+<summary><strong>Player Card, Secure Trading, Cookies, and Gifts</strong></summary>
 
 - Look at any player to open their portrait card with one-click **Whisper**, **Join**, **Summon**, **Follow**, and **+Pounce / -Pounce** controls.
 - **Cookie menu**: run `Make Cookie`, `Give Cookie`, `Make Secret Cookie`, and `Give Secret Cookie` straight from a player's card, with per-character active and bank cookie counts preserved across alt tabs (no more stray `info` output on tab switches).
@@ -54,7 +74,10 @@ Alongside the graphical desktop client (`furc-gui`), the repository provides a s
 - **Trade menu**: initiate and complete secure trades cleanly from the other-character card (`Start Trade`, `Trade Status`, `Add Common Item` dropdown for portraits/wings/gifts/DragonScales, inline `Item` `+Add` / `-Rem` for any custom item or currency like `GD 50`, inline `Reason` `Set`, `Accept Trade`, `Reject Trade`, and `End Trade`).
 - Proper Furcadia speech-prefix (`"`) wire routing for `trade-*`, `gift-*`, `give-*`, `discard-*`, and cookie commands whether entered in Main Chat, Whisper tabs, detached whisper windows, `/cmd`, `` `cmd ``, or player menus — without breaking ordinary whisper messages like `"give me a minute"`.
 
-### Chat, Whispers, and Roleplay Tools
+</details>
+
+<details>
+<summary><strong>Chat, Whispers, and Roleplay Tools</strong></summary>
 
 - Character-colored names and clean channel formatting across Main Chat and whispers.
 - `[bracketed text]` automatically highlighted in blue inside chat and whisper messages for easy OOC / RP tag scanning.
@@ -63,23 +86,34 @@ Alongside the graphical desktop client (`furc-gui`), the repository provides a s
 - Drag-to-reorder character and whisper tabs, plus pop-out / dockable windows for whispers and Pounce.
 - Bold/Italic/Underline formatting buttons, a clickable link builder (`https://` and `furc://`), configurable dice roller (`1d20`, `1d100`, etc.), built-in spell checker/autocorrect, and `F1` hotkeys.
 
-### Pounce and Notifications
+</details>
+
+<details>
+<summary><strong>Pounce, Notifications, and System Tray</strong></summary>
 
 - Real-time Pounce friend watchlist with online/offline status indicators and Pounce list import.
 - Saved Dreams list alongside Pounce so favorite maps stay one click away.
-- Configurable notifications for Pounce alerts, whispers, and mentions, plus in-client Furcadia news.
+- Configurable notifications for Pounce alerts, whispers, and mentions, plus taskbar flashing, Linux system tray alert blinking / unread badge, and in-client Furcadia news.
 
-### Logging and Cloud Folder Sync
+</details>
+
+<details>
+<summary><strong>Logging and Cloud Folder Sync</strong></summary>
 
 - Local chat and whisper logging with a searchable in-client log viewer and configurable retention.
 - Logs default to a single **Furcadia-style shared folder** across all characters, with an optional **per-character folder** mode in Settings.
 - Sync preferences and logs between computers via any folder-sync tool you already use — **Nextcloud**, **Google Drive for desktop**, **Dropbox**, or similar — without special account linking inside the client.
 
-### Interface, Settings, and Cache Tools
+</details>
+
+<details>
+<summary><strong>Interface, Settings, and Cache Tools</strong></summary>
 
 - Dedicated Settings tab with full **Colors** customization (live preview, opaque RGB pickers, cloud-synced color profiles, and one-click resets covering regular chat, `[bracket text]`, your speech, emotes, whispers/trade, emits/links, shouts, dice rolls, system/warnings/errors, typed input, active/unread/inactive tabs, and custom window/panel/accent colors), plus font/portrait sizing, themes, audio, notifications, spell check, and Windows asset import.
 - **Cached Downloads** manager in Settings to inspect avatar and dream cache disk usage and flush or re-download cached avatars, dreams, or all downloads with one click if downloaded files ever need a fresh copy.
 - Clean emoji-free text/ASCII UI controls across every menu, tab, and toolbar, plus automatic update checks when a newer GitHub release is published.
+
+</details>
 
 ## Bring your Furcadia files with you
 
