@@ -22,6 +22,9 @@ pub enum TrayAction {
 pub struct TrayHandle {
     rx: mpsc::Receiver<TrayAction>,
     active: Arc<AtomicBool>,
+    attention_state: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    attention_tx: Option<mpsc::Sender<bool>>,
 }
 
 impl TrayHandle {
@@ -34,14 +37,22 @@ impl TrayHandle {
     pub fn try_recv(&self) -> Option<TrayAction> {
         self.rx.try_recv().ok()
     }
+
+    /// Enables or disables tray attention / blinking state (e.g. unread message while hidden/unfocused).
+    pub fn set_attention(&self, attention: bool) {
+        let prev = self.attention_state.swap(attention, Ordering::Relaxed);
+        if prev == attention {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(tx) = &self.attention_tx {
+            let _ = tx.send(attention);
+        }
+    }
 }
 
-/// Converts raw PNG bytes into a 32x32 ARGB32 (network byte order) pixmap for StatusNotifierItem.
-pub fn png_to_sni_pixmap(png_bytes: &[u8]) -> Option<(i32, i32, Vec<u8>)> {
-    let img = image::load_from_memory(png_bytes).ok()?;
-    let resized = img
-        .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
-        .to_rgba8();
+/// Converts an RGBA8 32x32 image into ARGB32 (network byte order) pixmap for StatusNotifierItem.
+fn rgba_to_sni_pixmap(resized: &image::RgbaImage) -> (i32, i32, Vec<u8>) {
     let (w, h) = resized.dimensions();
     let mut argb = Vec::with_capacity((w * h * 4) as usize);
     for px in resized.pixels() {
@@ -50,7 +61,43 @@ pub fn png_to_sni_pixmap(png_bytes: &[u8]) -> Option<(i32, i32, Vec<u8>)> {
         argb.push(px[1]); // G
         argb.push(px[2]); // B
     }
-    Some((w as i32, h as i32, argb))
+    (w as i32, h as i32, argb)
+}
+
+/// Converts raw PNG bytes into a 32x32 ARGB32 (network byte order) pixmap for StatusNotifierItem.
+pub fn png_to_sni_pixmap(png_bytes: &[u8]) -> Option<(i32, i32, Vec<u8>)> {
+    let img = image::load_from_memory(png_bytes).ok()?;
+    let resized = img
+        .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    Some(rgba_to_sni_pixmap(&resized))
+}
+
+/// Converts raw PNG bytes into a 32x32 ARGB32 alert pixmap with a bright unread badge dot
+/// in the top-right corner for tray blinking / `NeedsAttention`.
+pub fn png_to_sni_alert_pixmap(png_bytes: &[u8]) -> Option<(i32, i32, Vec<u8>)> {
+    let img = image::load_from_memory(png_bytes).ok()?;
+    let mut resized = img
+        .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    // Draw a crisp orange-red notification dot with a bright gold/white outer ring at top-right.
+    let cx = 23.5_f32;
+    let cy = 8.5_f32;
+    let inner_r2 = 5.2_f32 * 5.2_f32;
+    let outer_r2 = 7.0_f32 * 7.0_f32;
+    for y in 0..32_u32 {
+        for x in 0..32_u32 {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= inner_r2 {
+                resized.put_pixel(x, y, image::Rgba([255, 64, 48, 255]));
+            } else if d2 <= outer_r2 {
+                resized.put_pixel(x, y, image::Rgba([255, 232, 160, 255]));
+            }
+        }
+    }
+    Some(rgba_to_sni_pixmap(&resized))
 }
 
 /// Spawns the system tray icon on a background thread.
@@ -63,30 +110,39 @@ where
 {
     let (tx, rx) = mpsc::channel::<TrayAction>();
     let active = Arc::new(AtomicBool::new(false));
+    let attention_state = Arc::new(AtomicBool::new(false));
 
     #[cfg(target_os = "linux")]
-    {
+    let attention_tx = {
+        let (att_tx, att_rx) = mpsc::channel::<bool>();
         let active_bg = Arc::clone(&active);
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(on_event);
         std::thread::Builder::new()
             .name("furc-tray".to_owned())
             .spawn(move || {
-                linux::run_sni_tray(icon_png_bytes, tx, notify, active_bg);
+                linux::run_sni_tray(icon_png_bytes, tx, att_rx, notify, active_bg);
             })
             .ok();
-    }
+        Some(att_tx)
+    };
 
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (icon_png_bytes, on_event, tx);
     }
 
-    TrayHandle { rx, active }
+    TrayHandle {
+        rx,
+        active,
+        attention_state,
+        #[cfg(target_os = "linux")]
+        attention_tx,
+    }
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{png_to_sni_pixmap, TrayAction};
+    use super::{png_to_sni_alert_pixmap, png_to_sni_pixmap, TrayAction};
     use std::collections::HashMap;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -103,12 +159,26 @@ mod linux {
         tx: mpsc::Sender<TrayAction>,
         notify: Arc<dyn Fn() + Send + Sync>,
         pixmap: Vec<(i32, i32, Vec<u8>)>,
+        alert_pixmap: Vec<(i32, i32, Vec<u8>)>,
+        attention: Arc<AtomicBool>,
+        blink_on: Arc<AtomicBool>,
     }
 
     impl StatusNotifierItem {
         fn send(&self, action: TrayAction) {
             let _ = self.tx.send(action);
             (self.notify)();
+        }
+
+        fn current_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
+            if self.attention.load(Ordering::Relaxed)
+                && self.blink_on.load(Ordering::Relaxed)
+                && !self.alert_pixmap.is_empty()
+            {
+                self.alert_pixmap.clone()
+            } else {
+                self.pixmap.clone()
+            }
         }
     }
 
@@ -131,7 +201,11 @@ mod linux {
 
         #[zbus(property)]
         fn status(&self) -> &str {
-            "Active"
+            if self.attention.load(Ordering::Relaxed) {
+                "NeedsAttention"
+            } else {
+                "Active"
+            }
         }
 
         #[zbus(property)]
@@ -150,7 +224,17 @@ mod linux {
 
         #[zbus(property)]
         fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
-            self.pixmap.clone()
+            self.current_pixmap()
+        }
+
+        #[zbus(property)]
+        fn attention_icon_name(&self) -> &str {
+            ""
+        }
+
+        #[zbus(property)]
+        fn attention_icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
+            self.current_pixmap()
         }
 
         #[zbus(property)]
@@ -165,11 +249,16 @@ mod linux {
 
         #[zbus(property)]
         fn tool_tip(&self) -> (String, Vec<(i32, i32, Vec<u8>)>, String, String) {
+            let subtitle = if self.attention.load(Ordering::Relaxed) {
+                "New message — click to show window"
+            } else {
+                "Click to show or hide window"
+            };
             (
                 String::new(),
                 Vec::new(),
                 "Furcadia Native Client".to_owned(),
-                "Click to show or hide window".to_owned(),
+                subtitle.to_owned(),
             )
         }
 
@@ -329,18 +418,60 @@ mod linux {
         }
     }
 
+    fn emit_sni_refresh(conn: &zbus::blocking::Connection, status: Option<&str>) {
+        if let Some(s) = status {
+            let _ = conn.emit_signal(
+                Option::<&str>::None,
+                "/StatusNotifierItem",
+                "org.kde.StatusNotifierItem",
+                "NewStatus",
+                &(s,),
+            );
+            let _ = conn.emit_signal(
+                Option::<&str>::None,
+                "/StatusNotifierItem",
+                "org.kde.StatusNotifierItem",
+                "NewToolTip",
+                &(),
+            );
+        }
+        let _ = conn.emit_signal(
+            Option::<&str>::None,
+            "/StatusNotifierItem",
+            "org.kde.StatusNotifierItem",
+            "NewIcon",
+            &(),
+        );
+        let _ = conn.emit_signal(
+            Option::<&str>::None,
+            "/StatusNotifierItem",
+            "org.kde.StatusNotifierItem",
+            "NewAttentionIcon",
+            &(),
+        );
+    }
+
     pub fn run_sni_tray(
         icon_png_bytes: &[u8],
         tx: mpsc::Sender<TrayAction>,
+        attention_rx: mpsc::Receiver<bool>,
         notify: Arc<dyn Fn() + Send + Sync>,
         active: Arc<AtomicBool>,
     ) {
-        let pixmap = png_to_sni_pixmap(icon_png_bytes).into_iter().collect();
+        let pixmap: Vec<_> = png_to_sni_pixmap(icon_png_bytes).into_iter().collect();
+        let alert_pixmap: Vec<_> = png_to_sni_alert_pixmap(icon_png_bytes)
+            .into_iter()
+            .collect();
+        let attention = Arc::new(AtomicBool::new(false));
+        let blink_on = Arc::new(AtomicBool::new(false));
         let bus_name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
         let item = StatusNotifierItem {
             tx: tx.clone(),
             notify: Arc::clone(&notify),
             pixmap,
+            alert_pixmap,
+            attention: Arc::clone(&attention),
+            blink_on: Arc::clone(&blink_on),
         };
         let menu = TrayDbusMenu { tx, notify };
 
@@ -385,9 +516,37 @@ mod linux {
         }
         active.store(true, Ordering::Relaxed);
 
-        // Keep the D-Bus connection alive for the lifetime of the process.
+        // Drive attention blinking (0% CPU when idle; 650ms icon toggle while attention is active).
+        let mut blinking = false;
         loop {
-            std::thread::sleep(Duration::from_secs(60));
+            if !blinking {
+                match attention_rx.recv() {
+                    Ok(true) => {
+                        blinking = true;
+                        attention.store(true, Ordering::Relaxed);
+                        blink_on.store(true, Ordering::Relaxed);
+                        emit_sni_refresh(&conn, Some("NeedsAttention"));
+                    }
+                    Ok(false) => {}
+                    Err(_) => break,
+                }
+            } else {
+                match attention_rx.recv_timeout(Duration::from_millis(650)) {
+                    Ok(false) => {
+                        blinking = false;
+                        attention.store(false, Ordering::Relaxed);
+                        blink_on.store(false, Ordering::Relaxed);
+                        emit_sni_refresh(&conn, Some("Active"));
+                    }
+                    Ok(true) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let next = !blink_on.load(Ordering::Relaxed);
+                        blink_on.store(next, Ordering::Relaxed);
+                        emit_sni_refresh(&conn, None);
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
         }
     }
 }
@@ -402,5 +561,15 @@ mod tests {
         let (w, h, argb) = png_to_sni_pixmap(png).expect("valid PNG icon");
         assert_eq!((w, h), (32, 32));
         assert_eq!(argb.len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn png_to_sni_alert_pixmap_draws_distinct_badge() {
+        let png = include_bytes!("../packaging/linux/furcadia-native.png");
+        let (_, _, normal) = png_to_sni_pixmap(png).expect("valid normal PNG");
+        let (w, h, alert) = png_to_sni_alert_pixmap(png).expect("valid alert PNG");
+        assert_eq!((w, h), (32, 32));
+        assert_eq!(alert.len(), 32 * 32 * 4);
+        assert_ne!(normal, alert);
     }
 }

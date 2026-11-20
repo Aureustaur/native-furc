@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v1.2.4 — XWayland/KWin Minimize-to-Tray Fix"
+          name: "Furcadia Native Client v1.2.5 — System Tray Alert Blinking & Unread Badge"
           body: |
-            ## Furcadia Native Client v1.2.4 — XWayland/KWin Minimize-to-Tray Fix
+            ## Furcadia Native Client v1.2.5 — System Tray Alert Blinking & Unread Badge
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -100,30 +100,29 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Integrated Start Menu / Desktop launcher icons and in-app About page
 
-            ### What's New in v1.2.4
-            - **Fixed Minimize-to-Tray on KDE Plasma / Wayland (CachyOS / Arch)**:
-              - Replaced the removed `WINIT_UNIX_BACKEND=x11` env var with `winit::platform::x11::EventLoopBuilderExtX11::with_x11()` via `eframe::NativeOptions::event_loop_builder` so XWayland is actually selected on `winit 0.30` (works immediately without restarting after toggling tray settings).
-              - Detected the active window backend directly from `raw_window_handle` instead of guessing from environment variables.
-              - Added ICCCM §4.1.4 `XWithdrawWindow` (`UnmapWindow` + synthetic `UnmapNotify` to root via `x11rb`) so KWin cleanly removes an iconified/minimized window from the taskbar into the system tray.
-              - Added light 200ms unfocused polling when `Minimize to tray` is enabled so minimize events are always caught even though `winit` ignores `_NET_WM_STATE` `PropertyNotify` events.
-            - Includes all `v1.2.3` improvements (persistent per-device window size & maximized state, native Linux `StatusNotifierItem` tray icon & context menu, and Furcadia-style chronological whisper logging).
+            ### What's New in v1.2.5
+            - **System Tray Alert Blinking & Unread Badge (Linux `StatusNotifierItem`)**:
+              - When an alert arrives while unfocused or hidden in the tray (incoming whispers, mentions, Pounce friend online, or Main Chat alerts), the tray icon switches to `NeedsAttention` (pulling it out of KDE's hidden tray arrow if tucked away) and blinks every 650ms between the normal icon and a bright orange-red/gold unread badge dot.
+              - Stops blinking and clears the badge immediately when you restore or focus the window.
+              - Configurable via the new **Blink system tray icon on alerts (when unfocused / in tray)** option (`blink_tray_on_alert`) in **Settings → Audio, Mentions & Taskbar Flash** (enabled by default, synced across devices).
+            - Includes all `v1.2.4` improvements (real XWayland `with_x11()` backend selection on `winit 0.30`, ICCCM `XWithdrawWindow` for KWin minimize-to-tray, persistent per-device window size & maximized state, and Furcadia-style chronological whisper logging).
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.2.4-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-1.2.5-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.2.4_amd64.deb
+            sudo apt install ./furcadia-native_1.2.5_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.2.4-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-1.2.5-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

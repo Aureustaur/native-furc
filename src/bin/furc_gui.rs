@@ -1558,6 +1558,7 @@ struct FurcadiaApp {
     notify_only_unfocused: bool,
     flash_taskbar_on_message: bool,
     flash_taskbar_on_main_chat: bool,
+    blink_tray_on_alert: bool,
     mention_nicknames: String,
     sound_enabled: bool,
     music_enabled: bool,
@@ -1926,6 +1927,7 @@ impl FurcadiaApp {
             notify_only_unfocused: cfg.notify_only_unfocused,
             flash_taskbar_on_message: cfg.flash_taskbar_on_message,
             flash_taskbar_on_main_chat: cfg.flash_taskbar_on_main_chat,
+            blink_tray_on_alert: cfg.blink_tray_on_alert,
             mention_nicknames: cfg.mention_nicknames.clone(),
             sound_enabled: cfg.sound_enabled,
             music_enabled: cfg.music_enabled,
@@ -2064,6 +2066,7 @@ impl FurcadiaApp {
             notify_only_unfocused: self.notify_only_unfocused,
             flash_taskbar_on_message: self.flash_taskbar_on_message,
             flash_taskbar_on_main_chat: self.flash_taskbar_on_main_chat,
+            blink_tray_on_alert: self.blink_tray_on_alert,
             mention_nicknames: self.mention_nicknames.clone(),
             sound_enabled: self.sound_enabled,
             music_enabled: self.music_enabled,
@@ -2503,6 +2506,9 @@ impl FurcadiaApp {
     }
 
     fn send_desktop_notification(&self, title: &str, body: &str) {
+        if self.blink_tray_on_alert && (!self.window_focused || self.hidden_in_tray) {
+            self.tray.set_attention(true);
+        }
         if !self.notify_enabled || (self.notify_only_unfocused && self.window_focused) {
             return;
         }
@@ -2539,13 +2545,16 @@ impl FurcadiaApp {
     }
 
     fn request_taskbar_flash(&mut self) {
-        if !self.window_focused {
+        if !self.window_focused || self.hidden_in_tray {
             self.pending_taskbar_flash = true;
+            if self.blink_tray_on_alert {
+                self.tray.set_attention(true);
+            }
         }
     }
 
     fn flush_taskbar_flash(&mut self, ctx: &egui::Context) {
-        if self.window_focused {
+        if self.window_focused && !self.hidden_in_tray {
             if self.taskbar_flash_active {
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                     egui::UserAttentionType::Reset,
@@ -2553,6 +2562,7 @@ impl FurcadiaApp {
                 self.taskbar_flash_active = false;
             }
             self.pending_taskbar_flash = false;
+            self.tray.set_attention(false);
         } else if self.pending_taskbar_flash {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,
@@ -5842,6 +5852,7 @@ impl FurcadiaApp {
 
     fn show_from_tray(&mut self, ctx: &egui::Context) {
         self.hidden_in_tray = false;
+        self.tray.set_attention(false);
         self.was_minimized = true;
         self.tray_restore_until = Some(Instant::now() + Duration::from_millis(500));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -6917,6 +6928,12 @@ impl FurcadiaApp {
             if ui.checkbox(&mut self.notify_enabled, "Enable desktop notifications").changed() { self.save_config(); }
             if ui.checkbox(&mut self.flash_taskbar_on_message, "Flash taskbar on whispers & mentions (when unfocused)").changed() { self.save_config(); }
             if ui.checkbox(&mut self.flash_taskbar_on_main_chat, "Flash taskbar on any Main Chat message (when unfocused)").changed() { self.save_config(); }
+            if ui.checkbox(&mut self.blink_tray_on_alert, "Blink system tray icon on alerts (when unfocused / in tray)").changed() {
+                if !self.blink_tray_on_alert {
+                    self.tray.set_attention(false);
+                }
+                self.save_config();
+            }
             if ui.checkbox(&mut self.notify_whisper, "Alert on incoming whispers").changed() { self.save_config(); }
             if ui.checkbox(&mut self.notify_pounce, "Alert when Pounce friend comes online").changed() { self.save_config(); }
             if ui.checkbox(&mut self.notify_mention, "Watch Main Chat for your name & nicknames (mentions)").changed() { self.save_config(); }
