@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v2.0.0 — Milestone 2.0: Stability, Security & Open-Source Polish"
+          name: "Furcadia Native Client v2.1.0 — Custom Portrait Decoding, In-Game Reconnect & Chat Scroll Polish"
           body: |
-            ## Furcadia Native Client v2.0.0 — Milestone 2.0: Stability, Security & Open-Source Polish
+            ## Furcadia Native Client v2.1.0 — Custom Portrait Decoding, In-Game Reconnect & Chat Scroll Polish
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -100,41 +100,48 @@ jobs:
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Linux system tray with alert blinking & unread badge, plus integrated desktop launcher icons
 
-            ### What's New in v2.0.0 (Milestone 2.0)
+            ### What's New in v2.1.0
+            - **Custom Portrait Decoding & Classic 8-Bit Remapping Fixes**:
+              - **13-Bit LZW Table-Full `CLEAR` Support**: Fixed `decompress_furcadia_lzw` for real 95×95 `FPRT10`/`FPRT01` custom portraits whose LZW dictionary reaches 4095 entries and emits the table-full `CLEAR` code (`0x100`) at 13 bits before resetting to 9 bits.
+              - **Classic 8-Bit Portrait Recoloring**: Added `Palette::with_classic_remap_markers` to translate Furcadia's classic 8-bit remappable palette ranges (Fur, Markings, Hair, Vest, Bracers, Cape, Boots, Trousers, Eyes, and Badge) into FOX5 remap markers so 8-bit `FSH`/`FSHX` portraits Inside `FPRT01` and `FPRT20` properly recolor to match each character's color code while keeping static palette indices intact.
+              - **Persistent Portrait ID Mapping Across Dream Transfers**: Preserved `player_portrait_ids` across dream changes (`clear_dream_assets`) so players' custom portraits continue displaying without requiring a new look/spawn packet after entering a dream.
+            - **In-Game Reconnect & Dream Entry Reliability**:
+              - **Clean Reconnect State Reset**: Clicking **Reconnect** from the in-game disconnect banner now tracks an explicit `reconnecting` state (displaying live connection stage progress in the banner), clears stale avatars and pending dream state (`pending_dream_name`, `pending_dream_modern`, `world.avatars`, `world.map_name`), and logs a `Reconnecting as <Name>...` status line.
+              - **Guaranteed `vascodagama` Handshake Timer**: Scheduled automatic 50ms UI repaints while `pending_vascodagama` or `reconnecting` is active so the post-login `vascodagama` dream-entry command fires reliably after 500ms even when the window is idle or unfocused.
+            - **Chat Scroll Pinning Across Banner & Layout Shifts**:
+              - Added explicit `chat_pinned_to_bottom` and `chat_scroll_to_bottom` tracking so the chat log and whisper tabs stay pinned to the newest line when the disconnect/reconnect banner appears or disappears, when the multi-line input box expands, or when switching tabs and sending messages—while respecting manual upward scrolling.
+            - **Multibyte Chat Line Safety**:
+              - Replaced byte-index slicing in `rewrite_pounce_add_message` with safe `.get(..prefix.len())` checks to prevent panics when multi-byte UTF-8 characters (such as full-width symbols) straddle the prefix boundary.
+
+            ### Milestone 2.0 General Stability, Security & Open-Source Foundation
             - **Long-Session Memory, GPU Texture & Thread Leak Fixes**:
-              - Closed character tabs now cleanly terminate their `network_worker` thread and close live sockets when dropped.
-              - Bounded GPU texture and sprite caches (`avatar_textures`, `custom_portrait_textures`, `custom_portrait_rgba`, `chat_img_textures`) with automatic eviction and dream/disconnect cleanup for `player_portrait_ids`.
+              - Closed character tabs cleanly terminate their `network_worker` thread and close live sockets when dropped.
+              - Bounded GPU texture and sprite caches (`avatar_textures`, `custom_portrait_textures`, `custom_portrait_rgba`, `chat_img_textures`) with automatic eviction and disconnect cleanup.
               - Capped in-memory chat and whisper tab histories (full history remains persisted to disk logs) and gated/rotated `login_trace.log` behind debug packet logging.
             - **Security & Privacy Hardening**:
-              - Surfaced a clear GUI notice when connecting over Furcadia's legacy/unverified TLS handshake.
+              - Surfaced a clear GUI/CLI notice when connecting over Furcadia's legacy/unverified TLS handshake.
               - Hardened `curl` asset/image downloads with `--proto =http,https`, `--proto-redir =http,https`, `--max-filesize`, and `--` argument termination.
-              - Atomic `0o600` config creation on Unix to eliminate the `config.ini` permissions race, plus newline-safe serialization that preserves leading/trailing password whitespace.
-              - Guarded against empty `safe_name` paths in dream downloads so malformed map names can never target the parent dreams cache directory.
+              - Atomic `0o600` config creation on Unix to eliminate the `config.ini` permissions race, plus newline-safe serialization that preserves leading/trailing password whitespace, and dream path sanitization.
             - **Parser, Decompressor & Protocol Safety**:
-              - Added hard decompression byte limits across LZMA (`.fox`), BZip2 (`.rch` / portraits), and Furcadia LZW decoders to prevent decompression bombs.
-              - Fixed a 12-bit LZW bit-width overflow on large portraits (`nbits` capped at 12).
-              - Added checked arithmetic and dimension bounds across `.fox` and `.map` parsers, plus bounded network line reads in `FurcadiaClient`.
-              - Fixed `auth.rs` XML attribute boundary matching, multi-address DNS fallback, stale `SessionState` on failed TLS upgrade, 32-bit Unix `localtime_r` safety, and duplicate `quit` in `furc-cli`.
-            - **Open-Source Codebase Polish**:
-              - Expanded rustdoc and inline documentation across core protocol, archive, and GUI modules.
-              - Resolved all 45 Clippy warnings (`cargo clippy --all-targets -- -D warnings` passes cleanly) and expanded the unit test suite to 94 passing tests.
+              - Hard decompression byte limits across LZMA (`.fox`), BZip2 (`.rch` / portraits), and Furcadia LZW decoders to prevent decompression bombs.
+              - Checked arithmetic and dimension bounds across `.fox` and `.map` parsers, bounded network line reads in `FurcadiaClient`, multi-address DNS fallback, and 97 passing unit tests with zero Clippy warnings.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-2.0.0-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-2.1.0-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_2.0.0_amd64.deb
+            sudo apt install ./furcadia-native_2.1.0_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-2.0.0-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-2.1.0-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh
