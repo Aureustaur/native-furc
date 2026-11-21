@@ -1674,6 +1674,10 @@ struct FurcadiaApp {
     about_open: bool,
     bear_logo: Option<TextureHandle>,
     chat_scroll_delta: f32,
+    chat_pinned_to_bottom: bool,
+    chat_scroll_to_bottom: bool,
+    last_chat_avail_h: f32,
+    reconnecting: bool,
     font_popup_open: bool,
     import_report: Option<String>,
     cache_report: Option<String>,
@@ -2049,6 +2053,10 @@ impl FurcadiaApp {
             about_open: false,
             bear_logo: None,
             chat_scroll_delta: 0.0,
+            chat_pinned_to_bottom: true,
+            chat_scroll_to_bottom: true,
+            last_chat_avail_h: 0.0,
+            reconnecting: false,
             font_popup_open: false,
             import_report: None,
             cache_report: None,
@@ -3317,6 +3325,10 @@ impl FurcadiaApp {
         self.login_ack_at = None;
         self.login_trace_remaining = 0;
         self.pending_dream_modern = None;
+        self.pending_dream_name = None;
+        self.reconnecting = false;
+        self.chat_pinned_to_bottom = true;
+        self.chat_scroll_to_bottom = true;
         self.looked_player = None;
         self.recent_portrait_target = None;
         self.hovered_avatar_uid = None;
@@ -3351,12 +3363,19 @@ impl FurcadiaApp {
     }
 
     fn reconnect_active_character(&mut self) {
-        if self.is_connected || self.connecting_stage == "Reconnecting..." {
+        if self.is_connected || self.reconnecting {
             return;
         }
+        self.reconnecting = true;
         self.pending_whisper_echoes.clear();
         self.pending_vascodagama = false;
         self.login_ack_at = None;
+        self.pending_dream_name = None;
+        self.pending_dream_modern = None;
+        self.world.avatars.clear();
+        self.world.map_name = None;
+        self.chat_pinned_to_bottom = true;
+        self.chat_scroll_to_bottom = true;
         let character = self.active_character_wire_name();
         let login_desc = self
             .pending_desc
@@ -3372,6 +3391,7 @@ impl FurcadiaApp {
         self.connect_seq = self.connect_seq.wrapping_add(1);
         self.connecting_error = None;
         self.connecting_stage = "Reconnecting...".to_owned();
+        self.push_system_line("emit", &format!("Reconnecting as {}...", character.replace('|', " ")));
         let _ = self.to_net.send(UiToNet::ConnectCharacter {
             seq: self.connect_seq,
             email: self.email.trim().to_owned(),
@@ -3383,8 +3403,13 @@ impl FurcadiaApp {
     }
     
     fn push_system_line(&mut self, color: &str, text: &str) {
-        self.chat_log
-            .push(parse_chat_line(&format!("<font color='{color}'>{text}</font>")));
+        push_bounded_chat_line(
+            &mut self.chat_log,
+            parse_chat_line(&format!("<font color='{color}'>{text}</font>")),
+        );
+        if self.chat_pinned_to_bottom {
+            self.chat_scroll_to_bottom = true;
+        }
     }
 
     fn sanitize_dream_id(name: &str) -> String {
@@ -4778,6 +4803,7 @@ impl FurcadiaApp {
                 NetToUi::ConnectFailed { seq, error } => {
                     if seq == self.connect_seq {
                         self.is_connected = false;
+                        self.reconnecting = false;
                         self.connected_at = None;
                         self.connecting_error = Some(error.clone());
                         self.connecting_stage = "Connection failed".to_owned();
@@ -4788,6 +4814,10 @@ impl FurcadiaApp {
                 NetToUi::Connected { seq, connected } => {
                     if seq == self.connect_seq {
                         self.is_connected = connected;
+                        self.reconnecting = false;
+                        if self.chat_pinned_to_bottom {
+                            self.chat_scroll_to_bottom = true;
+                        }
                         if connected {
                             self.connecting_error = None;
                             self.connected_at = Some(Instant::now());
@@ -4851,6 +4881,7 @@ impl FurcadiaApp {
                     }
                 }
                 NetToUi::DreamError(msg) => {
+                    self.pending_dream_name = None;
                     self.push_system_line("warning", &msg);
                     if self.screen == AppScreen::Connecting && self.is_connected {
                         self.screen = AppScreen::InGame;
@@ -5003,6 +5034,8 @@ impl FurcadiaApp {
         self.save_active_chat_draft();
         self.active_chat_tab = target;
         self.load_active_chat_draft();
+        self.chat_pinned_to_bottom = true;
+        self.chat_scroll_to_bottom = true;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_dirty_at = None;
         self.spell_misspelled.clear();
@@ -5113,7 +5146,10 @@ impl FurcadiaApp {
                     if !is_focused && !self.whispers[idx].detached {
                         self.whispers[idx].unread += 1;
                     }
-                    self.whispers[idx].lines.push(formatted);
+                    push_bounded_chat_line(&mut self.whispers[idx].lines, formatted);
+                    if is_focused && self.chat_pinned_to_bottom {
+                        self.chat_scroll_to_bottom = true;
+                    }
                     let is_incoming_whisper = !plain.starts_with("[ You whisper ")
                         && !plain.starts_with("You whisper ");
                     if is_incoming_whisper {
@@ -5156,6 +5192,9 @@ impl FurcadiaApp {
                     }
                     self.log_chat_line(&plain);
                     push_bounded_chat_line(&mut self.chat_log, line);
+                    if self.active_chat_tab.is_none() && self.chat_pinned_to_bottom {
+                        self.chat_scroll_to_bottom = true;
+                    }
                 }
             }
             ServerMessage::LoginAck => {
@@ -5472,6 +5511,8 @@ impl FurcadiaApp {
         self.save_active_chat_draft();
         self.spell_misspelled.clear();
         self.spell_dirty_at = None;
+        self.chat_pinned_to_bottom = true;
+        self.chat_scroll_to_bottom = true;
 
         let (cmd, open_whisper_tab_disp) = classify_chat_input(
             &raw,
@@ -6033,12 +6074,15 @@ impl eframe::App for FurcadiaApp {
         self.flush_taskbar_flash(ctx);
 
         if self.is_connected {
-            if self.pending_vascodagama
-                && self
+            if self.pending_vascodagama {
+                if self
                     .login_ack_at
                     .is_some_and(|t| t.elapsed() >= Duration::from_millis(500))
-            {
-                self.send_pending_vascodagama();
+                {
+                    self.send_pending_vascodagama();
+                } else {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
             }
             if let Some(target) = self.pounce.next_due_check(Instant::now()) {
                 let _ = self
@@ -6050,6 +6094,8 @@ impl eframe::App for FurcadiaApp {
             if self.pounce.has_unknown() {
                 ctx.request_repaint_after(Duration::from_millis(45));
             }
+        } else if self.reconnecting {
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
 
         if self.screen == AppScreen::Connecting {
@@ -10210,15 +10256,17 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let title = if self.connecting_stage == "Reconnecting..." {
-                            "Reconnecting to Furcadia…"
+                        let title = if self.reconnecting {
+                            if self.connecting_stage.is_empty() {
+                                "Reconnecting to Furcadia…".to_owned()
+                            } else {
+                                format!("Reconnecting to Furcadia… ({})", self.connecting_stage)
+                            }
                         } else {
-                            "Disconnected from Furcadia"
+                            "Disconnected from Furcadia".to_owned()
                         };
                         ui.label(RichText::new(title).strong().color(Color32::WHITE));
-                        if self.connecting_stage != "Reconnecting..."
-                            && ui.button("Reconnect").clicked()
-                        {
+                        if !self.reconnecting && ui.button("Reconnect").clicked() {
                             self.reconnect_active_character();
                         }
                     });
@@ -10578,12 +10626,22 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 };
                 let input_h = (typed_h + 12.0).clamp(line_h + 12.0, max_input_h);
                 let available_h = (total_avail_h - input_h - spelling_h - 18.0).max(min_chat_h);
+                if (self.last_chat_avail_h - available_h).abs() > 0.5 && self.chat_pinned_to_bottom {
+                    self.chat_scroll_to_bottom = true;
+                }
+                self.last_chat_avail_h = available_h;
                 let active_peer = self.active_chat_tab.clone();
                 let self_name = self.active_character_name();
                 let self_name_key = shortname_key(&self_name);
                 let mut chat_action: Option<ChatClickAction> = None;
                 let player_badges = self.current_player_badge_textures(ui.ctx());
-                egui::ScrollArea::vertical()
+                let scroll_d = std::mem::take(&mut self.chat_scroll_delta);
+                if scroll_d > 0.5 {
+                    self.chat_pinned_to_bottom = false;
+                    self.chat_scroll_to_bottom = false;
+                }
+                let scroll_to_bottom = std::mem::take(&mut self.chat_scroll_to_bottom);
+                let scroll_out = egui::ScrollArea::vertical()
                     .id_salt(("chat_scroll", active_peer.as_deref().unwrap_or("main")))
                     .auto_shrink([false, false])
                     .min_scrolled_height(available_h)
@@ -10591,7 +10649,6 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         ui.set_min_height(available_h);
-                        let scroll_d = std::mem::take(&mut self.chat_scroll_delta);
                         if scroll_d.abs() > 0.5 {
                             ui.scroll_with_delta(Vec2::new(0.0, scroll_d));
                         }
@@ -10655,7 +10712,17 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 );
                             }
                         }
+                        if scroll_to_bottom {
+                            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                        }
                     });
+                let at_bottom = scroll_out.state.offset.y + scroll_out.inner_rect.height() + 24.0
+                    >= scroll_out.content_size.y;
+                if at_bottom || scroll_to_bottom {
+                    self.chat_pinned_to_bottom = true;
+                } else if ui.input(|i| i.raw_scroll_delta.y > 0.0 || i.pointer.any_down()) {
+                    self.chat_pinned_to_bottom = false;
+                }
                 if let Some(act) = chat_action {
                     self.handle_chat_click_action(act);
                 }
