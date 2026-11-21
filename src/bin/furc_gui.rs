@@ -1448,6 +1448,12 @@ enum NetToUi {
         connected: bool,
     },
     Message(ServerMessage),
+    DreamDownloadProgress {
+        map_name: String,
+        received_bytes: u64,
+        total_bytes: Option<u64>,
+        stage: String,
+    },
     DreamDownloaded {
         map_name: String,
         path: std::path::PathBuf,
@@ -1600,6 +1606,9 @@ struct FurcadiaApp {
     login_trace_remaining: usize,
     pending_dream_modern: Option<bool>,
     pending_dream_name: Option<String>,
+    pending_dream_received_bytes: u64,
+    pending_dream_total_bytes: Option<u64>,
+    pending_dream_stage: String,
     looked_player: Option<LookedPlayerCard>,
     trade_item_input: String,
     trade_reason_input: String,
@@ -1977,6 +1986,9 @@ impl FurcadiaApp {
             login_trace_remaining: 0,
             pending_dream_modern: None,
             pending_dream_name: None,
+            pending_dream_received_bytes: 0,
+            pending_dream_total_bytes: None,
+            pending_dream_stage: String::new(),
             looked_player: None,
             trade_item_input: String::new(),
             trade_reason_input: String::new(),
@@ -3326,6 +3338,9 @@ impl FurcadiaApp {
         self.login_trace_remaining = 0;
         self.pending_dream_modern = None;
         self.pending_dream_name = None;
+        self.pending_dream_received_bytes = 0;
+        self.pending_dream_total_bytes = None;
+        self.pending_dream_stage.clear();
         self.reconnecting = false;
         self.chat_pinned_to_bottom = true;
         self.chat_scroll_to_bottom = true;
@@ -3371,6 +3386,9 @@ impl FurcadiaApp {
         self.pending_vascodagama = false;
         self.login_ack_at = None;
         self.pending_dream_name = None;
+        self.pending_dream_received_bytes = 0;
+        self.pending_dream_total_bytes = None;
+        self.pending_dream_stage.clear();
         self.pending_dream_modern = None;
         self.world.avatars.clear();
         self.world.map_name = None;
@@ -4188,6 +4206,9 @@ impl FurcadiaApp {
         }
         self.pending_dream_modern = explicit_modern;
         self.pending_dream_name = Some(name.to_owned());
+        self.pending_dream_received_bytes = 0;
+        self.pending_dream_total_bytes = None;
+        self.pending_dream_stage = "Connecting to dream server...".to_owned();
         if clear_avatars || switching {
             self.cam_offset = Vec2::ZERO;
         }
@@ -4198,6 +4219,9 @@ impl FurcadiaApp {
         if explicit_url.is_none() {
             if let Some((map, dir)) = self.try_load_cached_dream(name, checksum) {
                 self.pending_dream_name = None;
+                self.pending_dream_received_bytes = 0;
+                self.pending_dream_total_bytes = None;
+                self.pending_dream_stage.clear();
                 self.load_dream_dir(&dir);
                 let prev_modern = self
                     .pending_dream_modern
@@ -4835,6 +4859,39 @@ impl FurcadiaApp {
                     }
                 }
                 NetToUi::Message(msg) => self.process_server_message(msg),
+                NetToUi::DreamDownloadProgress {
+                    map_name,
+                    received_bytes,
+                    total_bytes,
+                    stage,
+                } => {
+                    if let Some(expected) = self.pending_dream_name.as_deref() {
+                        let e = expected.trim().trim_end_matches(".map");
+                        let m = map_name.trim().trim_end_matches(".map");
+                        if !e.is_empty() && !e.eq_ignore_ascii_case(m) {
+                            continue;
+                        }
+                    }
+                    self.pending_dream_received_bytes = received_bytes;
+                    if total_bytes.is_some() {
+                        self.pending_dream_total_bytes = total_bytes;
+                    }
+                    self.pending_dream_stage = stage;
+                    if self.screen == AppScreen::Connecting {
+                        self.connecting_stage = match self.pending_dream_total_bytes {
+                            Some(total) if total > 0 => format!(
+                                "Downloading dream '{map_name}' ({} / {})...",
+                                format_bytes(received_bytes),
+                                format_bytes(total)
+                            ),
+                            _ if received_bytes > 0 => format!(
+                                "Downloading dream '{map_name}' ({})...",
+                                format_bytes(received_bytes)
+                            ),
+                            _ => format!("Downloading dream '{map_name}'..."),
+                        };
+                    }
+                }
                 NetToUi::DreamDownloaded {
                     map_name,
                     path,
@@ -4848,6 +4905,9 @@ impl FurcadiaApp {
                         }
                     }
                     self.pending_dream_name = None;
+                    self.pending_dream_received_bytes = 0;
+                    self.pending_dream_total_bytes = None;
+                    self.pending_dream_stage.clear();
                     self.cache_usage = None;
                     self.clear_dream_patches();
                     if let Some(dir) = dream_dir {
@@ -4882,6 +4942,9 @@ impl FurcadiaApp {
                 }
                 NetToUi::DreamError(msg) => {
                     self.pending_dream_name = None;
+                    self.pending_dream_received_bytes = 0;
+                    self.pending_dream_total_bytes = None;
+                    self.pending_dream_stage.clear();
                     self.push_system_line("warning", &msg);
                     if self.screen == AppScreen::Connecting && self.is_connected {
                         self.screen = AppScreen::InGame;
@@ -8757,13 +8820,38 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                     .as_deref()
                                     .map(|u| u.trim_start_matches("furc://").trim_matches('/'))
                                     .filter(|s| !s.is_empty())
-                                    .or(self.world.map_name.as_deref());
+                                    .or(self.world.map_name.as_deref())
+                                    .or(self.pending_dream_name.as_deref());
                                 if let Some(dream) = dream_label {
+                                    let dream_txt = if self.pending_dream_name.is_some() {
+                                        match self.pending_dream_total_bytes.filter(|&t| t > 0) {
+                                            Some(total) => {
+                                                let pct = ((self.pending_dream_received_bytes as f64
+                                                    / total as f64)
+                                                    * 100.0)
+                                                    .clamp(0.0, 100.0);
+                                                format!("Dream: {dream} (DL {pct:.0}%)")
+                                            }
+                                            None if self.pending_dream_received_bytes > 0 => {
+                                                format!(
+                                                    "Dream: {dream} (DL {})",
+                                                    format_bytes(self.pending_dream_received_bytes)
+                                                )
+                                            }
+                                            None => format!("Dream: {dream} (Downloading...)"),
+                                        }
+                                    } else {
+                                        format!("Dream: {dream}")
+                                    };
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(format!("Dream: {dream}"))
+                                            RichText::new(dream_txt)
                                                 .size(11.0)
-                                                .color(Color32::LIGHT_GRAY),
+                                                .color(if self.pending_dream_name.is_some() {
+                                                    GOLD
+                                                } else {
+                                                    Color32::LIGHT_GRAY
+                                                }),
                                         )
                                         .truncate(),
                                     );
@@ -11883,6 +11971,101 @@ Light: {} | Amb: {} | Elev: {:?}",
         }
 
         self.last_visible_avatar_count = hitboxes.len();
+
+        if let Some(ref dream_name) = self.pending_dream_name {
+            let overlay_painter = ui.painter_at(rect);
+            overlay_painter.rect_filled(
+                rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(12, 8, 24, 185),
+            );
+            let card_w = (rect.width() - 32.0).clamp(240.0, 380.0);
+            let card_h = 128.0_f32;
+            let card_rect = Rect::from_center_size(rect.center(), Vec2::new(card_w, card_h));
+            overlay_painter.rect_filled(card_rect, 8.0, CARD_PURPLE);
+            overlay_painter.rect_stroke(card_rect, 8.0, Stroke::new(1.5_f32, GOLD));
+
+            let display_dream = self
+                .current_dream_url
+                .as_deref()
+                .map(|u| u.trim_start_matches("furc://").trim_matches('/'))
+                .filter(|s| !s.is_empty())
+                .unwrap_or(dream_name.as_str());
+            overlay_painter.text(
+                Pos2::new(card_rect.center().x, card_rect.min.y + 22.0),
+                egui::Align2::CENTER_CENTER,
+                format!("Downloading Dream: {display_dream}"),
+                FontId::proportional(15.0),
+                GOLD,
+            );
+
+            let stage_txt = if self.pending_dream_stage.is_empty() {
+                "Downloading dream package..."
+            } else {
+                self.pending_dream_stage.as_str()
+            };
+            overlay_painter.text(
+                Pos2::new(card_rect.center().x, card_rect.min.y + 44.0),
+                egui::Align2::CENTER_CENTER,
+                stage_txt,
+                FontId::proportional(12.0),
+                Color32::from_rgb(215, 210, 235),
+            );
+
+            let bar_w = (card_w - 40.0).max(120.0);
+            let bar_rect = Rect::from_center_size(
+                Pos2::new(card_rect.center().x, card_rect.min.y + 72.0),
+                Vec2::new(bar_w, 14.0),
+            );
+            overlay_painter.rect_filled(bar_rect, 4.0, INPUT_PURPLE);
+            overlay_painter.rect_stroke(bar_rect, 4.0, Stroke::new(1.0_f32, GOLD_DIM));
+
+            let recv = self.pending_dream_received_bytes;
+            let total_opt = self.pending_dream_total_bytes.filter(|&t| t > 0);
+            if let Some(total) = total_opt {
+                let frac = (recv as f32 / total as f32).clamp(0.0, 1.0);
+                let fill_w = ((bar_rect.width() - 4.0) * frac).max(0.0);
+                if fill_w > 0.5 {
+                    let fill_rect = Rect::from_min_size(
+                        Pos2::new(bar_rect.min.x + 2.0, bar_rect.min.y + 2.0),
+                        Vec2::new(fill_w, bar_rect.height() - 4.0),
+                    );
+                    overlay_painter.rect_filled(fill_rect, 3.0, GOLD);
+                }
+            } else {
+                let t = ui.input(|i| i.time) as f32;
+                let seg_w = bar_rect.width() * 0.32;
+                let travel = (bar_rect.width() - seg_w - 4.0).max(0.0);
+                let phase = ((t * 1.6).sin() * 0.5) + 0.5;
+                let x0 = bar_rect.min.x + 2.0 + travel * phase;
+                let fill_rect = Rect::from_min_size(
+                    Pos2::new(x0, bar_rect.min.y + 2.0),
+                    Vec2::new(seg_w, bar_rect.height() - 4.0),
+                );
+                overlay_painter.rect_filled(fill_rect, 3.0, GOLD);
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+
+            let progress_label = match total_opt {
+                Some(total) => {
+                    let pct = ((recv as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+                    format!(
+                        "{} / {} ({pct:.0}%)",
+                        format_bytes(recv),
+                        format_bytes(total)
+                    )
+                }
+                None if recv > 0 => format!("{} received", format_bytes(recv)),
+                None => "Waiting for server response...".to_owned(),
+            };
+            overlay_painter.text(
+                Pos2::new(card_rect.center().x, card_rect.min.y + 102.0),
+                egui::Align2::CENTER_CENTER,
+                progress_label,
+                FontId::proportional(12.0),
+                Color32::LIGHT_GRAY,
+            );
+        }
 
         self.render_player_context_menu(&ctx, ctx.screen_rect());
     }
@@ -15454,7 +15637,11 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                             .filter(|c| c.is_ascii_alphanumeric())
                             .collect::<String>();
                         let dl_path = dreams_dir.join(format!("{safe_name}_{suffix}.tmp"));
-                        let curl_out = furcadia_client::sys::command("curl")
+                        let hdr_path = dreams_dir.join(format!("{safe_name}_{suffix}.hdr"));
+                        let _ = std::fs::remove_file(&dl_path);
+                        let _ = std::fs::remove_file(&hdr_path);
+
+                        let mut child = match furcadia_client::sys::command("curl")
                             .args([
                                 "-fsSL",
                                 "--proto",
@@ -15463,18 +15650,75 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                                 "=http,https",
                                 "--max-filesize",
                                 "67108864",
+                                "--connect-timeout",
+                                "15",
+                                "--speed-time",
+                                "30",
+                                "--speed-limit",
+                                "512",
                                 "--max-time",
-                                "25",
-                                "-o",
+                                "300",
+                                "-D",
                             ])
+                            .arg(&hdr_path)
+                            .arg("-o")
                             .arg(&dl_path)
                             .arg("--")
                             .arg(&url)
-                            .output();
-                        match curl_out {
-                            Ok(out) if out.status.success() => {}
-                            Ok(out) => {
-                                let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::piped())
+                            .spawn()
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let _ = dl_tx.send(NetToUi::DreamError(format!(
+                                    "Failed to launch curl for '{map_name}': {e}"
+                                )));
+                                dl_ctx.request_repaint();
+                                return;
+                            }
+                        };
+
+                        let mut total_bytes: Option<u64> = None;
+                        let mut last_reported_bytes: u64 = 0;
+                        let status = loop {
+                            if total_bytes.is_none() {
+                                if let Ok(hdr_text) = std::fs::read_to_string(&hdr_path) {
+                                    total_bytes = parse_http_content_length(&hdr_text);
+                                }
+                            }
+                            let cur_bytes = std::fs::metadata(&dl_path).map(|m| m.len()).unwrap_or(0);
+                            if cur_bytes != last_reported_bytes || total_bytes.is_some() {
+                                last_reported_bytes = cur_bytes;
+                                let _ = dl_tx.send(NetToUi::DreamDownloadProgress {
+                                    map_name: map_name.clone(),
+                                    received_bytes: cur_bytes,
+                                    total_bytes,
+                                    stage: if cur_bytes > 0 {
+                                        "Downloading dream package...".to_owned()
+                                    } else {
+                                        "Connecting to dream server...".to_owned()
+                                    },
+                                });
+                                dl_ctx.request_repaint();
+                            }
+                            match child.try_wait() {
+                                Ok(Some(st)) => break Ok(st),
+                                Ok(None) => thread::sleep(Duration::from_millis(80)),
+                                Err(e) => break Err(e),
+                            }
+                        };
+                        let _ = std::fs::remove_file(&hdr_path);
+
+                        match status {
+                            Ok(st) if st.success() => {}
+                            Ok(_) => {
+                                let mut err = String::new();
+                                if let Some(mut stderr) = child.stderr.take() {
+                                    use std::io::Read;
+                                    let _ = stderr.read_to_string(&mut err);
+                                }
+                                let err = err.trim().to_owned();
                                 let _ = std::fs::remove_file(&dl_path);
                                 let _ = dl_tx.send(NetToUi::DreamError(format!(
                                     "Dream download failed for '{map_name}' ({url}): {err}"
@@ -15483,8 +15727,9 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                                 return;
                             }
                             Err(e) => {
+                                let _ = std::fs::remove_file(&dl_path);
                                 let _ = dl_tx.send(NetToUi::DreamError(format!(
-                                    "Failed to launch curl for '{map_name}': {e}"
+                                    "Failed while waiting for curl for '{map_name}': {e}"
                                 )));
                                 dl_ctx.request_repaint();
                                 return;
@@ -15501,6 +15746,14 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                                 return;
                             }
                         };
+                        let final_len = bytes.len() as u64;
+                        let _ = dl_tx.send(NetToUi::DreamDownloadProgress {
+                            map_name: map_name.clone(),
+                            received_bytes: final_len,
+                            total_bytes: Some(final_len),
+                            stage: "Extracting dream assets...".to_owned(),
+                        });
+                        dl_ctx.request_repaint();
                         let out_dir = dreams_dir.join(&safe_name);
                         let stage_dir = dreams_dir.join(format!("{safe_name}_{suffix}_extract"));
                         let _ = std::fs::remove_dir_all(&stage_dir);
@@ -16217,6 +16470,22 @@ fn replace_file_atomically(src: &std::path::Path, dst: &std::path::Path) -> std:
     std::fs::copy(src, dst)?;
     let _ = std::fs::remove_file(src);
     Ok(())
+}
+
+fn parse_http_content_length(headers: &str) -> Option<u64> {
+    let mut last = None;
+    for line in headers.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                if let Ok(len) = v.trim().parse::<u64>() {
+                    if len > 0 {
+                        last = Some(len);
+                    }
+                }
+            }
+        }
+    }
+    last
 }
 
 fn extract_zip_archive(zip_path: &std::path::Path, dest_dir: &std::path::Path) -> Result<(), String> {
@@ -17114,5 +17383,12 @@ mod tests {
             parse_mention_nicknames(" Aur, Bear ; Amala \n"),
             vec!["Aur", "Bear", "Amala"]
         );
+    }
+
+    #[test]
+    fn parse_http_content_length_handles_redirect_headers_and_case_insensitivity() {
+        let headers = "HTTP/1.1 302 Found\r\nContent-Length: 0\r\nLocation: http://apollo.furcadia.com/dreams/pmallegria.zip\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 20786286\r\nContent-Type: application/octet-stream\r\n\r\n";
+        assert_eq!(parse_http_content_length(headers), Some(20_786_286));
+        assert_eq!(parse_http_content_length("HTTP/1.1 200 OK\r\n\r\n"), None);
     }
 }
