@@ -44,6 +44,40 @@ impl Palette {
     pub fn rgb(&self, index: u8) -> [u8; 3] {
         self.colors[index as usize]
     }
+
+    /// Returns a copy of this palette with Furcadia's classic 8-bit remappable index
+    /// ranges encoded as FOX5 `[R = shade, G = channel, B = 0]` remap markers so
+    /// 8-bit `FSH`/`FSHX` portraits can be recolored by [`crate::furc_colors::RemapLuts`].
+    pub fn with_classic_remap_markers(&self) -> Self {
+        let mut colors = self.colors;
+        // Ensure non-remapped opaque palette indices never accidentally carry `B == 0`.
+        for slot in colors.iter_mut().skip(1) {
+            if slot[2] == 0 {
+                slot[2] = 1;
+            }
+        }
+        // 8-shade ramp slots: `build_8stop_lut` places `stops8[0..=7]` at `0xc0 - step * 0x18`.
+        const RAMP_SLOTS: [(usize, u8); 8] = [
+            (200, 15), // Fur      (200..=207 -> G=15)
+            (136, 4),  // Markings (136..=143 -> G=4)
+            (128, 13), // Hair     (128..=135 -> G=13)
+            (72, 6),   // Vest     ( 72..= 79 -> G=6)
+            (88, 9),   // Bracers  ( 88..= 95 -> G=9)
+            (32, 2),   // Cape     ( 32..= 39 -> G=2)
+            (16, 14),  // Boots    ( 16..= 23 -> G=14)
+            (224, 12), // Trousers (224..=231 -> G=12)
+        ];
+        for (base, channel) in RAMP_SLOTS {
+            for step in 0..8usize {
+                let shade = (0xc0 - step * 0x18) as u8;
+                colors[base + step] = [shade, channel, 0];
+            }
+        }
+        // Single-index slots: `build_3stop_lut` places `mid` at `0x80`.
+        colors[50] = [0x80, 3, 0]; // Eyes  (50 -> G=3)
+        colors[11] = [0x80, 1, 0]; // Badge (11 -> G=1)
+        Self { colors }
+    }
 }
 
 /// Locates Furcadia's local maps, patches, and palette assets.

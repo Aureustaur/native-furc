@@ -3415,7 +3415,6 @@ impl FurcadiaApp {
         }
         self.species_caches.clear();
         self.char_portraits.clear();
-        self.player_portrait_ids.clear();
         self.current_dream_dir = None;
         self.custom_dream_skin = None;
         self.stop_music();
@@ -14615,7 +14614,12 @@ fn rewrite_pounce_add_message(mut line: ChatLine) -> ChatLine {
     let plain = line.to_plain_text();
     let trimmed = plain.trim();
     let prefix = "Your friend request has been sent to";
-    if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
+    // `get` avoids panicking when byte `prefix.len()` lands inside a multi-byte char
+    // (e.g. a full-width `Ｅ` in an unrelated message).
+    if trimmed
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    {
         let mut link_url: Option<String> = None;
         let mut link_name: Option<String> = None;
         for span in &line.spans {
@@ -16119,8 +16123,11 @@ fn decompress_furcadia_lzw(src: &[u8]) -> Option<Vec<u8>> {
             prefix[next_id as usize] = old_code;
             suffix[next_id as usize] = first_char;
             next_id += 1;
-            // Stay at 12-bit max (`MAX_TABLE = 4096`); incrementing to 13 corrupts the stream.
-            if nbits < 12 && (next_id as u32) + 1 == (1u32 << nbits) {
+            // Furcadia's FPRT10/FPRT01 encoder increments `nbits` to 13 when `next_id`
+            // reaches 4095 (`4095 + 1 == 1 << 12`) and writes the table-full `CLEAR`
+            // code at 13 bits before resetting back to 9 bits. Capping at 12 desyncs
+            // the bitstream on real 95x95 custom portraits.
+            if nbits < 13 && (next_id as u32) + 1 == (1u32 << nbits) {
                 nbits += 1;
             }
         }
@@ -16220,14 +16227,19 @@ fn decode_furcadia_portrait(data: &[u8], palette: &Palette) -> Option<(usize, us
     // Its flags byte uses bit 0 to identify portraits designed for color remapping.
     if header == b"FPRT01" {
         let fsh = decompress_furcadia_lzw(&data[9..])?;
+        let active_pal = if fmt & 0x01 != 0 {
+            palette.with_classic_remap_markers()
+        } else {
+            palette.clone()
+        };
         if let Ok(mut archive) = FoxArchive::from_bytes(fsh.clone()) {
-            if let Ok(sprite) = archive.decode_image(0, palette) {
+            if let Ok(sprite) = archive.decode_image(0, &active_pal) {
                 let rgba = sprite.rgba.clone();
                 let remappable = fmt & 0x01 != 0 || portrait_has_remap_pixels(&rgba);
                 return Some((sprite.width as usize, sprite.height as usize, rgba, remappable));
             }
         }
-        if let Some(sprite) = decode_fsh_sprites(&fsh, palette).into_iter().next() {
+        if let Some(sprite) = decode_fsh_sprites(&fsh, &active_pal).into_iter().next() {
             let remappable = fmt & 0x01 != 0 || portrait_has_remap_pixels(&sprite.rgba);
             return Some((sprite.width as usize, sprite.height as usize, sprite.rgba, remappable));
         }
@@ -16253,7 +16265,12 @@ fn decode_furcadia_portrait(data: &[u8], palette: &Palette) -> Option<(usize, us
             pixels.to_vec()
         };
         if let Ok(mut archive) = FoxArchive::from_bytes(fox_bytes) {
-            if let Ok(sprite) = archive.decode_image(0, palette) {
+            let active_pal = if fmt != 3 {
+                palette.with_classic_remap_markers()
+            } else {
+                palette.clone()
+            };
+            if let Ok(sprite) = archive.decode_image(0, &active_pal) {
                 let rgba = sprite.rgba.clone();
                 let remappable = portrait_has_remap_pixels(&rgba);
                 return Some((sprite.width as usize, sprite.height as usize, rgba, remappable));
@@ -16487,6 +16504,75 @@ mod tests {
     }
 
     #[test]
+    fn decode_furcadia_portrait_remaps_classic_fshx_palette_indices() {
+        // Construct a minimal 10x10 FSHX portrait inside FPRT20 (fmt=4) using classic 8-bit
+        // remap indices (Fur 200, Markings 136, Hair 128, Boots 16, Cape 32, Vest 72,
+        // Bracers 88, Trousers 224, Eyes 50, Badge 11) plus static white (208).
+        let mut fshx = Vec::new();
+        fshx.extend_from_slice(b"FSHX");
+        fshx.extend_from_slice(&1u32.to_le_bytes()); // version = 1
+        fshx.extend_from_slice(&1u32.to_le_bytes()); // obj_count = 1
+        fshx.extend_from_slice(&[0u8; 16]); // padding to 28-byte FSHX header
+        // Object 0 (8-byte header): raw_flags=0, number=0, frame_count=1, anim_count=0
+        fshx.extend_from_slice(&0u16.to_le_bytes());
+        fshx.extend_from_slice(&0i16.to_le_bytes());
+        fshx.extend_from_slice(&1u16.to_le_bytes());
+        fshx.extend_from_slice(&0u16.to_le_bytes());
+        // Frame 0 (18-byte header): pad(2)=1, w=10, h=10, ox=0, oy=0, ex=0, ey=0, a=100 (w*h)
+        fshx.extend_from_slice(&1u16.to_le_bytes());
+        fshx.extend_from_slice(&10u16.to_le_bytes());
+        fshx.extend_from_slice(&10u16.to_le_bytes());
+        fshx.extend_from_slice(&[0u8; 8]);
+        fshx.extend_from_slice(&100u32.to_le_bytes());
+        // 100 bottom-up indexed pixels: 80 remap pixels (>= 64 threshold) + 20 static white (208)
+        let remap_sample = [200u8, 136, 128, 16, 32, 72, 88, 224, 50, 11];
+        for row in 0..10 {
+            for &idx in &remap_sample {
+                if row < 8 {
+                    fshx.push(idx);
+                } else {
+                    fshx.push(208); // static white
+                }
+            }
+        }
+
+        let mut data = b"FPRT20\x0a\x0a\x04".to_vec();
+        data.extend_from_slice(&fshx);
+
+        let pal = Palette::default();
+        let (w, h, rgba, remappable) =
+            decode_furcadia_portrait(&data, &pal).expect("should decode FSHX FPRT20");
+        assert_eq!((w, h), (10, 10));
+        assert!(remappable, "classic 8-bit FSHX portrait should be detected as remappable");
+
+        // Top two rows in top-down RGBA correspond to bottom-up rows 8..10 (static white 208).
+        assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
+
+        // Applying two different appearances should recolor the remapped rows while keeping static white.
+        let app_a = furcadia_client::parse_color_code("w#############$#");
+        let app_b = furcadia_client::parse_color_code("w))))))))))#$#");
+        let recolored_a = RemapLuts::from_appearance(&app_a).apply_rgba(&rgba);
+        let recolored_b = RemapLuts::from_appearance(&app_b).apply_rgba(&rgba);
+        assert_eq!(&recolored_a[0..4], &[255, 255, 255, 255]);
+        assert_eq!(&recolored_b[0..4], &[255, 255, 255, 255]);
+        assert_ne!(
+            &recolored_a[20 * 4..100 * 4],
+            &recolored_b[20 * 4..100 * 4],
+            "remapped pixels must change when avatar color slots change"
+        );
+    }
+
+    #[test]
+    fn rewrite_pounce_add_message_does_not_panic_on_multibyte_text() {
+        // Byte 36 (prefix length) falls inside the 3-byte full-width 'Ｅ'.
+        let line = parse_chat_line("(Your friend request has been sentＥＥＥ to someone");
+        let out = rewrite_pounce_add_message(line.clone());
+        assert_eq!(out.to_plain_text(), line.to_plain_text());
+        let line2 = parse_chat_line("(ＬＩＶＥ ＥＶＥＮＴ ＮＯＷ ＯＰＥＮ ＩＮ ＴＨＥ ＤＲＥＡＭ");
+        let _ = rewrite_pounce_add_message(line2);
+    }
+
+    #[test]
     fn decompress_furcadia_lzw_decodes_inverted_msb_stream() {
         // 9-bit MSB-first codes: CLEAR(0x100)=100000000, 'A'(0x41)=001000001, 'B'(0x42)=001000010, 0x102("AB")=100000010, EOF(0x101)=100000001
         // Bits: 10000000 00010000 01001000 01010000 00101000 00001_000 (padded)
@@ -16494,6 +16580,57 @@ mod tests {
         let encoded = [0x80 ^ 0xff, 0x10 ^ 0xff, 0x48 ^ 0xff, 0x50 ^ 0xff, 0x28 ^ 0xff, 0x08 ^ 0xff];
         let dec = decompress_furcadia_lzw(&encoded).expect("should decompress LZW");
         assert_eq!(dec, b"ABAB");
+    }
+
+    #[test]
+    fn decompress_furcadia_lzw_handles_13bit_clear_at_table_full() {
+        // Build an inverted MSB-first LZW stream that fills the dictionary to 4095,
+        // writes the table-full CLEAR code at 13 bits (matching Furcadia's FPRT10 encoder),
+        // then resumes at 9 bits and writes "OK".
+        let mut bitbuf: u64 = 0;
+        let mut bitlen: u32 = 0;
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut emit = |code: u16, nbits: u32| {
+            bitbuf = (bitbuf << nbits) | u64::from(code);
+            bitlen += nbits;
+            while bitlen >= 8 {
+                bitlen -= 8;
+                let b = ((bitbuf >> bitlen) & 0xff) as u8;
+                bytes.push(b ^ 0xff);
+            }
+        };
+
+        let mut nbits: u32 = 9;
+        let mut next_id: u16 = 0x102;
+        emit(0x100, nbits); // CLEAR
+        emit(0x41, nbits); // 'A' (initial code, does not add to table)
+        // Emit literal bytes until next_id reaches 4095 (4095 - 258 = 3837 additions)
+        let mut expected = vec![0x41u8];
+        for i in 0..3837u32 {
+            let sym = ((i % 251) as u8) as u16;
+            emit(sym, nbits);
+            expected.push(sym as u8);
+            next_id += 1;
+            if (next_id as u32) + 1 == (1u32 << nbits) {
+                nbits += 1;
+            }
+        }
+        assert_eq!(next_id, 4095);
+        assert_eq!(nbits, 13);
+        // Table-full CLEAR written at 13 bits, then reset to 9 bits
+        emit(0x100, 13);
+        nbits = 9;
+        emit(b'O' as u16, nbits);
+        emit(b'K' as u16, nbits);
+        emit(0x101, nbits); // EOF
+        expected.extend_from_slice(b"OK");
+        if bitlen > 0 {
+            let b = ((bitbuf << (8 - bitlen)) & 0xff) as u8;
+            bytes.push(b ^ 0xff);
+        }
+
+        let dec = decompress_furcadia_lzw(&bytes).expect("should decompress 13-bit CLEAR stream");
+        assert_eq!(dec, expected);
     }
 
     #[test]
