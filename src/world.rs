@@ -1,4 +1,10 @@
 //! Live world state and Base220 / Base95 world packet decoding.
+//!
+//! [`WorldState`] owns the active [`FurcadiaMap`], visible [`Avatar`]s keyed by
+//! server UID, and dream portal labels. Incoming single-byte world opcodes (`<`, `/`,
+//! `A`–`D`, `)`, `>`, `1`–`4`, etc.) mutate tile layers and avatar positions/appearances
+//! in place using Furcadia's Base220 (2-byte little-endian offset by `0x23`) and
+//! Base95 (offset by `0x20`) wire encodings.
 
 use std::collections::BTreeMap;
 
@@ -133,14 +139,14 @@ impl RegionDefaults {
         }
         if pos < data.len() && data[pos] != 0 {
             if let Some(cnt) = next_b220(&mut pos, 1) {
-                for i in 0..(cnt as usize).min(80) {
+                for slot in d.local_species_remap.iter_mut().take((cnt as usize).min(80)) {
                     if pos + 3 > data.len() {
                         break;
                     }
                     let species = decode_b220_raw(&data[pos..pos + 2]) as u16;
                     let gender = (decode_b220_raw(&data[pos + 2..pos + 3]) % 3) as u8;
                     pos += 3;
-                    d.local_species_remap[i] = (species, gender);
+                    *slot = (species, gender);
                 }
             }
         }
@@ -604,7 +610,7 @@ impl WorldState {
     fn handle_self_move(&mut self, data: &[u8]) {
         // `@` can be 4 bytes `(x, y)` or 8 bytes `(from_x, from_y, to_x, to_y)`;
         // always apply the final destination pair so the camera does not jump back.
-        let Some(chunk) = data.chunks_exact(4).last() else {
+        let Some(chunk) = data.as_chunks::<4>().0.iter().last() else {
             return;
         };
         if let (Ok(x), Ok(y)) = (
@@ -684,6 +690,8 @@ impl WorldState {
         }
     }
 
+    /// Inserts or updates an avatar's position, facing, pose, and optional appearance/visibility.
+    #[allow(clippy::too_many_arguments)] // Mirrors the flat fields decoded from avatar spawn/move packets.
     fn upsert_avatar_pose(
         &mut self,
         uid: u32,
@@ -999,8 +1007,10 @@ mod tests {
 
     #[test]
     fn batched_world_packets_raw_bytes_and_extended_directives() {
-        let mut world = WorldState::default();
-        world.self_uid = Some(100);
+        let mut world = WorldState {
+            self_uid: Some(100),
+            ..Default::default()
+        };
 
         // Two avatars in one batched '<' spawn packet:
         // #1: uid=100, non-UTF-8 Win-1252 name byte 0x92, raw color byte 0x85, scale=150
@@ -1152,8 +1162,10 @@ mod tests {
 
     #[test]
     fn hide_displacement_visibility_and_looked_player_decoding() {
-        let mut world = WorldState::default();
-        world.self_uid = Some(100);
+        let mut world = WorldState {
+            self_uid: Some(100),
+            ..Default::default()
+        };
 
         // Spawn self (100) at (10, 10) and peer (200) at (12, 12).
         let mut spawn = Vec::new();

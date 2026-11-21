@@ -1,9 +1,24 @@
 //! Furcadia `.map` (V01.40 / V01.50) binary map parser and tile accessor.
+//!
+//! # File Structure
+//! A Furcadia `.map` file consists of an ASCII `key=value` header terminated by
+//! the `BODY\n` marker, followed by 3, 5, or 7 packed tile layers:
+//! 1. **Floors** (`u16` per tile, column-major)
+//! 2. **Items / Objects** (`u16` per tile, column-major)
+//! 3. **Walls** (2 × `width` columns of single `u8`s: NW wall byte at `2*x`, NE wall byte at `2*x+1`)
+//! 4. **Regions** & **Effects** (optional, present in 5-layer and 7-layer maps)
+//! 5. **Lighting** & **Ambience** (optional, present in 7-layer maps)
+//!
+//! When `encoded=1` and the format version is `>= V01.20`, the body is decrypted
+//! before unpacking, 16-bit tile IDs are big-endian, and the Y axis is reversed.
 
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
+
+/// Upper bound per map axis to prevent OOM allocations from crafted `.map` headers.
+const MAX_MAP_DIMENSION: usize = 2048;
 
 /// Parsed Furcadia map with up to 7 tile layers (`floors`, `items`, `walls`, `regions`, `effects`, `lighting`, `ambience`).
 #[derive(Debug, Clone)]
@@ -95,13 +110,24 @@ impl FurcadiaMap {
 
         let width = width.ok_or(MapError::InvalidHeader("width"))?;
         let height = height.ok_or(MapError::InvalidHeader("height"))?;
+        if width == 0 || height == 0 || width > MAX_MAP_DIMENSION || height > MAX_MAP_DIMENSION {
+            return Err(MapError::InvalidHeader("dimensions"));
+        }
         let tile_count = width
             .checked_mul(height)
             .ok_or(MapError::InvalidHeader("dimensions"))?;
-        let layer_bytes = tile_count * 2;
-        let expected_7_layers = layer_bytes * 7;
-        let expected_5_layers = layer_bytes * 5;
-        let expected_3_layers = layer_bytes * 3;
+        let layer_bytes = tile_count
+            .checked_mul(2)
+            .ok_or(MapError::InvalidHeader("dimensions"))?;
+        let expected_7_layers = layer_bytes
+            .checked_mul(7)
+            .ok_or(MapError::InvalidHeader("dimensions"))?;
+        let expected_5_layers = layer_bytes
+            .checked_mul(5)
+            .ok_or(MapError::InvalidHeader("dimensions"))?;
+        let expected_3_layers = layer_bytes
+            .checked_mul(3)
+            .ok_or(MapError::InvalidHeader("dimensions"))?;
         let ver_num = parse_version_hundredths(&version);
 
         let decoded_body;
@@ -363,7 +389,7 @@ fn decrypt_map_body(body: &[u8], ver_num: u32) -> Result<Vec<u8>, MapError> {
     out.push(b0);
     let mut crc = crc32_step(0xffff_ffffu32, b0);
 
-    for blk in body[1..].chunks_exact(16) {
+    for blk in body[1..].as_chunks::<16>().0 {
         for &idx in perm {
             let pb = blk[idx].wrapping_sub(crc as u8);
             crc = crc32_step(crc, pb);
@@ -517,7 +543,7 @@ mod tests {
         let walls = unpack_wall_layer(&raw, 2, 3, true);
         assert_eq!(walls[0], 10u16 | (40u16 << 8));
         assert_eq!(walls[4], 12u16 | (42u16 << 8));
-        assert_eq!(walls[1 * 2 + 1], 21u16 | (51u16 << 8));
+        assert_eq!(walls[2 + 1], 21u16 | (51u16 << 8));
     }
 
     #[test]
@@ -559,5 +585,20 @@ mod tests {
             assert_eq!(map.height, 150);
             assert_eq!(map.floors.len(), 51 * 150);
         }
+    }
+
+    #[test]
+    fn rejects_zero_or_oversized_map_dimensions() {
+        let zero = b"MAP V01.40 Furcadia\nwidth=0\nheight=10\nBODY\n";
+        assert!(matches!(
+            FurcadiaMap::from_bytes(zero),
+            Err(MapError::InvalidHeader("dimensions"))
+        ));
+
+        let huge = b"MAP V01.40 Furcadia\nwidth=1000000000\nheight=2000000000\nBODY\n";
+        assert!(matches!(
+            FurcadiaMap::from_bytes(huge),
+            Err(MapError::InvalidHeader("dimensions"))
+        ));
     }
 }

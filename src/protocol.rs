@@ -383,9 +383,9 @@ fn md5_hex(data: &[u8]) -> String {
     let mut c0: u32 = 0x98badcfe;
     let mut d0: u32 = 0x10325476;
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
-        for (idx, word) in chunk.chunks_exact(4).enumerate() {
+        for (idx, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             m[idx] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
         }
 

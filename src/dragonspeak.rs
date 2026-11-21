@@ -1,4 +1,9 @@
 //! Furcadia DragonSpeak (`.ds`) script parser, serializer, and trigger model.
+//!
+//! DragonSpeak scripts consist of trigger blocks beginning with a `(0:id)` cause line,
+//! followed by optional `(1:id)` conditions, `(3:id)` area selectors, `(4:id)` filters,
+//! and `(5:id)` effects. Lines may reference integer literals, `%variable` names, or
+//! `{string}` literals.
 
 use std::fmt;
 use std::fs;

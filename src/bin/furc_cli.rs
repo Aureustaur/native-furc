@@ -1,4 +1,7 @@
-//! Minimal CLI test client for Milestone 1 (Networking/Login).
+//! Minimal command-line Furcadia client for testing networking, login, chat, and Pounce.
+//!
+//! Spawns a dedicated stdin reader thread feeding an `mpsc` channel while the main
+//! loop polls `FurcadiaClient` for server messages and drives periodic Pounce online checks.
 
 use std::env;
 use std::io::{self, BufRead, Write};
@@ -308,13 +311,14 @@ fn main() {
             match parse_stdin_command(&line) {
                 LocalAction::Send(cmd) => {
                     let is_quit = matches!(cmd, ClientCommand::Quit);
+                    if is_quit {
+                        // `disconnect()` sends `ClientCommand::Quit` and transitions state.
+                        let _ = client.disconnect();
+                        return;
+                    }
                     if let Err(err) = client.send_command(&cmd) {
                         eprintln!("Send error: {err}");
                         break;
-                    }
-                    if is_quit {
-                        let _ = client.disconnect();
-                        return;
                     }
                 }
                 LocalAction::Watch(name) => {

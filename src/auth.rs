@@ -249,11 +249,18 @@ fn find_next_open_tag_offset(xml: &str, tag: &str) -> Option<(usize, usize)> {
 fn extract_attr(tag: &str, attr: &str) -> Option<String> {
     for quote in ['"', '\''] {
         let pattern = format!("{attr}={quote}");
-        if let Some(start) = tag.find(&pattern) {
-            let val_start = start + pattern.len();
-            if let Some(end) = tag[val_start..].find(quote) {
-                return Some(unescape_xml(&tag[val_start..val_start + end]));
+        let mut search_from = 0;
+        while let Some(rel) = tag[search_from..].find(&pattern) {
+            let start = search_from + rel;
+            // Require preceding ASCII whitespace so `id="..."` never matches `userid="..."`.
+            let boundary_ok = start > 0 && tag.as_bytes()[start - 1].is_ascii_whitespace();
+            if boundary_ok {
+                let val_start = start + pattern.len();
+                if let Some(end) = tag[val_start..].find(quote) {
+                    return Some(unescape_xml(&tag[val_start..val_start + end]));
+                }
             }
+            search_from = start + pattern.len();
         }
     }
     None
@@ -367,17 +374,24 @@ mod tests {
     #[test]
     fn parse_real_clogin_xml_response() {
         let sample = r#"<?xml version="1.0" encoding="utf-8"?>
-<characterselect><account id="70805" email="furcadia.tactful872@passinbox.com"><char id="43091366" name="Tactful" species="" colors="w6'(6&gt;'5/3(%3#(#" flags="0" created="2026-11-12 08:22:36" lastlogin="2026-11-12 20:22:55" lastitem="0" lastport="0" lastscale="100" lastgloam="0" lastspeci="0" messages="0" logins="1" time="75" owner="furcadia.tactful872@passinbox.com"><desc>Hello &amp; welcome!</desc></char><char id="43091367" name="Tactful|Predator" lastlogin="2026-11-13 00:00:00"/></account></characterselect>"#;
+<characterselect><account id="70805" email="player@example.com"><char id="43091366" name="Tactful" species="" colors="w6'(6&gt;'5/3(%3#(#" flags="0" created="2026-11-12 08:22:36" lastlogin="2026-11-12 20:22:55" lastitem="0" lastport="0" lastscale="100" lastgloam="0" lastspeci="0" messages="0" logins="1" time="75" owner="player@example.com"><desc>Hello &amp; welcome!</desc></char><char id="43091367" name="Tactful|Predator" lastlogin="2026-11-13 00:00:00"/></account></characterselect>"#;
 
         let info = parse_clogin_xml(sample).unwrap();
         assert_eq!(info.account_id, "70805");
-        assert_eq!(info.email, "furcadia.tactful872@passinbox.com");
+        assert_eq!(info.email, "player@example.com");
         assert_eq!(info.characters.len(), 2);
         assert_eq!(info.characters[0].id, "43091366");
         assert_eq!(info.characters[0].name, "Tactful");
         assert_eq!(info.characters[0].desc, "Hello & welcome!");
         assert_eq!(info.characters[1].id, "43091367");
         assert_eq!(info.characters[1].name, "Tactful Predator");
+    }
+
+    #[test]
+    fn extract_attr_respects_attribute_name_boundaries() {
+        let tag = r#"<char userid="999" id="42" nickname="Wrong" name="Right"/>"#;
+        assert_eq!(extract_attr(tag, "id").as_deref(), Some("42"));
+        assert_eq!(extract_attr(tag, "name").as_deref(), Some("Right"));
     }
 
     #[test]

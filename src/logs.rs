@@ -137,7 +137,10 @@ pub fn system_time_to_ymd_hms(t: SystemTime) -> (i32, u32, u32, u32, u32, u32) {
 /// Converts the current local wall-clock time into `(year, month, day, hour, minute, second)`,
 /// falling back to UTC if the platform local-time query fails.
 pub fn local_now_ymd_hms() -> (i32, u32, u32, u32, u32, u32) {
-    #[cfg(unix)]
+    // Guard to 64-bit Unix where `time_t` is reliably `i64` (32-bit Unix with
+    // `_TIME_BITS=64` has a 64-bit `time_t`, so passing `isize` would be UB).
+    // 32-bit Unix falls back cleanly to `system_time_to_ymd_hms` below.
+    #[cfg(all(unix, target_pointer_width = "64"))]
     {
         #[repr(C)]
         struct Tm {
@@ -153,12 +156,12 @@ pub fn local_now_ymd_hms() -> (i32, u32, u32, u32, u32, u32) {
             _pad: [u64; 8],
         }
         extern "C" {
-            fn localtime_r(timep: *const isize, result: *mut Tm) -> *mut Tm;
+            fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
         }
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as isize;
+            .as_secs() as i64;
         let mut tm = Tm {
             tm_sec: 0,
             tm_min: 0,

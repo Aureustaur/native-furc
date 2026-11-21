@@ -1,12 +1,29 @@
-//! Furcadia `FOX5` (`.fox`) archive parser and lazy LZMA sprite decoder.
+//! Furcadia sprite archive parser (`FOX5`, `FSHX`, and classic `.fsh`), lazy LZMA
+//! decoder, and KitterSpeak animation VM.
+//!
+//! # Supported Archive Formats
+//! - **FOX5 (`.fox`)**: Modern archive with a trailing `"FOX5"` footer, LZMA-compressed
+//!   command block (optionally RC4-encrypted with a per-chunk key derived from the
+//!   footer's 16-byte `base_key` and compressed/uncompressed sizes), an image table of
+//!   LZMA-compressed indexed or 32-bit ARGB sprites, and shape/animation descriptors.
+//! - **FSHX (`.fox` legacy)**: Starts with `"FSHX"`, optionally applies a 96-byte
+//!   block permutation and per-object XOR/subtraction mask, and stores bottom-up
+//!   8-bit indexed frames plus KitterSpeak animation steps.
+//! - **Classic FSH (`.fsh`)**: Little-endian `u16` sprite count, `u16` chunk-size
+//!   table, and bottom-up 8-bit indexed pixel chunks with `(w, h, ox, oy)` headers.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::path::Path;
 
 use crate::assets::Palette;
+
+/// Maximum pixel dimension along either axis for a single FOX5 sprite (prevents 17 GB OOM on crafted headers).
+const MAX_FOX_IMAGE_DIM: u16 = 4096;
+/// Maximum decompressed byte size for any single LZMA stream in a `.fox` archive (64 MiB).
+const MAX_LZMA_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Metadata for a single image stored inside a `FOX5` archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,11 +505,10 @@ impl FoxAvatarShape {
                             slots[2] = None;
                         }
                     }
-                    33 => {
-                        if step.arg1 == 1 || step.arg1 == 2 {
+                    33
+                        if (step.arg1 == 1 || step.arg1 == 2) => {
                             effect_pass = step.arg1 as u8;
                         }
-                    }
                     _ => {}
                 }
 
@@ -706,18 +722,26 @@ impl FoxArchive {
         ]) as usize;
 
         let table_start = s_pos + 5;
-        let table_end = table_start + count * 9;
+        let table_bytes = count
+            .checked_mul(9)
+            .ok_or(FoxError::InvalidCommandBlock)?;
+        let table_end = table_start
+            .checked_add(table_bytes)
+            .ok_or(FoxError::InvalidCommandBlock)?;
         if table_end > cmd.len() {
             return Err(FoxError::InvalidCommandBlock);
         }
 
         let mut images = Vec::with_capacity(count);
         let mut img_offset = comp_cmd_size;
-        for chunk in cmd[table_start..table_end].chunks_exact(9) {
+        for chunk in cmd[table_start..table_end].as_chunks::<9>().0 {
             let csize = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
             let width = u16::from_be_bytes([chunk[4], chunk[5]]);
             let height = u16::from_be_bytes([chunk[6], chunk[7]]);
             let format = chunk[8];
+            if width > MAX_FOX_IMAGE_DIM || height > MAX_FOX_IMAGE_DIM {
+                return Err(FoxError::InvalidCommandBlock);
+            }
             images.push(FoxImageEntry {
                 offset: img_offset,
                 compressed_size: csize,
@@ -725,7 +749,9 @@ impl FoxArchive {
                 height,
                 format,
             });
-            img_offset += csize;
+            img_offset = img_offset
+                .checked_add(csize)
+                .ok_or(FoxError::InvalidCommandBlock)?;
         }
 
         let (object_to_image, object_shapes, object_avatar_shapes, object_flags) =
@@ -815,6 +841,10 @@ impl FoxArchive {
                 (0u8, 0u8)
             };
 
+            // Validate minimum remaining bytes before pre-allocating `frames`.
+            if h.saturating_add(frame_count.saturating_mul(18)) > data.len() {
+                return Err(FoxError::InvalidCommandBlock);
+            }
             let mut frames = Vec::with_capacity(frame_count);
             for _ in 0..frame_count {
                 if h + 18 > data.len() {
@@ -1013,8 +1043,16 @@ impl FoxArchive {
             .get(idx)
             .ok_or(FoxError::ImageOutOfBounds(idx))?;
 
-        let pixel_count = entry.width as usize * entry.height as usize;
-        let mut rgba = vec![0u8; pixel_count * 4];
+        if entry.width > MAX_FOX_IMAGE_DIM || entry.height > MAX_FOX_IMAGE_DIM {
+            return Err(FoxError::InvalidCommandBlock);
+        }
+        let pixel_count = (entry.width as usize)
+            .checked_mul(entry.height as usize)
+            .ok_or(FoxError::InvalidCommandBlock)?;
+        let rgba_bytes = pixel_count
+            .checked_mul(4)
+            .ok_or(FoxError::InvalidCommandBlock)?;
+        let mut rgba = vec![0u8; rgba_bytes];
 
         if entry.format == FOX_FMT_PREDECODED_INDEXED {
             let indexed = self
@@ -1032,9 +1070,11 @@ impl FoxArchive {
 
             let raw_slice = &self.raw[entry.offset..end];
             let decompressed = if self.enc_flag == 1 {
-                let uncomp_bytes = entry.width as u32
-                    * entry.height as u32
-                    * if entry.format == 1 { 4 } else { 1 };
+                let bpp: u32 = if entry.format == 1 { 4 } else { 1 };
+                let uncomp_bytes = u32::from(entry.width)
+                    .checked_mul(u32::from(entry.height))
+                    .and_then(|n| n.checked_mul(bpp))
+                    .ok_or(FoxError::InvalidCommandBlock)?;
                 let key = derive_fox_key(&self.base_key, entry.compressed_size as u32, uncomp_bytes);
                 let dec = rc4_crypt(&key, raw_slice);
                 decompress_lzma(&dec)?
@@ -1044,7 +1084,7 @@ impl FoxArchive {
 
             if entry.format == 1 && decompressed.len() >= pixel_count * 4 {
                 // 32-bit ARGB -> RGBA
-                for (i, src) in decompressed[..pixel_count * 4].chunks_exact(4).enumerate() {
+                for (i, src) in decompressed[..pixel_count * 4].as_chunks::<4>().0.iter().enumerate() {
                     let dst = i * 4;
                     rgba[dst] = src[1];
                     rgba[dst + 1] = src[2];
@@ -1231,7 +1271,7 @@ impl FoxArchive {
                 && s.purpose == 29
                 && (!s.frames.is_empty() || !s.layers.is_empty())
                 && (s.state as usize) <= dream_slot
-                && best.map_or(true, |prev| s.state >= prev.state)
+                && best.is_none_or(|prev| s.state >= prev.state)
             {
                 best = Some(s);
             }
@@ -1500,11 +1540,43 @@ fn rc4_crypt(key: &[u8], data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `Write` adapter that aborts with `ErrorKind::InvalidData` if output exceeds `limit` bytes.
+struct BoundedWriter {
+    buf: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            limit,
+        }
+    }
+}
+
+impl Write for BoundedWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.buf.len().saturating_add(data.len()) > self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("decompressed LZMA stream exceeded {}-byte safety limit", self.limit),
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn decompress_lzma(compressed: &[u8]) -> Result<Vec<u8>, FoxError> {
     let mut reader = BufReader::new(compressed);
-    let mut out = Vec::new();
+    let mut out = BoundedWriter::new(MAX_LZMA_OUTPUT_BYTES);
     lzma_rs::lzma_decompress(&mut reader, &mut out).map_err(|e| FoxError::Lzma(e.to_string()))?;
-    Ok(out)
+    Ok(out.buf)
 }
 
 #[derive(Default)]
@@ -2463,5 +2535,12 @@ mod tests {
                 assert_eq!(sp.rgba.len(), sp.width as usize * sp.height as usize * 4);
             }
         }
+    }
+
+    #[test]
+    fn bounded_writer_rejects_oversized_decompression() {
+        let mut w = BoundedWriter::new(16);
+        assert!(w.write_all(&[0u8; 16]).is_ok());
+        assert!(w.write_all(&[1u8]).is_err());
     }
 }

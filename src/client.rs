@@ -1,4 +1,16 @@
 //! TCP client and login state machine for the Furcadia protocol.
+//!
+//! # Connection Lifecycle
+//! 1. [`FurcadiaClient::connect`] opens a plain TCP socket and enters
+//!    [`SessionState::AwaitingDragonroar`].
+//! 2. [`FurcadiaClient::wait_for_handshake`] reads lines until the server sends
+//!    its `Dragonroar` banner (`SessionState::Handshaked`).
+//! 3. [`FurcadiaClient::enable_tls`] negotiates STARTTLS (currently using legacy
+//!    TLS 1.2 compatibility settings because Furcadia's server presents an expired
+//!    certificate and 1024-bit DHE).
+//! 4. [`FurcadiaClient::login_account`] / [`FurcadiaClient::login_character`]
+//!    sends credentials (`SessionState::Authenticating`) until the server replies
+//!    with `&&&&&&` (`SessionState::Connected`).
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -6,6 +18,10 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use crate::protocol::{ClientCommand, ProtocolError, ServerMessage, DEFAULT_HOST, DEFAULT_PORT};
+
+/// Maximum length of a single newline-delimited protocol line (1 MiB).
+/// Prevents unbounded memory growth if a misbehaving server streams without `\n`.
+const MAX_PROTOCOL_LINE_BYTES: usize = 1024 * 1024;
 
 /// Configuration for connecting to a Furcadia game server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,15 +159,37 @@ impl Write for ConnectionStream {
 
 impl FurcadiaClient {
     /// Opens a TCP connection using `config` and enters `SessionState::AwaitingDragonroar`.
+    /// Tries each resolved address in order so dual-stack hosts fall back cleanly if IPv6 fails.
     pub fn connect(config: &ConnectionConfig) -> Result<Self, ClientError> {
-        let addr = format!("{}:{}", config.host, config.port)
+        let addrs: Vec<_> = format!("{}:{}", config.host, config.port)
             .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::AddrNotAvailable, "could not resolve host")
-            })?;
+            .collect();
+        if addrs.is_empty() {
+            return Err(ClientError::Io(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "could not resolve host",
+            )));
+        }
 
-        let stream = TcpStream::connect_timeout(&addr, config.connect_timeout)?;
+        let mut last_err = None;
+        let mut connected = None;
+        for addr in addrs {
+            match TcpStream::connect_timeout(&addr, config.connect_timeout) {
+                Ok(s) => {
+                    connected = Some(s);
+                    break;
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+        let stream = match connected {
+            Some(s) => s,
+            None => {
+                return Err(ClientError::Io(last_err.unwrap_or_else(|| {
+                    io::Error::new(io::ErrorKind::AddrNotAvailable, "could not connect to host")
+                })))
+            }
+        };
         stream.set_read_timeout(config.read_timeout)?;
         Ok(Self {
             reader: BufReader::new(ConnectionStream::Plain(stream)),
@@ -160,6 +198,28 @@ impl FurcadiaClient {
             state: SessionState::AwaitingDragonroar,
             byte_buf: Vec::with_capacity(512),
         })
+    }
+
+    /// Reads bytes into `self.byte_buf` until `\n` or EOF, enforcing [`MAX_PROTOCOL_LINE_BYTES`].
+    fn read_line_bounded(&mut self) -> io::Result<usize> {
+        let remaining = MAX_PROTOCOL_LINE_BYTES.saturating_sub(self.byte_buf.len());
+        if remaining == 0 {
+            self.byte_buf.clear();
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "server line exceeded maximum allowed length",
+            ));
+        }
+        let mut limited = (&mut self.reader).take((remaining + 1) as u64);
+        let n = limited.read_until(b'\n', &mut self.byte_buf)?;
+        if self.byte_buf.len() > MAX_PROTOCOL_LINE_BYTES && !self.byte_buf.ends_with(b"\n") {
+            self.byte_buf.clear();
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "server line exceeded maximum allowed length",
+            ));
+        }
+        Ok(n)
     }
 
     /// Requests Furcadia's STARTTLS upgrade. Uses legacy compatibility settings
@@ -181,7 +241,7 @@ impl FurcadiaClient {
             if Instant::now() >= deadline {
                 return Err(ClientError::Timeout("timed out negotiating TLS".into()));
             }
-            match self.reader.read_until(b'\n', &mut self.byte_buf) {
+            match self.read_line_bounded() {
                 Ok(0) => return Err(ClientError::Disconnected),
                 Ok(_) => {
                     let msg = ServerMessage::parse_bytes(&self.byte_buf);
@@ -223,6 +283,7 @@ impl FurcadiaClient {
         let stream = match reader.into_inner() {
             ConnectionStream::Plain(stream) => stream,
             ConnectionStream::Tls(_) | ConnectionStream::Empty => {
+                self.state = SessionState::Disconnected;
                 return Err(ClientError::InvalidState {
                     expected: "plain connection",
                     actual: self.state.clone(),
@@ -230,25 +291,35 @@ impl FurcadiaClient {
             }
         };
 
-        let stream = stream;
-        stream.set_read_timeout(Some(timeout))?;
-        let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())
-            .map_err(tls_error)?;
-        builder
-            .set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
-            .map_err(tls_error)?;
-        builder
-            .set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
-            .map_err(tls_error)?;
-        builder
-            .set_cipher_list("DEFAULT:@SECLEVEL=0")
-            .map_err(tls_error)?;
-        builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
-        let connector = builder.build();
-        let tls_stream = connector.connect(&self.host, stream).map_err(tls_error)?;
-        tls_stream.get_ref().set_read_timeout(self.read_timeout)?;
-        self.reader = BufReader::new(ConnectionStream::Tls(tls_stream));
-        Ok(pending)
+        let tls_result = (|| -> Result<openssl::ssl::SslStream<TcpStream>, ClientError> {
+            stream.set_read_timeout(Some(timeout))?;
+            let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())
+                .map_err(tls_error)?;
+            builder
+                .set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
+                .map_err(tls_error)?;
+            builder
+                .set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_2))
+                .map_err(tls_error)?;
+            builder
+                .set_cipher_list("DEFAULT:@SECLEVEL=0")
+                .map_err(tls_error)?;
+            builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
+            let connector = builder.build();
+            let tls_stream = connector.connect(&self.host, stream).map_err(tls_error)?;
+            tls_stream.get_ref().set_read_timeout(self.read_timeout)?;
+            Ok(tls_stream)
+        })();
+        match tls_result {
+            Ok(tls_stream) => {
+                self.reader = BufReader::new(ConnectionStream::Tls(tls_stream));
+                Ok(pending)
+            }
+            Err(err) => {
+                self.state = SessionState::Disconnected;
+                Err(err)
+            }
+        }
     }
 
     /// Returns the current session state.
@@ -259,7 +330,7 @@ impl FurcadiaClient {
     /// Reads and parses the next server message if available before `read_timeout`.
     /// Returns `Ok(None)` on read timeout / `WouldBlock`.
     pub fn poll_message(&mut self) -> Result<Option<ServerMessage>, ClientError> {
-        match self.reader.read_until(b'\n', &mut self.byte_buf) {
+        match self.read_line_bounded() {
             Ok(0) => {
                 self.byte_buf.clear();
                 self.state = SessionState::Disconnected;

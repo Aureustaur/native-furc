@@ -45,7 +45,7 @@ Alongside the graphical desktop client (`furc-gui`), the repository provides a s
 
 ## Why Furcadia Native Client?
 
-- **True native performance**: compiled to a small native Rust executable for Linux and Windows with zero Wine, compatibility layers, or browser bloat.
+- **True native performance & long-session stability**: compiled to a small native Rust executable for Linux and Windows with zero Wine, compatibility layers, or browser bloat — with bounded GPU/sprite caches, capped in-memory chat history, clean tab teardown, and hardened archive/decompression limits for overnight sessions.
 - **Ready on a fresh install**: connects cleanly on first launch and downloads public species, dynamic avatars, portraits, and dream assets automatically.
 - **Multi-alt power in one window**: keep multiple logged-in characters open simultaneously as reorderable character tabs, complete with per-character cookie counts preserved across tab switches.
 - **Built for daily RP and trading**: includes dedicated **Cookie**, **Gift**, and **Trade** menus right on the player card, inline Furcadia smiley sprites, `[bracketed text]` highlighting, rich text buttons, and a configurable dice roller.
@@ -187,9 +187,15 @@ While connected, type chat directly or use `/wh NAME message`, `/who`, `/onln NA
 
 ## Data and privacy
 
-Local configuration is stored at `~/.config/furcadia-native/config.ini` on Linux (or `%APPDATA%\furcadia-native\config.ini` on Windows). Downloaded caches and logs are also stored locally. The client connects to Furcadia services for login, game sessions, news, and public assets, and to GitHub to check for newer releases; account credentials are used solely to authenticate with Furcadia. On Unix-like systems the configuration file is written with owner-only permissions when possible. Avoid sharing your configuration file because it may contain saved credentials.
+Local configuration is stored at `~/.config/furcadia-native/config.ini` on Linux (or `%APPDATA%\furcadia-native\config.ini` on Windows). Downloaded caches and logs are also stored locally. The client connects to Furcadia services for login, game sessions, news, and public assets, and to GitHub to check for newer releases; account credentials are used solely to authenticate with Furcadia.
+
+- On Unix-like systems, `config.ini` is created atomically with owner-only (`0600`) permissions. Avoid sharing your configuration file because it may contain saved credentials.
+- External asset and dream downloads are restricted to HTTP/HTTPS with size caps, and dream/portrait archives enforce strict decompression and dimension bounds.
+- Because Furcadia's game server uses a legacy/expired TLS certificate, the client displays a clear connection notice in both the GUI and CLI when certificate verification is bypassed for game-server compatibility.
 
 ## Project status
+
+Milestone 2.0 marks a stability, security, and open-source readiness release with comprehensive rustdoc documentation, a zero-warning Clippy baseline, and 94 unit tests covering protocol encoding, archive/map parsing, logging, and GUI logic.
 
 This is an independent, actively developed client. Some behavior and asset support may differ from the official Windows client, and compatibility can vary across dreams and custom patches. Please report reproducible bugs or feature requests on [GitHub Issues](https://github.com/morganlowe/native-furcadia/issues) with your OS and relevant log output (never attach passwords or private credentials).
 

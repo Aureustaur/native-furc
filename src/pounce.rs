@@ -274,8 +274,8 @@ impl PounceMonitor {
                     }
                 }
             }
-            b'o' => {
-                if payload.len() >= 5 {
+            b'o'
+                if payload.len() >= 5 => {
                     let friend_uid = decode_b220_raw(&payload[0..4]) as u32;
                     let new_status = decode_status(payload[4]);
                     let mut notified = HashSet::new();
@@ -304,7 +304,6 @@ impl PounceMonitor {
                         }
                     }
                 }
-            }
             _ => {}
         }
 

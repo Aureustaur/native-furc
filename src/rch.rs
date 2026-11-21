@@ -1,9 +1,20 @@
 //! Parser and extractor for Furcadia `FR01` (`.rch`) compressed dream packages.
+//!
+//! # Binary Layout
+//! - Bytes `0..4`: ASCII magic `"FR01"`
+//! - Bytes `4..28`: 24-byte archive header / metadata
+//! - Bytes `28..`: Sequence of entries, each consisting of:
+//!   - 42-byte null-terminated filename (often prefixed with `"FZ"` for transport)
+//!   - 20-byte metadata block (`comp_size` at LE u32 `[8..12]`, `comp_type` at LE u32 `[16..20]`)
+//!   - `comp_size` payload bytes (`0` = raw, `1` = XOR `0xFF`, `2` = bzip2)
 
 use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// Upper bound on any single decompressed FR01 entry (64 MiB) to defend against bzip2 bombs.
+const MAX_RCH_ENTRY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum RchError {
@@ -69,11 +80,14 @@ pub fn parse_fr01(bytes: &[u8]) -> Result<Vec<RchEntry>, RchError> {
         let comp_type = u32::from_le_bytes([meta[16], meta[17], meta[18], meta[19]]);
         pos += 62;
 
-        if pos + comp_size > bytes.len() {
+        let end = pos
+            .checked_add(comp_size)
+            .ok_or(RchError::TruncatedEntry)?;
+        if end > bytes.len() {
             return Err(RchError::TruncatedEntry);
         }
-        let payload = &bytes[pos..pos + comp_size];
-        pos += comp_size;
+        let payload = &bytes[pos..end];
+        pos = end;
 
         let data = match comp_type {
             0 => payload.to_vec(),
@@ -128,11 +142,17 @@ fn sanitize_rel_filename(name: &str) -> Result<String, RchError> {
 }
 
 fn decompress_bzip2(payload: &[u8]) -> Result<Vec<u8>, RchError> {
-    let mut decoder = bzip2_rs::DecoderReader::new(payload);
+    let decoder = bzip2_rs::DecoderReader::new(payload);
+    let mut limited = decoder.take((MAX_RCH_ENTRY_BYTES + 1) as u64);
     let mut out = Vec::new();
-    decoder
+    limited
         .read_to_end(&mut out)
         .map_err(|e| RchError::DecompressFailed(format!("bzip2 decode failed: {e}")))?;
+    if out.len() > MAX_RCH_ENTRY_BYTES {
+        return Err(RchError::DecompressFailed(format!(
+            "entry exceeds {MAX_RCH_ENTRY_BYTES}-byte safety limit"
+        )));
+    }
     Ok(out)
 }
 

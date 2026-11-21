@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v1.2.5 — System Tray Alert Blinking & Unread Badge"
+          name: "Furcadia Native Client v2.0.0 — Milestone 2.0: Stability, Security & Open-Source Polish"
           body: |
-            ## Furcadia Native Client v1.2.5 — System Tray Alert Blinking & Unread Badge
+            ## Furcadia Native Client v2.0.0 — Milestone 2.0: Stability, Security & Open-Source Polish
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -98,31 +98,43 @@ jobs:
             - Modern dream rendering, remappable portraits, desctags, and avatar/digo support
             - Multi-character tabs, player badges in chat, and drag-to-reorder player/whisper tabs
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
-            - Integrated Start Menu / Desktop launcher icons and in-app About page
+            - Linux system tray with alert blinking & unread badge, plus integrated desktop launcher icons
 
-            ### What's New in v1.2.5
-            - **System Tray Alert Blinking & Unread Badge (Linux `StatusNotifierItem`)**:
-              - When an alert arrives while unfocused or hidden in the tray (incoming whispers, mentions, Pounce friend online, or Main Chat alerts), the tray icon switches to `NeedsAttention` (pulling it out of KDE's hidden tray arrow if tucked away) and blinks every 650ms between the normal icon and a bright orange-red/gold unread badge dot.
-              - Stops blinking and clears the badge immediately when you restore or focus the window.
-              - Configurable via the new **Blink system tray icon on alerts (when unfocused / in tray)** option (`blink_tray_on_alert`) in **Settings → Audio, Mentions & Taskbar Flash** (enabled by default, synced across devices).
-            - Includes all `v1.2.4` improvements (real XWayland `with_x11()` backend selection on `winit 0.30`, ICCCM `XWithdrawWindow` for KWin minimize-to-tray, persistent per-device window size & maximized state, and Furcadia-style chronological whisper logging).
+            ### What's New in v2.0.0 (Milestone 2.0)
+            - **Long-Session Memory, GPU Texture & Thread Leak Fixes**:
+              - Closed character tabs now cleanly terminate their `network_worker` thread and close live sockets when dropped.
+              - Bounded GPU texture and sprite caches (`avatar_textures`, `custom_portrait_textures`, `custom_portrait_rgba`, `chat_img_textures`) with automatic eviction and dream/disconnect cleanup for `player_portrait_ids`.
+              - Capped in-memory chat and whisper tab histories (full history remains persisted to disk logs) and gated/rotated `login_trace.log` behind debug packet logging.
+            - **Security & Privacy Hardening**:
+              - Surfaced a clear GUI notice when connecting over Furcadia's legacy/unverified TLS handshake.
+              - Hardened `curl` asset/image downloads with `--proto =http,https`, `--proto-redir =http,https`, `--max-filesize`, and `--` argument termination.
+              - Atomic `0o600` config creation on Unix to eliminate the `config.ini` permissions race, plus newline-safe serialization that preserves leading/trailing password whitespace.
+              - Guarded against empty `safe_name` paths in dream downloads so malformed map names can never target the parent dreams cache directory.
+            - **Parser, Decompressor & Protocol Safety**:
+              - Added hard decompression byte limits across LZMA (`.fox`), BZip2 (`.rch` / portraits), and Furcadia LZW decoders to prevent decompression bombs.
+              - Fixed a 12-bit LZW bit-width overflow on large portraits (`nbits` capped at 12).
+              - Added checked arithmetic and dimension bounds across `.fox` and `.map` parsers, plus bounded network line reads in `FurcadiaClient`.
+              - Fixed `auth.rs` XML attribute boundary matching, multi-address DNS fallback, stale `SessionState` on failed TLS upgrade, 32-bit Unix `localtime_r` safety, and duplicate `quit` in `furc-cli`.
+            - **Open-Source Codebase Polish**:
+              - Expanded rustdoc and inline documentation across core protocol, archive, and GUI modules.
+              - Resolved all 45 Clippy warnings (`cargo clippy --all-targets -- -D warnings` passes cleanly) and expanded the unit test suite to 94 passing tests.
 
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-1.2.5-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-2.0.0-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_1.2.5_amd64.deb
+            sudo apt install ./furcadia-native_2.0.0_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-1.2.5-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-2.0.0-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

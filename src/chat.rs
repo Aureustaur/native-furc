@@ -1,4 +1,10 @@
-//! Furcadia rich chat markup parser and text/ANSI renderers.
+//! Furcadia rich chat markup parser and plain-text / ANSI renderers.
+//!
+//! Furcadia sends chat lines prefixed with `(` containing an HTML-like subset:
+//! `<font color='...'>`, `<b>`, `<i>`, `<u>`, `<a href='...'>`, `<name shortname='...'>`,
+//! `<img src='fsh://system.fsh:N' ...>` (smileys/desctags), and `<br>`.
+//! [`parse_chat_line`] converts raw server lines into a styled [`ChatLine`] with
+//! auto-linked URLs and decoded HTML entities, preserving an explicit style stack.
 
 /// Active formatting state for a text span in a Furcadia chat line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

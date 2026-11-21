@@ -273,7 +273,7 @@ impl RemapLuts {
     /// Pixels with `B == 0` and `A != 0` are remapped via `G` channel (`R` is shade `0..=255`).
     pub fn apply_rgba(&self, rgba: &[u8]) -> Vec<u8> {
         let mut out = rgba.to_vec();
-        for px in out.chunks_exact_mut(4) {
+        for px in out.as_chunks_mut::<4>().0 {
             let r = px[0];
             let g = px[1];
             let b = px[2];

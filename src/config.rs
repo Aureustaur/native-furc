@@ -1,7 +1,12 @@
-//! Local user configuration persistence (`~/.config/furcadia-native/config.ini`).
+//! Local user configuration persistence (`~/.config/furcadia-native/config.ini`)
+//! and optional cloud-folder settings sync (`settings-<device-id>.ini`).
+//!
+//! Credentials (`email`, `password`, `remember_*`, `auto_login`) are stored only in
+//! the local `config.ini` (created with `0o600` permissions on Unix) and are always
+//! stripped before writing shared sync snapshots.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -373,15 +378,28 @@ impl ClientConfig {
         Ok(Self::parse(&text))
     }
 
+    /// Writes configuration to `path`. On Unix, the file is created with `0o600`
+    /// permissions atomically to avoid a world-readable window for saved credentials.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, self.serialize())?;
+        let data = self.serialize();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            file.write_all(data.as_bytes())?;
             let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(path, data)?;
         }
         Ok(())
     }
@@ -399,11 +417,12 @@ impl ClientConfig {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            if let Some((k, v)) = trimmed.split_once('=') {
+            if let Some((k, v)) = line.split_once('=') {
                 match k.trim() {
                     "email" => cfg.email = v.trim().to_owned(),
                     "character" => cfg.character = v.trim().to_owned(),
-                    "password" => cfg.password = v.trim().to_owned(),
+                    // Preserve leading/trailing spaces in passwords; only strip trailing CR.
+                    "password" => cfg.password = v.trim_end_matches('\r').to_owned(),
                     "remember_email" => cfg.remember_email = v.trim() != "false",
                     "remember_password" => cfg.remember_password = v.trim() != "false",
                     "remember_login" => {
@@ -598,23 +617,26 @@ impl ClientConfig {
     }
 
     pub fn serialize(&self) -> String {
+        let strip_nl = |s: &str| s.replace(['\r', '\n'], "");
         let saved_email = if self.remember_email {
-            self.email.as_str()
+            strip_nl(&self.email)
         } else {
-            ""
+            String::new()
         };
         let saved_pass = if self.remember_password {
-            self.password.as_str()
+            strip_nl(&self.password)
         } else {
-            ""
+            String::new()
         };
+        let safe_character = strip_nl(&self.character);
+        let safe_sync_folder = strip_nl(&self.sync_folder);
         format!(
             "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nflash_taskbar_on_message={}\nflash_taskbar_on_main_chat={}\nblink_tray_on_alert={}\nmention_nicknames={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nmy_speech_color={:06x}\nbracket_text_color={:06x}\nemote_text_color={:06x}\nwhisper_text_color={:06x}\nemit_text_color={:06x}\nshout_text_color={:06x}\nroll_text_color={:06x}\nsuccess_text_color={:06x}\nwarning_text_color={:06x}\nerror_text_color={:06x}\ntab_active_bg={:06x}\ntab_active_text={:06x}\ntab_unread_bg={:06x}\ntab_unread_text={:06x}\ntab_inactive_bg={:06x}\ntab_inactive_text={:06x}\ncustom_ui_bg={}\nchat_bg_color={:06x}\npanel_bg_color={:06x}\naccent_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\nwindow_width={}\nwindow_height={}\nwindow_maximized={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
             saved_email,
-            self.character,
+            safe_character,
             saved_pass,
             self.watchlist.join(","),
             self.logging_enabled,
@@ -676,7 +698,7 @@ impl ClientConfig {
             self.check_updates_on_startup,
             self.first_setup_done,
             self.dice_roll,
-            self.sync_folder,
+            safe_sync_folder,
             self.sync_device_id,
             self.sync_updated_at,
             self.window_width,

@@ -1,13 +1,51 @@
 //! Native cross-platform GUI client for Furcadia using `eframe` / `egui`.
+//!
+//! # Architecture Overview
+//! - **UI Thread ([`FurcadiaApp`])**: Renders the `egui` interface (login, character
+//!   select, isometric map viewport, chat/whisper tabs, Pounce panel, and settings)
+//!   and owns GPU [`TextureHandle`] caches.
+//! - **Network Worker (`network_worker`)**: One background thread per active or
+//!   background character session (`BackgroundSession`), communicating with the UI
+//!   thread via [`UiToNet`] and [`NetToUi`] `mpsc` channels. Exits cleanly when its
+//!   `UiToNet` sender is dropped.
+//! - **Asset & Sprite Caches ([`FoxSpriteCache`])**: Lazily decode `FOX5`/`FSHX`/`FSH`
+//!   archives into GPU textures with bounded eviction so long-running sessions do not
+//!   exhaust RAM or VRAM.
+//! - **On-Demand Downloaders**: Dreams (`.rch`/`.zip`/`.map`), species `.fox` patches,
+//!   custom portraits (`hades.furcadia.com:6500` + `FPRT10` LZW / `FPRT20`), and inline
+//!   chat images are fetched on short-lived worker threads with strict protocol and
+//!   size limits.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 #[path = "../logo.rs"]
 mod logo;
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Upper bound on cached colorized avatar textures per `FoxSpriteCache`.
+const MAX_AVATAR_TEXTURES: usize = 512;
+/// Upper bound on cached custom portrait RGBA buffers / GPU textures.
+const MAX_CUSTOM_PORTRAITS: usize = 256;
+/// Upper bound on cached inline chat image GPU textures.
+const MAX_CHAT_IMG_TEXTURES: usize = 128;
+/// Upper bound on retained chat / whisper lines per tab in memory (full history is in disk logs).
+const MAX_CHAT_LINES: usize = 3000;
+/// Upper bound on decompressed `FPRT10` LZW portrait bytes (4 MiB).
+const MAX_LZW_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+/// Upper bound on decompressed bzip2 asset bytes in the GUI (32 MiB).
+const MAX_BZIP2_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Appends a [`ChatLine`] to a log vector while keeping memory bounded to [`MAX_CHAT_LINES`].
+fn push_bounded_chat_line(log: &mut Vec<ChatLine>, line: ChatLine) {
+    log.push(line);
+    if log.len() > MAX_CHAT_LINES {
+        let excess = log.len() - MAX_CHAT_LINES;
+        log.drain(..excess);
+    }
+}
 
 use eframe::egui::{
     self, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, TextureHandle,
@@ -251,6 +289,8 @@ impl WhisperSession {
     }
 }
 
+/// Renders persisted whisper-log history lines above the live whisper stream.
+#[allow(clippy::too_many_arguments)] // Passes read-only UI/theme state directly to avoid a wrapper struct.
 fn render_whisper_history_lines(
     ui: &mut egui::Ui,
     history_lines: &[String],
@@ -549,16 +589,19 @@ fn resolve_species_spec_with_dynamic(
     (base_sp, obj_id)
 }
 
+/// `(species_id, dplayer_id, hop)` entry parsed from `]M%` dynamic avatar metadata.
+type DynamicAvatarEntry = (u16, usize, bool);
+
 /// Parses `]M%<server_code><8-byte entries>` (`DynamicAvatarDetails`).
-/// Returns `(server_code, Vec<(species_id, dplayer_id, hop)>)`.
-fn parse_dynamic_avatar_details(data: &[u8]) -> Option<(Option<char>, Vec<(u16, usize, bool)>)> {
+/// Returns `(server_code, Vec<DynamicAvatarEntry>)`.
+fn parse_dynamic_avatar_details(data: &[u8]) -> Option<(Option<char>, Vec<DynamicAvatarEntry>)> {
     if data.first() != Some(&b'%') || data.len() < 2 {
         return None;
     }
     let srv = data[1];
     let server_code = (srv != b' ' && srv.is_ascii_alphanumeric()).then_some(srv as char);
     let mut out = Vec::new();
-    for chunk in data[2..].chunks_exact(8) {
+    for chunk in data[2..].as_chunks::<8>().0 {
         let lo = chunk[2].saturating_sub(35) as u16;
         let hi_and_flag = chunk[3].saturating_sub(35) as u16;
         let species_id = (hi_and_flag >> 1) * 220 + lo;
@@ -578,6 +621,12 @@ const ARCHIVE_DEFAULT: u8 = 0;
 const ARCHIVE_DREAM: u8 = 1;
 const ARCHIVE_LEGACY: u8 = 2;
 
+/// Layered sprite & GPU texture cache for a single Furcadia patch category
+/// (floors, items, walls, portals, effects, or a species/dynamic avatar).
+///
+/// Lookup priority is `dream_archive` -> `default_archive` -> `legacy_archive`,
+/// matching how Furcadia dream patches override stock artwork. Colorized avatar
+/// textures are bounded by [`MAX_AVATAR_TEXTURES`] to prevent VRAM growth.
 struct FoxSpriteCache {
     default_archive: Option<FoxArchive>,
     legacy_archive: Option<FoxArchive>,
@@ -774,6 +823,8 @@ impl FoxSpriteCache {
         Some(pair)
     }
 
+    /// Decodes and appends all non-placeholder sprite layers for a single FOX frame.
+    #[allow(clippy::too_many_arguments)] // Internal sprite-cache helper receiving split borrows of cache fields.
     fn resolve_frame_layers(
         fox: &mut FoxArchive,
         archive_tag: u8,
@@ -816,6 +867,8 @@ impl FoxSpriteCache {
         }
     }
 
+    /// Evaluates KitterSpeak/slot animations for a FOX shape and resolves its active frame layers.
+    #[allow(clippy::too_many_arguments)] // Internal sprite-cache helper receiving split borrows of cache fields.
     fn resolve_shape_slots(
         fox: &mut FoxArchive,
         archive_tag: u8,
@@ -1018,6 +1071,8 @@ impl FoxSpriteCache {
         )
     }
 
+    /// Resolves and caches sprite layers for a FOX object addressed by `(id, purpose, state, dir)`.
+    #[allow(clippy::too_many_arguments)] // Thin forwarder to `get_or_load_layers_inner`.
     fn get_or_load_ps_layers(
         &mut self,
         ctx: &egui::Context,
@@ -1040,6 +1095,8 @@ impl FoxSpriteCache {
         )
     }
 
+    /// Searches dream, default, and legacy FOX archives in priority order and resolves shape layers.
+    #[allow(clippy::too_many_arguments)] // Internal lookup helper shared by standard and purpose/state queries.
     fn get_or_load_layers_inner(
         &mut self,
         ctx: &egui::Context,
@@ -1092,6 +1149,8 @@ impl FoxSpriteCache {
         None
     }
 
+    /// Decodes, optionally color-remaps, and caches an individual avatar sprite texture.
+    #[allow(clippy::too_many_arguments)] // Internal avatar-cache helper taking split borrows of cache state.
     fn decode_or_get_avatar_image(
         fox: &mut FoxArchive,
         is_dream: bool,
@@ -1132,6 +1191,10 @@ impl FoxSpriteCache {
             TextureOptions::NEAREST,
         );
         let pair = (handle, is_one_by_one);
+        // Bound GPU texture growth in long sessions with many uniquely colored avatars.
+        if avatar_textures.len() >= MAX_AVATAR_TEXTURES {
+            avatar_textures.clear();
+        }
         avatar_textures.insert((is_dream, image_idx, cache_color), pair.clone());
         Some(pair)
     }
@@ -1139,7 +1202,7 @@ impl FoxSpriteCache {
     /// Resolves, colorizes (via Furcadia `B == 0` green-channel LUTs only when `category & 0x20 != 0`),
     /// and caches avatar layers, supporting `[dream_archive, default_archive]` fallback and KitterSpeak
     /// frame animations. Returns `(layers, is_animated)` sorted shadow-first.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)] // Internal avatar renderer returning `(Vec<(tex, offset, category)>, is_animated)`.
     fn get_or_load_avatar_layers(
         &mut self,
         ctx: &egui::Context,
@@ -1320,6 +1383,7 @@ impl FoxSpriteCache {
     }
 }
 
+/// Commands sent from the `egui` UI thread to a session's [`network_worker`] thread.
 enum UiToNet {
     AuthenticateAccount {
         email: String,
@@ -1430,6 +1494,11 @@ struct BackgroundSession {
     from_net: Receiver<NetToUi>,
 }
 
+/// Root `eframe::App` state for the Furcadia GUI client.
+///
+/// Holds the active character session (network channels, [`WorldState`], chat/whisper
+/// logs, Pounce monitor), any background multi-character sessions (`bg_sessions`),
+/// GPU texture caches, and persisted user settings (`ClientConfig`).
 #[allow(dead_code)]
 struct FurcadiaApp {
     screen: AppScreen,
@@ -3109,7 +3178,7 @@ impl FurcadiaApp {
                                 .find(|w| w.peer.eq_ignore_ascii_case(&peer))
                             {
                                 w.unread += 1;
-                                w.lines.push(formatted);
+                                push_bounded_chat_line(&mut w.lines, formatted);
                             } else {
                                 let mut w = WhisperSession::new(peer.clone());
                                 if let Some(dir) = default_logs_root() {
@@ -3120,7 +3189,7 @@ impl FurcadiaApp {
                                     };
                                 }
                                 w.unread = 1;
-                                w.lines.push(formatted);
+                                push_bounded_chat_line(&mut w.lines, formatted);
                                 sess.whispers.push(w);
                             }
                             if self.logging_enabled && self.log_whispers {
@@ -3168,7 +3237,7 @@ impl FurcadiaApp {
                                     BgNotifyKind::MainChatFlashOnly,
                                 ));
                             }
-                            sess.chat_log.push(line);
+                            push_bounded_chat_line(&mut sess.chat_log, line);
                         }
                     }
                     NetToUi::Message(ServerMessage::WorldPacket { opcode, data }) => {
@@ -3346,6 +3415,7 @@ impl FurcadiaApp {
         }
         self.species_caches.clear();
         self.char_portraits.clear();
+        self.player_portrait_ids.clear();
         self.current_dream_dir = None;
         self.custom_dream_skin = None;
         self.stop_music();
@@ -3561,7 +3631,7 @@ impl FurcadiaApp {
 
     fn handle_extended_dream(&mut self, payload: &str) {
         let tokens: Vec<&str> = payload.split_whitespace().collect();
-        let is_modern = tokens.iter().any(|t| *t == "modern");
+        let is_modern = tokens.contains(&"modern");
         let explicit_url = tokens
             .iter()
             .copied()
@@ -3732,6 +3802,9 @@ impl FurcadiaApp {
                 img,
                 TextureOptions::LINEAR,
             );
+            if self.custom_portrait_textures.len() >= MAX_CUSTOM_PORTRAITS {
+                self.custom_portrait_textures.clear();
+            }
             self.custom_portrait_textures.insert(key, tex.clone());
             return Some(tex);
         }
@@ -3900,7 +3973,7 @@ impl FurcadiaApp {
             .or_else(|| {
                 character_id
                     .filter(|uid| Some(*uid) == self.world.self_uid)
-                    .and_then(|_| self.world.self_name.as_deref())
+                    .and(self.world.self_name.as_deref())
                     .map(wire_player_name)
             });
         if let Some(ref name) = target_name {
@@ -4023,16 +4096,7 @@ impl FurcadiaApp {
                 });
             }
         } else if !is_loaded
-            && (1..1000).contains(&file_id)
-            && self.pending_species_downloads.insert(file_id)
-        {
-            let _ = self.to_net.send(UiToNet::DownloadSpecies {
-                file_id,
-                server_code: None,
-                if_newer_than: None,
-            });
-        } else if !is_loaded
-            && (1001..=1004).contains(&file_id)
+            && ((1..1000).contains(&file_id) || (1001..=1004).contains(&file_id))
             && self.pending_species_downloads.insert(file_id)
         {
             let _ = self.to_net.send(UiToNet::DownloadSpecies {
@@ -4344,8 +4408,8 @@ impl FurcadiaApp {
         let use_legacy = !self.world.is_modern;
         if item_id >= 2400 {
             let oid = item_id - 2400;
-            if self.world.is_modern && portal_state.is_some_and(|s| s >= 0) {
-                if cache_has_portal_shapes(&self.iteme_cache, oid) {
+            if self.world.is_modern && portal_state.is_some_and(|s| s >= 0)
+                && cache_has_portal_shapes(&self.iteme_cache, oid) {
                     if let res @ Some(_) = resolve_portal_layers_from(
                         &mut self.iteme_cache,
                         ctx,
@@ -4365,7 +4429,6 @@ impl FurcadiaApp {
                         anim_ms,
                     );
                 }
-            }
             if let res @ Some(_) = self.iteme_cache.get_or_load_shape_layers_mode(
                 ctx,
                 &self.palette,
@@ -4381,8 +4444,8 @@ impl FurcadiaApp {
             for (min_id, max_id, offset, cache) in &mut self.dream_item_splits {
                 if item_id >= *min_id && item_id <= *max_id {
                     let oid = item_id - *offset;
-                    if self.world.is_modern && portal_state.is_some_and(|s| s >= 0) {
-                        if cache_has_portal_shapes(cache, oid) {
+                    if self.world.is_modern && portal_state.is_some_and(|s| s >= 0)
+                        && cache_has_portal_shapes(cache, oid) {
                             if let res @ Some(_) = resolve_portal_layers_from(
                                 cache,
                                 ctx,
@@ -4402,7 +4465,6 @@ impl FurcadiaApp {
                                 anim_ms,
                             );
                         }
-                    }
                     if let res @ Some(_) =
                         cache.get_or_load_shape_layers(ctx, &self.palette, oid, 0, anim_ms)
                     {
@@ -4417,8 +4479,8 @@ impl FurcadiaApp {
             } else {
                 item_id - 1
             };
-            if self.world.is_modern && portal_state.is_some_and(|s| s >= 0) {
-                if cache_has_portal_shapes(&self.items_cache, dream_oid) {
+            if self.world.is_modern && portal_state.is_some_and(|s| s >= 0)
+                && cache_has_portal_shapes(&self.items_cache, dream_oid) {
                     if let res @ Some(_) = resolve_portal_layers_from(
                         &mut self.items_cache,
                         ctx,
@@ -4438,7 +4500,6 @@ impl FurcadiaApp {
                         anim_ms,
                     );
                 }
-            }
             if let res @ Some(_) = self.items_cache.get_or_load_dream_shape_layers(
                 ctx,
                 &self.palette,
@@ -4450,8 +4511,8 @@ impl FurcadiaApp {
             }
         }
         let oid = item_id - 1;
-        if self.world.is_modern && portal_state.is_some_and(|s| s >= 0) {
-            if cache_has_portal_shapes(&self.items_cache, oid) {
+        if self.world.is_modern && portal_state.is_some_and(|s| s >= 0)
+            && cache_has_portal_shapes(&self.items_cache, oid) {
                 if let res @ Some(_) = resolve_portal_layers_from(
                     &mut self.items_cache,
                     ctx,
@@ -4471,7 +4532,6 @@ impl FurcadiaApp {
                     anim_ms,
                 );
             }
-        }
         if let res @ Some(_) = self.items_cache.get_or_load_default_shape_layers(
             ctx,
             &self.palette,
@@ -4860,6 +4920,10 @@ impl FurcadiaApp {
                     self.pending_portrait_downloads.remove(&portrait_id);
                     self.cache_usage = None;
                     if remappable { self.remappable_portraits.insert(portrait_id); }
+                    if self.custom_portrait_rgba.len() >= MAX_CUSTOM_PORTRAITS {
+                        self.custom_portrait_rgba.clear();
+                        self.custom_portrait_textures.clear();
+                    }
                     self.custom_portrait_rgba.insert(portrait_id, rgba);
                 }
                 NetToUi::ChatImageDownloaded { url, rgba } => {
@@ -4869,6 +4933,9 @@ impl FurcadiaApp {
                         let img = ColorImage::from_rgba_unmultiplied([w, h], &bytes);
                         ctx.load_texture(format!("chat_img_{url}"), img, TextureOptions::NEAREST)
                     });
+                    if self.chat_img_textures.len() >= MAX_CHAT_IMG_TEXTURES {
+                        self.chat_img_textures.clear();
+                    }
                     self.chat_img_textures.insert(url, tex);
                 }
                 NetToUi::SpellCheckResult { seq, misspelled } => {
@@ -4982,8 +5049,9 @@ impl FurcadiaApp {
                     ..
                 }
         );
-        if (self.login_trace_remaining > 0 && !matches!(msg, ServerMessage::WorldPacket { .. }))
-            || is_map_directive
+        if self.show_debug_packets
+            && ((self.login_trace_remaining > 0 && !matches!(msg, ServerMessage::WorldPacket { .. }))
+                || is_map_directive)
         {
             if self.login_trace_remaining > 0 && !matches!(msg, ServerMessage::WorldPacket { .. }) {
                 self.login_trace_remaining -= 1;
@@ -5088,7 +5156,7 @@ impl FurcadiaApp {
                         self.main_chat_unread += 1;
                     }
                     self.log_chat_line(&plain);
-                    self.chat_log.push(line);
+                    push_bounded_chat_line(&mut self.chat_log, line);
                 }
             }
             ServerMessage::LoginAck => {
@@ -5538,7 +5606,7 @@ fn posture_wire_command(posture: u8) -> &'static str {
 
 /// Parses comma, semicolon, or newline-separated custom mention nicknames.
 fn parse_mention_nicknames(raw: &str) -> Vec<&str> {
-    raw.split(|c| matches!(c, ',' | ';' | '\n' | '\r'))
+    raw.split([',', ';', '\n', '\r'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect()
@@ -5615,12 +5683,7 @@ fn find_chat_mention<'a>(plain: &str, char_name: &'a str, nicknames_raw: &'a str
     if !me.is_empty() && me != "Unknown" && contains_word_ci(plain, me) {
         return Some(me);
     }
-    for nick in parse_mention_nicknames(nicknames_raw) {
-        if contains_word_ci(plain, nick) {
-            return Some(nick);
-        }
-    }
-    None
+    parse_mention_nicknames(nicknames_raw).into_iter().find(|&nick| contains_word_ci(plain, nick)).map(|v| v as _)
 }
 
 /// Builds a single-line Furcadia trade command (`trade-add <item>`, `trade-remove <item>`,
@@ -6671,10 +6734,12 @@ impl FurcadiaApp {
             });
             ui.separator();
 
+            // Two `(label, color)` picker entries rendered side-by-side in a 4-column settings grid.
+            type ColorPairRow<'a> = ((&'a str, &'a mut Color32), (&'a str, &'a mut Color32));
             fn render_color_pairs_grid(
                 ui: &mut egui::Ui,
                 id: &str,
-                pairs: &mut [((&str, &mut Color32), (&str, &mut Color32))],
+                pairs: &mut [ColorPairRow<'_>],
                 changed: &mut bool,
             ) {
                 egui::Grid::new(id)
@@ -8647,7 +8712,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                     .as_deref()
                                     .map(|u| u.trim_start_matches("furc://").trim_matches('/'))
                                     .filter(|s| !s.is_empty())
-                                    .or_else(|| self.world.map_name.as_deref());
+                                    .or(self.world.map_name.as_deref());
                                 if let Some(dream) = dream_label {
                                     ui.add(
                                         egui::Label::new(
@@ -11155,8 +11220,8 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         for tile in &tiles_to_draw {
             while av_idx < sorted_avatars.len() {
                 let av = &sorted_avatars[av_idx];
-                let ay = av.y.max(0) as usize;
-                let ax = av.x.max(0) as usize;
+                let ay = av.y as usize;
+                let ax = av.x as usize;
                 if (ay, ax) >= (tile.y, tile.x) {
                     break;
                 }
@@ -11368,8 +11433,8 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
             });
             while av_idx < sorted_avatars.len() {
                 let av = &sorted_avatars[av_idx];
-                let ay = av.y.max(0) as usize;
-                let ax = av.x.max(0) as usize;
+                let ay = av.y as usize;
+                let ax = av.x as usize;
                 if (ay, ax) != (tile.y, tile.x) {
                     break;
                 }
@@ -11452,8 +11517,8 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
 
         while av_idx < sorted_avatars.len() {
             let av = &sorted_avatars[av_idx];
-            let ax = av.x.max(0) as usize;
-            let ay = av.y.max(0) as usize;
+            let ax = av.x as usize;
+            let ay = av.y as usize;
             let hidden = self.world.map.as_ref().is_some_and(|m| {
                 ax < m.width && ay < m.height && {
                     let tr = m.region_at(ax, ay);
@@ -12451,7 +12516,6 @@ Light: {} | Amb: {} | Elev: {:?}",
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn collect_avatar_ops(
         &mut self,
         ctx: &egui::Context,
@@ -12782,7 +12846,7 @@ fn resolve_portal_layers_from(
 /// Computes `junction.fox` group (`group_or`) and 4-neighbor connection bitmask at `(x, y)`.
 fn compute_junction_state(upper_nw: u16, upper_ne: u16, cur_nw: u16, cur_ne: u16) -> (usize, u8) {
     let split = |b: u16| -> (usize, u16) {
-        if b > 0 && b % 12 != 0 && (b / 12) < 18 {
+        if b > 0 && !b.is_multiple_of(12) && (b / 12) < 18 {
             ((b / 12) as usize, b % 12)
         } else {
             (0, 0)
@@ -13805,6 +13869,8 @@ fn name_badge_chat_color(is_self: bool) -> Color32 {
     }
 }
 
+/// Renders a single parsed chat line with inline badges, smileys, links, and click actions.
+#[allow(clippy::too_many_arguments)] // Passes read-only texture caches and theme settings directly.
 fn render_chat_line(
     ui: &mut egui::Ui,
     line: &ChatLine,
@@ -15099,6 +15165,12 @@ fn connect_and_retry_pipe_account(
     Some(c)
 }
 
+/// Background networking loop for a single character session.
+///
+/// Owns the [`FurcadiaClient`] socket, processes [`UiToNet`] commands, spawns
+/// short-lived worker threads for HTTP/file-server downloads and spellchecking,
+/// sends 30 s `time` keepalive probes when idle, and exits cleanly once the UI
+/// drops its [`Sender<UiToNet>`].
 fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context) {
     let mut client: Option<FurcadiaClient> = None;
     let mut active_seq: u64 = 0;
@@ -15111,8 +15183,20 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
     let mut last_server_activity = Instant::now();
     let mut heartbeat_sent: Option<Instant> = None;
 
-    loop {
-        while let Ok(cmd) = rx.try_recv() {
+    'worker: loop {
+        loop {
+            let cmd = match rx.try_recv() {
+                Ok(cmd) => cmd,
+                Err(TryRecvError::Empty) => break,
+                // UI dropped the channel (e.g., closed character tab or app exit):
+                // disconnect cleanly and exit the thread so neither socket nor stack leaks.
+                Err(TryRecvError::Disconnected) => {
+                    if let Some(mut cl) = client.take() {
+                        let _ = cl.disconnect();
+                    }
+                    break 'worker;
+                }
+            };
             match cmd {
                 UiToNet::AuthenticateAccount { email, password } => {
                     match fetch_account_characters(&email, &password) {
@@ -15195,6 +15279,11 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                                         &tx,
                                         &mut last_server_notice,
                                     );
+                                    // Honor `FurcadiaClient::enable_tls` contract: inform the user
+                                    // that Furcadia's legacy TLS server cert is not verified.
+                                    let _ = tx.send(NetToUi::Status(
+                                        "Legacy TLS active (server certificate not verified)".into(),
+                                    ));
                                 }
                                 Err(err) => {
                                     let msg = format!(
@@ -15250,7 +15339,17 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                 }
                 UiToNet::Send(c) => {
                     if let Some(cl) = client.as_mut() {
-                        let _ = cl.send_command(&c);
+                        if let Err(err) = cl.send_command(&c) {
+                            client = None;
+                            let _ = tx.send(NetToUi::Connected {
+                                seq: active_seq,
+                                connected: false,
+                            });
+                            let _ = tx.send(NetToUi::Status(format!(
+                                "Connection lost while sending command: {err}"
+                            )));
+                            ctx.request_repaint();
+                        }
                     }
                 }
                 UiToNet::DownloadDream {
@@ -15270,14 +15369,35 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                         };
                         let _ = std::fs::create_dir_all(&dreams_dir);
                         let safe_name = FurcadiaApp::sanitize_dream_id(&map_name);
+                        // Guard against empty sanitized name: `dreams_dir.join("")` would
+                        // resolve to `dreams_dir` itself and wipe the entire dreams cache.
+                        if safe_name.is_empty() {
+                            let _ = dl_tx.send(NetToUi::DreamError(format!(
+                                "Refusing to download dream with invalid map name '{map_name}'."
+                            )));
+                            dl_ctx.request_repaint();
+                            return;
+                        }
                         let suffix = format!("{:?}", std::thread::current().id())
                             .chars()
                             .filter(|c| c.is_ascii_alphanumeric())
                             .collect::<String>();
                         let dl_path = dreams_dir.join(format!("{safe_name}_{suffix}.tmp"));
                         let curl_out = furcadia_client::sys::command("curl")
-                            .args(["-fsSL", "--max-time", "25", "-o"])
+                            .args([
+                                "-fsSL",
+                                "--proto",
+                                "=http,https",
+                                "--proto-redir",
+                                "=http,https",
+                                "--max-filesize",
+                                "67108864",
+                                "--max-time",
+                                "25",
+                                "-o",
+                            ])
                             .arg(&dl_path)
+                            .arg("--")
                             .arg(&url)
                             .output();
                         match curl_out {
@@ -15611,7 +15731,18 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                             .filter(|b| !b.is_empty())
                             .or_else(|| {
                                 let out = furcadia_client::sys::command("curl")
-                                    .args(["-fsSL", "--max-time", "10"])
+                                    .args([
+                                        "-fsSL",
+                                        "--proto",
+                                        "=http,https",
+                                        "--proto-redir",
+                                        "=http,https",
+                                        "--max-filesize",
+                                        "10485760",
+                                        "--max-time",
+                                        "10",
+                                        "--",
+                                    ])
                                     .arg(&url)
                                     .output()
                                     .ok()
@@ -15921,8 +16052,8 @@ fn decompress_furcadia_lzw(src: &[u8]) -> Option<Vec<u8>> {
 
     let mut prefix = [0u16; MAX_TABLE];
     let mut suffix = [0u8; MAX_TABLE];
-    for i in 0..256usize {
-        suffix[i] = i as u8;
+    for (i, slot) in suffix.iter_mut().enumerate().take(256) {
+        *slot = i as u8;
     }
 
     let mut code = next_code(nbits);
@@ -15978,6 +16109,9 @@ fn decompress_furcadia_lzw(src: &[u8]) -> Option<Vec<u8>> {
         first_char = suffix[cur];
         stack.push(first_char);
         for &b in stack.iter().rev() {
+            if out.len() >= MAX_LZW_OUTPUT_BYTES {
+                return None;
+            }
             out.push(b);
         }
 
@@ -15985,7 +16119,8 @@ fn decompress_furcadia_lzw(src: &[u8]) -> Option<Vec<u8>> {
             prefix[next_id as usize] = old_code;
             suffix[next_id as usize] = first_char;
             next_id += 1;
-            if (next_id as u32) + 1 == (1u32 << nbits) {
+            // Stay at 12-bit max (`MAX_TABLE = 4096`); incrementing to 13 corrupts the stream.
+            if nbits < 12 && (next_id as u32) + 1 == (1u32 << nbits) {
                 nbits += 1;
             }
         }
@@ -16034,10 +16169,14 @@ fn extract_zip_archive(zip_path: &std::path::Path, dest_dir: &std::path::Path) -
 
 fn decompress_bzip2(src: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
-    let mut decoder = bzip2_rs::DecoderReader::new(src);
+    let decoder = bzip2_rs::DecoderReader::new(src);
+    let mut limited = decoder.take((MAX_BZIP2_OUTPUT_BYTES + 1) as u64);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out).ok()?;
-    (!out.is_empty()).then_some(out)
+    limited.read_to_end(&mut out).ok()?;
+    if out.is_empty() || out.len() > MAX_BZIP2_OUTPUT_BYTES {
+        return None;
+    }
+    Some(out)
 }
 
 /// Recognizes Furcadia's encoded portrait remap pixels after palette expansion.
@@ -16047,7 +16186,7 @@ fn decompress_bzip2(src: &[u8]) -> Option<Vec<u8>> {
 fn portrait_has_remap_pixels(rgba: &[u8]) -> bool {
     let mut encoded = 0usize;
     let mut opaque = 0usize;
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         if px[3] == 0 {
             continue;
         }
@@ -16082,7 +16221,7 @@ fn decode_furcadia_portrait(data: &[u8], palette: &Palette) -> Option<(usize, us
     if header == b"FPRT01" {
         let fsh = decompress_furcadia_lzw(&data[9..])?;
         if let Ok(mut archive) = FoxArchive::from_bytes(fsh.clone()) {
-            if let Ok(sprite) = archive.decode_image(0, &palette) {
+            if let Ok(sprite) = archive.decode_image(0, palette) {
                 let rgba = sprite.rgba.clone();
                 let remappable = fmt & 0x01 != 0 || portrait_has_remap_pixels(&rgba);
                 return Some((sprite.width as usize, sprite.height as usize, rgba, remappable));

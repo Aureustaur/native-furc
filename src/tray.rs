@@ -247,7 +247,9 @@ mod linux {
             ObjectPath::from_static_str_unchecked("/MenuBar").into()
         }
 
+        /// StatusNotifierItem D-Bus `ToolTip` property: `(icon_name, icon_pixmap, title, description)`.
         #[zbus(property)]
+        #[allow(clippy::type_complexity)] // Tuple shape is mandated by the Freedesktop SNI D-Bus spec.
         fn tool_tip(&self) -> (String, Vec<(i32, i32, Vec<u8>)>, String, String) {
             let subtitle = if self.attention.load(Ordering::Relaxed) {
                 "New message — click to show window"
