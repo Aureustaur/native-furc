@@ -87,9 +87,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v2.1.1 — In-Game Dream Download Screen & Large Dream Timeout Fix"
+          name: "Furcadia Native Client v2.1.2 — Character Picker Custom Portraits & Persistent Portrait Cache"
           body: |
-            ## Furcadia Native Client v2.1.1 — In-Game Dream Download Screen & Large Dream Timeout Fix
+            ## Furcadia Native Client v2.1.2 — Character Picker Custom Portraits & Persistent Portrait Cache
 
             A native, lightweight Rust client for Furcadia supporting Linux and Windows.
 
@@ -99,6 +99,14 @@ jobs:
             - Multi-character tabs, player badges in chat, and drag-to-reorder player/whisper tabs
             - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
             - Linux system tray with alert blinking & unread badge, plus integrated desktop launcher icons
+
+            ### What's New in v2.1.2
+            - **Character Picker Custom Portrait Loading & Fallback Downloads**:
+              - Triggered on-demand `UiToNet::DownloadPortrait` requests from `custom_portrait_texture` whenever a resolved custom portrait ID is not yet cached in memory, and added fallback downloads from the file server if cached `.fprt` files fail decoding.
+            - **Persistent Portrait Cache (`config.ini`) & `last_port` Filtering**:
+              - Added `character_portraits` (`ClientConfig::character_portraits`) persistence across launches with shared-settings merging, and filtered `clogin.php` `last_port > 16` so `1..=16` portrait slot indices are ignored while `]&`-resolved `pp<id>` file IDs take precedence.
+            - **Silent Self-`glook` & Accurate Portrait Directive Attribution**:
+              - Sent a silent self-`glook` on `ServerMessage::CharacterIdentity` and after clicking **Change Portrait** (`portrchng`) without popping up the `LookedPlayerCard`, matched `]&` portrait directives against `account_info.characters` IDs before falling back to `glook` targets, and wired background-tab portrait directives and downloads in `poll_bg_sessions`.
 
             ### What's New in v2.1.1
             - **In-Game Dream Downloading Overlay & Live Progress**:
@@ -135,19 +143,19 @@ jobs:
             ### Installation
 
             #### Windows
-            1. Download `FurcadiaNative-Setup-2.1.1-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-2.1.2-x86_64.exe` from the assets below.
             2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
 
             #### Debian / Ubuntu / Linux Mint
             ```sh
-            sudo apt install ./furcadia-native_2.1.1_amd64.deb
+            sudo apt install ./furcadia-native_2.1.2_amd64.deb
             ```
             Or double-click the `.deb` file to install via your graphical package manager.
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
             Download the `.pkg.tar.zst` asset and install with:
             ```sh
-            sudo pacman -U furcadia-native-2.1.1-1-x86_64.pkg.tar.zst
+            sudo pacman -U furcadia-native-2.1.2-1-x86_64.pkg.tar.zst
             ```
             Or build from source with `PKGBUILD`:
             ```sh

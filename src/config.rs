@@ -101,6 +101,8 @@ pub struct ClientConfig {
     pub window_height: u16,
     /// Whether the main window was maximized (device-local).
     pub window_maximized: bool,
+    /// Saved custom portrait `pp<id>` per normalized character shortname.
+    pub character_portraits: std::collections::BTreeMap<String, u32>,
 }
 
 impl Default for ClientConfig {
@@ -178,6 +180,7 @@ impl Default for ClientConfig {
             window_width: 1200,
             window_height: 800,
             window_maximized: false,
+            character_portraits: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -371,6 +374,11 @@ impl ClientConfig {
         self.check_updates_on_startup = shared.check_updates_on_startup;
         self.first_setup_done = shared.first_setup_done;
         self.dice_roll = shared.dice_roll.clone();
+        for (k, &v) in &shared.character_portraits {
+            if !k.is_empty() && v > 0 {
+                self.character_portraits.insert(k.clone(), v);
+            }
+        }
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
@@ -603,6 +611,21 @@ impl ClientConfig {
                         }
                     }
                     "window_maximized" => cfg.window_maximized = v.trim() == "true",
+                    "character_portraits" => {
+                        cfg.character_portraits = v
+                            .split(',')
+                            .filter_map(|entry| {
+                                let (name, id_str) = entry.trim().split_once(':')?;
+                                let key: String = name
+                                    .chars()
+                                    .filter(|c| c.is_ascii_alphanumeric())
+                                    .map(|c| c.to_ascii_lowercase())
+                                    .collect();
+                                let pid = id_str.trim().parse::<u32>().ok()?;
+                                (!key.is_empty() && pid > 0).then_some((key, pid))
+                            })
+                            .collect();
+                    }
                     _ => {}
                 }
             }
@@ -630,8 +653,15 @@ impl ClientConfig {
         };
         let safe_character = strip_nl(&self.character);
         let safe_sync_folder = strip_nl(&self.sync_folder);
+        let portraits_str: String = self
+            .character_portraits
+            .iter()
+            .filter(|(k, &v)| !k.is_empty() && v > 0)
+            .map(|(k, v)| format!("{k}:{v}"))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nflash_taskbar_on_message={}\nflash_taskbar_on_main_chat={}\nblink_tray_on_alert={}\nmention_nicknames={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nmy_speech_color={:06x}\nbracket_text_color={:06x}\nemote_text_color={:06x}\nwhisper_text_color={:06x}\nemit_text_color={:06x}\nshout_text_color={:06x}\nroll_text_color={:06x}\nsuccess_text_color={:06x}\nwarning_text_color={:06x}\nerror_text_color={:06x}\ntab_active_bg={:06x}\ntab_active_text={:06x}\ntab_unread_bg={:06x}\ntab_unread_text={:06x}\ntab_inactive_bg={:06x}\ntab_inactive_text={:06x}\ncustom_ui_bg={}\nchat_bg_color={:06x}\npanel_bg_color={:06x}\naccent_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\nwindow_width={}\nwindow_height={}\nwindow_maximized={}\n",
+            "remember_email={}\nremember_password={}\nauto_login={}\nemail={}\ncharacter={}\npassword={}\nwatch={}\nlogging_enabled={}\nlog_whispers={}\nshared_logs_mode={}\nlog_retention_days={}\nnotify_enabled={}\nnotify_whisper={}\nnotify_pounce={}\nnotify_mention={}\nnotify_only_unfocused={}\nflash_taskbar_on_message={}\nflash_taskbar_on_main_chat={}\nblink_tray_on_alert={}\nmention_nicknames={}\nsound_enabled={}\nmusic_enabled={}\nminimize_to_tray={}\nclose_to_tray={}\nfont_family={}\nfont_size={}\nchat_font_size={}\nchat_text_color={:06x}\ninput_text_color={:06x}\nmy_speech_color={:06x}\nbracket_text_color={:06x}\nemote_text_color={:06x}\nwhisper_text_color={:06x}\nemit_text_color={:06x}\nshout_text_color={:06x}\nroll_text_color={:06x}\nsuccess_text_color={:06x}\nwarning_text_color={:06x}\nerror_text_color={:06x}\ntab_active_bg={:06x}\ntab_active_text={:06x}\ntab_unread_bg={:06x}\ntab_unread_text={:06x}\ntab_inactive_bg={:06x}\ntab_inactive_text={:06x}\ncustom_ui_bg={}\nchat_bg_color={:06x}\npanel_bg_color={:06x}\naccent_color={:06x}\nautocorrect={}\nanim_mode={}\ntheme={}\nshow_avatar_names={}\npounce_visible={}\npounce_detached={}\npounce_show_offline={}\nshow_debug_packets={}\nwhisper_open_tab_on_incoming={}\nwhisper_emote_in_whisper={}\ndreams={}\nlimit_view_range={}\nallow_dream_skins={}\nportrait_size={}\ncheck_updates_on_startup={}\nfirst_setup_done={}\ndice_roll={}\nsync_folder={}\nsync_device_id={}\nsync_updated_at={}\nwindow_width={}\nwindow_height={}\nwindow_maximized={}\ncharacter_portraits={}\n",
             self.remember_email,
             self.remember_password,
             self.auto_login,
@@ -703,7 +733,8 @@ impl ClientConfig {
             self.sync_updated_at,
             self.window_width,
             self.window_height,
-            self.window_maximized
+            self.window_maximized,
+            portraits_str
         )
     }
 }
@@ -787,6 +818,10 @@ mod tests {
             window_width: 1200,
             window_height: 800,
             window_maximized: false,
+            character_portraits: std::collections::BTreeMap::from([
+                ("amaladevi".into(), 248815),
+                ("aureusktharr".into(), 257927),
+            ]),
         };
         let s = cfg.serialize();
         let parsed = ClientConfig::parse(&s);
@@ -804,5 +839,33 @@ mod tests {
         assert_eq!(parsed.tab_unread_bg, defaults.tab_unread_bg);
         assert!(!parsed.custom_ui_bg);
         assert_eq!(parsed.chat_bg_color, defaults.chat_bg_color);
+        assert!(parsed.character_portraits.is_empty());
+    }
+
+    #[test]
+    fn character_portraits_parse_ignores_invalid_and_merges_shared() {
+        let mut local = ClientConfig::parse(
+            "character_portraits=Amala|Devi:248815,badentry,:10,zero:0,Fulkor:notnum\n",
+        );
+        assert_eq!(
+            local.character_portraits,
+            std::collections::BTreeMap::from([("amaladevi".into(), 248_815)])
+        );
+
+        let shared = ClientConfig {
+            character_portraits: std::collections::BTreeMap::from([
+                ("aureusktharr".into(), 257_927),
+                ("amaladevi".into(), 999_001),
+            ]),
+            ..ClientConfig::default()
+        };
+        local.apply_shared_settings(&shared);
+        assert_eq!(
+            local.character_portraits,
+            std::collections::BTreeMap::from([
+                ("amaladevi".into(), 999_001),
+                ("aureusktharr".into(), 257_927),
+            ])
+        );
     }
 }

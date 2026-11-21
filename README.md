@@ -195,7 +195,7 @@ Local configuration is stored at `~/.config/furcadia-native/config.ini` on Linux
 
 ## Project status
 
-Release 2.1.1 builds on the Milestone 2.0 stability, security, and open-source foundation (bounded GPU/sprite caches, capped in-memory chat history, clean character-tab socket/thread teardown, hardened decompression and download limits, comprehensive rustdoc documentation, and a zero-warning Clippy baseline) and 2.1.0 portrait/reconnect/scroll polish with an in-game dream download progress overlay and large-dream streaming timeout handling across 98 passing unit tests.
+Release 2.1.2 builds on the Milestone 2.0 stability, security, and open-source foundation (bounded GPU/sprite caches, capped in-memory chat history, clean character-tab socket/thread teardown, hardened decompression and download limits, comprehensive rustdoc documentation, and a zero-warning Clippy baseline), 2.1.0 portrait/reconnect/scroll polish, and 2.1.1 dream download progress with custom portrait loading and persistence in the Character Picker across 100 passing unit tests.
 
 This is an independent, actively developed client. Some behavior and asset support may differ from the official Windows client, and compatibility can vary across dreams and custom patches. Please report reproducible bugs or feature requests on [GitHub Issues](https://github.com/morganlowe/native-furcadia/issues) with your OS and relevant log output (never attach passwords or private credentials).
 

@@ -21,7 +21,7 @@ pub struct CharacterSummary {
     pub name: String,
     pub species: String,
     pub colors: String,
-    /// Last portrait slot selected in the account service. This is not a `pp<id>` file ID.
+    /// Last portrait value returned by `clogin.php`; may be a portrait slot index (`1..=16`) or a `pp<id>` file ID (`> 16`).
     pub last_port: Option<u32>,
     pub last_login: String,
     pub desc: String,

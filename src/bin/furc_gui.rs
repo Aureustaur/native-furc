@@ -1614,6 +1614,7 @@ struct FurcadiaApp {
     trade_reason_input: String,
     pending_glook_target: Option<(String, Instant)>,
     recent_portrait_target: Option<(String, Instant)>,
+    silent_self_glook: bool,
     hovered_avatar_uid: Option<u32>,
     context_menu_avatar: Option<ContextMenuTarget>,
 
@@ -1972,7 +1973,11 @@ impl FurcadiaApp {
             custom_portrait_textures: HashMap::new(),
             remappable_portraits: std::collections::HashSet::new(),
             pending_portrait_downloads: std::collections::HashSet::new(),
-            player_portrait_ids: HashMap::new(),
+            player_portrait_ids: cfg
+                .character_portraits
+                .iter()
+                .map(|(k, &v)| (k.clone(), v))
+                .collect(),
             smiley_textures,
             desctag_textures,
             chat_img_textures: HashMap::new(),
@@ -1994,6 +1999,7 @@ impl FurcadiaApp {
             trade_reason_input: String::new(),
             pending_glook_target: None,
             recent_portrait_target: None,
+            silent_self_glook: false,
             hovered_avatar_uid: None,
             context_menu_avatar: None,
             cam_offset: Vec2::ZERO,
@@ -2136,6 +2142,26 @@ impl FurcadiaApp {
             DreamTheme::KitterMagic => "KitterMagic",
             DreamTheme::FerianWylde => "FerianWylde",
         };
+        let mut character_portraits = std::collections::BTreeMap::new();
+        if let Some(info) = self.account_info.as_ref() {
+            for ch in &info.characters {
+                let key = shortname_key(&ch.name);
+                if let Some(&pid) = self.player_portrait_ids.get(&key) {
+                    if !key.is_empty() && pid > 0 {
+                        character_portraits.insert(key, pid);
+                    }
+                }
+            }
+        }
+        for (name, &pid) in &self.player_portrait_ids {
+            if character_portraits.len() >= 128 {
+                break;
+            }
+            let key = shortname_key(name);
+            if !key.is_empty() && pid > 0 {
+                character_portraits.entry(key).or_insert(pid);
+            }
+        }
         let mut cfg = ClientConfig {
             email: self.email.clone(),
             character,
@@ -2191,6 +2217,7 @@ impl FurcadiaApp {
             window_width: self.window_width,
             window_height: self.window_height,
             window_maximized: self.window_maximized,
+            character_portraits,
             ..ClientConfig::default()
         };
         self.colors.write_to_config(&mut cfg);
@@ -3150,7 +3177,14 @@ impl FurcadiaApp {
             Mention,
             MainChatFlashOnly,
         }
+        struct BgPortraitDownload {
+            portrait_id: u32,
+            rgba: Option<(usize, usize, Vec<u8>)>,
+            remappable: bool,
+        }
         let mut events_for_notify: Vec<(String, String, BgNotifyKind)> = Vec::new();
+        let mut portrait_downloads: Vec<BgPortraitDownload> = Vec::new();
+        let mut portrait_directives: Vec<String> = Vec::new();
         let nicknames_snapshot = self.mention_nicknames.clone();
         let notify_mention = self.notify_mention;
         let flash_on_main_chat = self.flash_taskbar_on_main_chat;
@@ -3270,10 +3304,42 @@ impl FurcadiaApp {
                         sess.world.self_uid = uid.parse().ok();
                         sess.world.self_name = Some(name.clone());
                         sess.char_name = name.replace('|', " ");
+                        let self_wire = wire_player_name(&name);
+                        if !self_wire.is_empty() {
+                            let _ = sess
+                                .to_net
+                                .send(UiToNet::Send(ClientCommand::Glook(self_wire)));
+                        }
+                    }
+                    NetToUi::Message(ServerMessage::Extended {
+                        code: Some('&'),
+                        payload,
+                    }) => {
+                        portrait_directives.push(payload);
+                    }
+                    NetToUi::Message(ServerMessage::ExtendedBytes { code: b'&', data }) => {
+                        portrait_directives.push(furcadia_client::encoding::decode_win1252(&data));
+                    }
+                    NetToUi::PortraitDownloaded {
+                        portrait_id,
+                        rgba,
+                        remappable,
+                    } => {
+                        portrait_downloads.push(BgPortraitDownload {
+                            portrait_id,
+                            rgba,
+                            remappable,
+                        });
                     }
                     _ => {}
                 }
             }
+        }
+        for dl in portrait_downloads {
+            self.apply_portrait_downloaded(dl.portrait_id, dl.rgba, dl.remappable);
+        }
+        for raw in portrait_directives {
+            self.handle_portrait_directive(&raw);
         }
         for (title, body, kind) in events_for_notify {
             match kind {
@@ -3765,23 +3831,18 @@ impl FurcadiaApp {
         )
     }
 
-    /// Prefer the character's saved custom port when the account response has one.
+    /// Prefer the character's saved custom port when one is known.
     fn account_character_portrait(
         &mut self,
         ctx: &egui::Context,
         id: &str,
         name: &str,
         colors: &str,
+        last_port: Option<u32>,
     ) -> Option<TextureHandle> {
-        // `lastport` in the account XML is a portrait slot, not a `pp<id>` file ID.
-        // The server's `]&` directive supplies the real file ID for custom portraits.
         let name_key = shortname_key(name);
         let app = furcadia_client::parse_color_code(colors);
-        if let Some(pid) = self
-            .player_portrait_ids
-            .iter()
-            .find(|(known_name, _)| shortname_key(known_name) == name_key)
-            .map(|(_, pid)| *pid)
+        if let Some(pid) = resolve_custom_portrait_id(&self.player_portrait_ids, &name_key, last_port)
         {
             if let Some(tex) = self.custom_portrait_texture(ctx, pid, &app) {
                 return Some(tex);
@@ -3849,6 +3910,13 @@ impl FurcadiaApp {
             }
             self.custom_portrait_textures.insert(key, tex.clone());
             return Some(tex);
+        }
+        if !self.custom_portrait_rgba.contains_key(&pid)
+            && self.pending_portrait_downloads.insert(pid)
+        {
+            let _ = self
+                .to_net
+                .send(UiToNet::DownloadPortrait { portrait_id: pid });
         }
         None
     }
@@ -3928,10 +3996,13 @@ impl FurcadiaApp {
         if target_key.is_empty() {
             return None;
         }
-        self.player_portrait_ids
-            .iter()
-            .find(|(name, _)| shortname_key(name) == target_key)
-            .map(|(_, &pid)| pid)
+        let last_port = self.account_info.as_ref().and_then(|info| {
+            info.characters
+                .iter()
+                .find(|c| shortname_key(&c.name) == target_key)
+                .and_then(|c| c.last_port)
+        });
+        resolve_custom_portrait_id(&self.player_portrait_ids, &target_key, last_port)
     }
 
     fn self_portrait(&mut self, ctx: &egui::Context) -> Option<TextureHandle> {
@@ -3987,6 +4058,24 @@ impl FurcadiaApp {
         }
     }
 
+    fn apply_portrait_downloaded(
+        &mut self,
+        portrait_id: u32,
+        rgba: Option<(usize, usize, Vec<u8>)>,
+        remappable: bool,
+    ) {
+        self.pending_portrait_downloads.remove(&portrait_id);
+        self.cache_usage = None;
+        if remappable {
+            self.remappable_portraits.insert(portrait_id);
+        }
+        if self.custom_portrait_rgba.len() >= MAX_CUSTOM_PORTRAITS {
+            self.custom_portrait_rgba.clear();
+            self.custom_portrait_textures.clear();
+        }
+        self.custom_portrait_rgba.insert(portrait_id, rgba);
+    }
+
     /// Parses Furcadia's `]&<character-id> pp<portrait-file-id>` portrait directive.
     fn handle_portrait_directive(&mut self, raw: &str) {
         let (character_id, pid, name_parts) = parse_portrait_directive(raw);
@@ -4003,10 +4092,17 @@ impl FurcadiaApp {
             .as_ref()
             .filter(|(_, at)| at.elapsed() <= Duration::from_secs(3))
             .map(|(name, _)| name.clone());
+        let account_match = character_id.and_then(|cid| {
+            self.account_info.as_ref().and_then(|info| {
+                info.characters
+                    .iter()
+                    .find(|c| c.id.parse::<u32>().ok() == Some(cid))
+                    .map(|c| wire_player_name(&c.name))
+            })
+        });
         let target_name = name_parts
             .filter(|name| !name.is_empty())
-            .or(pending_target.clone())
-            .or(recent_target.clone())
+            .or(account_match)
             .or_else(|| {
                 character_id
                     .and_then(|uid| self.world.avatars.get(&uid))
@@ -4017,10 +4113,54 @@ impl FurcadiaApp {
                     .filter(|uid| Some(*uid) == self.world.self_uid)
                     .and(self.world.self_name.as_deref())
                     .map(wire_player_name)
-            });
+            })
+            .or_else(|| {
+                character_id.and_then(|uid| {
+                    self.bg_sessions.iter().find_map(|sess| {
+                        sess.world
+                            .avatars
+                            .get(&uid)
+                            .map(|avatar| wire_player_name(&avatar.name))
+                            .or_else(|| {
+                                (sess.world.self_uid == Some(uid))
+                                    .then_some(sess.world.self_name.as_deref())
+                                    .flatten()
+                                    .map(wire_player_name)
+                            })
+                    })
+                })
+            })
+            .or(pending_target.clone())
+            .or(recent_target.clone());
+        if let Some(cid) = character_id {
+            if let Some(info) = self.account_info.as_mut() {
+                if let Some(ch) = info
+                    .characters
+                    .iter_mut()
+                    .find(|c| c.id.parse::<u32>().ok() == Some(cid))
+                {
+                    ch.last_port = Some(pid);
+                }
+            }
+        }
         if let Some(ref name) = target_name {
-            self.player_portrait_ids
-                .insert(shortname_key(name), pid);
+            let key = shortname_key(name);
+            if !key.is_empty() {
+                let prev = self.player_portrait_ids.insert(key.clone(), pid);
+                let is_account_char = self
+                    .account_info
+                    .as_ref()
+                    .is_some_and(|info| info.characters.iter().any(|c| shortname_key(&c.name) == key))
+                    || self
+                        .world
+                        .self_name
+                        .as_deref()
+                        .is_some_and(|n| shortname_key(n) == key)
+                    || shortname_key(&self.active_character_name()) == key;
+                if is_account_char && prev != Some(pid) {
+                    self.save_config();
+                }
+            }
         }
         if let Some(card) = self.looked_player.as_mut() {
             if target_name
@@ -4798,6 +4938,29 @@ impl FurcadiaApp {
                 NetToUi::Authenticated(info) => {
                     self.auth_busy = false;
                     self.auth_error = None;
+                    let mut config_updated = false;
+                    for ch in &info.characters {
+                        let key = shortname_key(&ch.name);
+                        if key.is_empty() {
+                            continue;
+                        }
+                        if let Some(pid) = ch.last_port.filter(|&p| p > 16) {
+                            if self.player_portrait_ids.insert(key.clone(), pid) != Some(pid) {
+                                config_updated = true;
+                            }
+                        }
+                        if let Some(pid) =
+                            resolve_custom_portrait_id(&self.player_portrait_ids, &key, ch.last_port)
+                        {
+                            if !self.custom_portrait_rgba.contains_key(&pid)
+                                && self.pending_portrait_downloads.insert(pid)
+                            {
+                                let _ = self
+                                    .to_net
+                                    .send(UiToNet::DownloadPortrait { portrait_id: pid });
+                            }
+                        }
+                    }
                     let saved_norm = self.saved_character.trim().replace('|', " ");
                     self.selected_char_idx = if saved_norm.is_empty() {
                         0
@@ -4814,6 +4977,9 @@ impl FurcadiaApp {
                         self.edit_desc_buf = ch.desc.clone();
                     }
                     self.account_info = Some(info);
+                    if config_updated {
+                        self.save_config();
+                    }
                     self.screen = AppScreen::CharacterSelect;
                 }
                 NetToUi::News(entries) => {
@@ -5010,14 +5176,7 @@ impl FurcadiaApp {
                     }
                 }
                 NetToUi::PortraitDownloaded { portrait_id, rgba, remappable } => {
-                    self.pending_portrait_downloads.remove(&portrait_id);
-                    self.cache_usage = None;
-                    if remappable { self.remappable_portraits.insert(portrait_id); }
-                    if self.custom_portrait_rgba.len() >= MAX_CUSTOM_PORTRAITS {
-                        self.custom_portrait_rgba.clear();
-                        self.custom_portrait_textures.clear();
-                    }
-                    self.custom_portrait_rgba.insert(portrait_id, rgba);
+                    self.apply_portrait_downloaded(portrait_id, rgba, remappable);
                 }
                 NetToUi::ChatImageDownloaded { url, rgba } => {
                     self.pending_chat_img_downloads.remove(&url);
@@ -5290,6 +5449,13 @@ impl FurcadiaApp {
                     "success",
                     &format!("Logged in as {} (UID {uid})", name.replace('|', " ")),
                 );
+                let self_wire = wire_player_name(&name);
+                if !self_wire.is_empty() {
+                    self.silent_self_glook = true;
+                    let _ = self
+                        .to_net
+                        .send(UiToNet::Send(ClientCommand::Glook(self_wire)));
+                }
             }
             ServerMessage::MapName(_name) => {
                 // `]m<name>` is the server's legacy area label (e.g. "arco 99"), not a dream/map
@@ -5426,29 +5592,43 @@ impl FurcadiaApp {
                     b'f' => {
                         if let Some(info) = WorldState::parse_looked_player_bytes(&data) {
                             let short_name = wire_player_name(&info.name);
-                            self.recent_portrait_target =
-                                Some((short_name.clone(), Instant::now()));
-                            if self
-                                .pending_glook_target
-                                .as_ref()
-                                .is_some_and(|(target, _)| {
-                                    shortname_key(target) != shortname_key(&short_name)
-                                })
-                            {
-                                self.pending_glook_target = None;
+                            let short_key = shortname_key(&short_name);
+                            let is_self_name = self
+                                .world
+                                .self_name
+                                .as_deref()
+                                .is_some_and(|n| shortname_key(n) == short_key)
+                                || shortname_key(&self.active_character_name()) == short_key;
+                            if self.silent_self_glook && is_self_name {
+                                self.silent_self_glook = false;
+                                self.recent_portrait_target =
+                                    Some((short_name, Instant::now()));
+                            } else {
+                                self.silent_self_glook = false;
+                                self.recent_portrait_target =
+                                    Some((short_name.clone(), Instant::now()));
+                                if self
+                                    .pending_glook_target
+                                    .as_ref()
+                                    .is_some_and(|(target, _)| {
+                                        shortname_key(target) != short_key
+                                    })
+                                {
+                                    self.pending_glook_target = None;
+                                }
+                                let portrait_id = self
+                                    .player_portrait_ids
+                                    .get(&short_key)
+                                    .copied();
+                                self.looked_player = Some(LookedPlayerCard {
+                                    info,
+                                    short_name,
+                                    portrait_id,
+                                    portrait_tex: None,
+                                    badge_tex: None,
+                                    resolved_for: None,
+                                });
                             }
-                            let portrait_id = self
-                                .player_portrait_ids
-                                .get(&shortname_key(&short_name))
-                                .copied();
-                            self.looked_player = Some(LookedPlayerCard {
-                                info,
-                                short_name,
-                                portrait_id,
-                                portrait_tex: None,
-                                badge_tex: None,
-                                resolved_for: None,
-                            });
                         }
                     }
                     b'&' => {
@@ -5607,6 +5787,7 @@ impl FurcadiaApp {
             _ => None,
         };
         if let Some(target) = glook_target {
+            self.silent_self_glook = false;
             self.pending_glook_target = Some((target, Instant::now()));
         }
 
@@ -7778,7 +7959,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 }
                             }
 
-                            let tiles: Vec<(usize, String, String, String)> = self
+                            let tiles: Vec<(usize, String, String, String, Option<u32>)> = self
                                 .account_info
                                 .as_ref()
                                 .map(|info| {
@@ -7786,7 +7967,13 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         .iter()
                                         .map(|&i| {
                                             let c = &info.characters[i];
-                                            (i, c.id.clone(), c.name.replace('|', " "), c.colors.clone())
+                                            (
+                                                i,
+                                                c.id.clone(),
+                                                c.name.replace('|', " "),
+                                                c.colors.clone(),
+                                                c.last_port,
+                                            )
                                         })
                                         .collect()
                                 })
@@ -7815,9 +8002,15 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             }
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                                for (idx, id, name, colors) in &tiles {
+                                                for (idx, id, name, colors, last_port) in &tiles {
                                                     let selected = *idx == self.selected_char_idx;
-                                                    let portrait = self.account_character_portrait(ctx, id, name, colors);
+                                                    let portrait = self.account_character_portrait(
+                                                        ctx,
+                                                        id,
+                                                        name,
+                                                        colors,
+                                                        *last_port,
+                                                    );
                                                     let tile_size = Vec2::new(112.0, 134.0);
                                                     let (rect, resp) =
                                                         ui.allocate_exact_size(tile_size, Sense::click());
@@ -8184,6 +8377,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         if target.is_empty() {
             return;
         }
+        self.silent_self_glook = false;
         self.pending_glook_target = Some((target.clone(), Instant::now()));
         let _ = self.to_net.send(UiToNet::Send(ClientCommand::Glook(target)));
     }
@@ -8885,6 +9079,13 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 });
                                 if ui.small_button("Change Portrait").clicked() {
                                     self.send_raw_cmd("portrchng");
+                                    let self_wire = self.active_character_wire_name();
+                                    if !self_wire.is_empty() && self.is_connected {
+                                        self.silent_self_glook = true;
+                                        let _ = self
+                                            .to_net
+                                            .send(UiToNet::Send(ClientCommand::Glook(self_wire)));
+                                    }
                                 }
                                 {
                                     let mut txt = String::from("Cookies:");
@@ -13717,6 +13918,28 @@ fn extract_whisper_peer(plain: &str) -> Option<String> {
     None
 }
 
+/// Resolves a character's custom portrait `pp<id>`, preferring known server `]&` IDs
+/// and falling back to `clogin.php`'s `lastport` only when it exceeds the 1..=16 slot range.
+fn resolve_custom_portrait_id(
+    player_portrait_ids: &HashMap<String, u32>,
+    name_key: &str,
+    last_port: Option<u32>,
+) -> Option<u32> {
+    if name_key.is_empty() {
+        return None;
+    }
+    player_portrait_ids
+        .get(name_key)
+        .copied()
+        .or_else(|| {
+            player_portrait_ids
+                .iter()
+                .find(|(known_name, _)| shortname_key(known_name) == name_key)
+                .map(|(_, &pid)| pid)
+        })
+        .or_else(|| last_port.filter(|&p| p > 16))
+}
+
 fn parse_portrait_directive(raw: &str) -> (Option<u32>, Option<u32>, Option<String>) {
     let mut character_id = None;
     let mut portrait_id = None;
@@ -16019,18 +16242,20 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                             .as_ref()
                             .and_then(|p| std::fs::read(p).ok())
                             .filter(|b| !b.is_empty());
-                        let raw = cached_bytes.or_else(|| {
-                            let fname = format!("pp{portrait_id}");
-                            let bytes = download_furcadia_file_server(&fname)?;
-                            if let Some(ref p) = cache_path {
-                                if let Some(parent) = p.parent() {
-                                    let _ = std::fs::create_dir_all(parent);
+                        let decoded = cached_bytes
+                            .and_then(|bytes| decode_furcadia_portrait(&bytes, &palette))
+                            .or_else(|| {
+                                let fname = format!("pp{portrait_id}");
+                                let bytes = download_furcadia_file_server(&fname)?;
+                                let decoded = decode_furcadia_portrait(&bytes, &palette)?;
+                                if let Some(ref p) = cache_path {
+                                    if let Some(parent) = p.parent() {
+                                        let _ = std::fs::create_dir_all(parent);
+                                    }
+                                    let _ = std::fs::write(p, &bytes);
                                 }
-                                let _ = std::fs::write(p, &bytes);
-                            }
-                            Some(bytes)
-                        });
-                        let decoded = raw.and_then(|bytes| decode_furcadia_portrait(&bytes, &palette));
+                                Some(decoded)
+                            });
                         let (rgba, remappable) = decoded
                             .map(|(w, h, rgba, remappable)| (Some((w, h, rgba)), remappable))
                             .unwrap_or((None, false));
@@ -16752,6 +16977,34 @@ mod tests {
                 Some("Bentley|Karthorn".to_owned())
             )
         );
+    }
+
+    #[test]
+    fn custom_portrait_id_prefers_known_map_and_filters_slot_indices() {
+        let mut known = HashMap::new();
+        known.insert("amaladevi".to_owned(), 248_815);
+
+        // Saved / ]&-resolved portrait ID takes precedence over slot or stale last_port.
+        assert_eq!(
+            resolve_custom_portrait_id(&known, "amaladevi", Some(3)),
+            Some(248_815)
+        );
+        assert_eq!(
+            resolve_custom_portrait_id(&known, "amaladevi", Some(12345)),
+            Some(248_815)
+        );
+        // Slot indices (1..=16) in last_port are ignored when no pp<id> is known yet.
+        assert_eq!(
+            resolve_custom_portrait_id(&known, "aureusktharr", Some(5)),
+            None
+        );
+        // Real pp<id> (> 16) in last_port is used when player_portrait_ids has no entry.
+        assert_eq!(
+            resolve_custom_portrait_id(&known, "aureusktharr", Some(257_927)),
+            Some(257_927)
+        );
+        // Empty name keys never match.
+        assert_eq!(resolve_custom_portrait_id(&known, "", Some(257_927)), None);
     }
 
     #[test]
