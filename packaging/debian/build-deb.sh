@@ -2,22 +2,23 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="2.1.2"
+VERSION="2.2.0"
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 PKG_NAME="furcadia-native"
 STAGE_DIR="$ROOT_DIR/dist/${PKG_NAME}_${VERSION}_${ARCH}"
 
 cd "$ROOT_DIR"
-cargo build --release --offline --bins
+cargo build --release --locked --bins
 
 rm -rf "$STAGE_DIR"
-mkdir -p "$STAGE_DIR/DEBIAN" "$STAGE_DIR/usr/bin" "$STAGE_DIR/usr/share/applications" "$STAGE_DIR/usr/share/icons/hicolor/256x256/apps"
-chmod 0755 "$STAGE_DIR" "$STAGE_DIR/DEBIAN" "$STAGE_DIR/usr" "$STAGE_DIR/usr/bin" "$STAGE_DIR/usr/share" "$STAGE_DIR/usr/share/applications" "$STAGE_DIR/usr/share/icons" "$STAGE_DIR/usr/share/icons/hicolor" "$STAGE_DIR/usr/share/icons/hicolor/256x256" "$STAGE_DIR/usr/share/icons/hicolor/256x256/apps"
+mkdir -p "$STAGE_DIR/DEBIAN" "$STAGE_DIR/usr/bin" "$STAGE_DIR/usr/share/applications" "$STAGE_DIR/usr/share/icons/hicolor/256x256/apps" "$STAGE_DIR/usr/share/doc/${PKG_NAME}"
+chmod 0755 "$STAGE_DIR" "$STAGE_DIR/DEBIAN" "$STAGE_DIR/usr" "$STAGE_DIR/usr/bin" "$STAGE_DIR/usr/share" "$STAGE_DIR/usr/share/applications" "$STAGE_DIR/usr/share/icons" "$STAGE_DIR/usr/share/icons/hicolor" "$STAGE_DIR/usr/share/icons/hicolor/256x256" "$STAGE_DIR/usr/share/icons/hicolor/256x256/apps" "$STAGE_DIR/usr/share/doc" "$STAGE_DIR/usr/share/doc/${PKG_NAME}"
 
 install -m 755 "$ROOT_DIR/target/release/furc-gui" "$STAGE_DIR/usr/bin/furc-gui"
 install -m 755 "$ROOT_DIR/target/release/furc-cli" "$STAGE_DIR/usr/bin/furc-cli"
 install -m 644 "$ROOT_DIR/packaging/linux/furcadia-native.desktop" "$STAGE_DIR/usr/share/applications/furcadia-native.desktop"
 install -m 644 "$ROOT_DIR/packaging/linux/furcadia-native.png" "$STAGE_DIR/usr/share/icons/hicolor/256x256/apps/furcadia-native.png"
+install -m 644 "$ROOT_DIR/LICENSE" "$STAGE_DIR/usr/share/doc/${PKG_NAME}/copyright"
 
 cat > "$STAGE_DIR/DEBIAN/control" <<EOF
 Package: ${PKG_NAME}

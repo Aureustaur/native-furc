@@ -169,12 +169,14 @@ enum UpdateInstallState {
 }
 
 enum UpdateInstallMsg {
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     Installing,
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     Installed,
     #[cfg(target_os = "windows")]
     LaunchInstallerAndExit(std::path::PathBuf),
+    #[cfg(target_os = "macos")]
+    OpenDmg(std::path::PathBuf),
     Failed(String),
 }
 
@@ -229,6 +231,19 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
     }
 }
 
+#[cfg(any(test, not(any(target_os = "windows", target_os = "macos"))))]
+fn select_linux_asset_url(urls: &[String], is_arch: bool, is_rpm: bool) -> Option<String> {
+    if is_arch {
+        urls.iter()
+            .find(|u| u.ends_with(".pkg.tar.zst") && !u.contains("-debug-"))
+            .cloned()
+    } else if is_rpm {
+        urls.iter().find(|u| u.ends_with(".rpm")).cloned()
+    } else {
+        urls.iter().find(|u| u.ends_with(".deb")).cloned()
+    }
+}
+
 fn parse_github_release_json(json: &str) -> Option<UpdateReleaseInfo> {
     let tag = extract_json_string_field(json, "tag_name")?;
     let version = tag.trim().trim_start_matches(['v', 'V']).to_owned();
@@ -250,13 +265,21 @@ fn parse_github_release_json(json: &str) -> Option<UpdateReleaseInfo> {
         .iter()
         .find(|u| u.to_ascii_lowercase().ends_with(".exe"))
         .cloned();
-    #[cfg(not(target_os = "windows"))]
-    let asset_url = if std::path::Path::new("/etc/arch-release").exists() {
-        urls.iter()
-            .find(|u| u.ends_with(".pkg.tar.zst") && !u.contains("-debug-"))
-            .cloned()
-    } else {
-        urls.iter().find(|u| u.ends_with(".deb")).cloned()
+    #[cfg(target_os = "macos")]
+    let asset_url = urls
+        .iter()
+        .find(|u| u.to_ascii_lowercase().ends_with(".dmg"))
+        .cloned();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let asset_url = {
+        let is_arch = std::path::Path::new("/etc/arch-release").exists();
+        let is_rpm = std::path::Path::new("/etc/fedora-release").exists()
+            || std::path::Path::new("/etc/redhat-release").exists()
+            || std::path::Path::new("/etc/SuSE-release").exists()
+            || std::path::Path::new("/etc/SUSE-brand").exists()
+            || (std::path::Path::new("/usr/bin/rpm").exists()
+                && !std::path::Path::new("/usr/bin/dpkg").exists());
+        select_linux_asset_url(&urls, is_arch, is_rpm)
     };
 
     Some(UpdateReleaseInfo {
@@ -621,6 +644,90 @@ const ARCHIVE_DEFAULT: u8 = 0;
 const ARCHIVE_DREAM: u8 = 1;
 const ARCHIVE_LEGACY: u8 = 2;
 
+/// Identifies a stock world patch archive from Furcadia's official asset host
+/// (`https://play.furcadia.com/{modern|legacy}/<file>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum StockPatchSlot {
+    ModernFloors,
+    LegacyFloors,
+    LegacyFloors2,
+    ModernFloore,
+    LegacyFloore,
+    ModernItems,
+    LegacyItem,
+    LegacyItem2,
+    LegacyItem3,
+    LegacyItem4,
+    ModernIteme,
+    LegacyIteme,
+    ModernPortals,
+    ModernPortalse,
+    ModernEffects,
+    LegacyEffects,
+    ModernEffectse,
+    LegacyEffectse,
+    ModernJunction,
+    LegacyJunction,
+    ModernWall(usize),
+    LegacyWall(usize),
+}
+
+impl StockPatchSlot {
+    fn is_valid(self) -> bool {
+        match self {
+            Self::ModernWall(g) | Self::LegacyWall(g) => g == 0 || (3..=7).contains(&g),
+            _ => true,
+        }
+    }
+
+    fn is_legacy(self) -> bool {
+        matches!(
+            self,
+            Self::LegacyFloors
+                | Self::LegacyFloors2
+                | Self::LegacyFloore
+                | Self::LegacyItem
+                | Self::LegacyItem2
+                | Self::LegacyItem3
+                | Self::LegacyItem4
+                | Self::LegacyIteme
+                | Self::LegacyEffects
+                | Self::LegacyEffectse
+                | Self::LegacyJunction
+                | Self::LegacyWall(_)
+        )
+    }
+
+    fn subdir(self) -> &'static str {
+        if self.is_legacy() {
+            "legacy"
+        } else {
+            "modern"
+        }
+    }
+
+    fn filename(self) -> String {
+        match self {
+            Self::ModernFloors | Self::LegacyFloors => "floors.fox".to_owned(),
+            Self::LegacyFloors2 => "floors2.fox".to_owned(),
+            Self::ModernFloore | Self::LegacyFloore => "floore.fox".to_owned(),
+            Self::ModernItems => "items.fox".to_owned(),
+            Self::LegacyItem => "item.fox".to_owned(),
+            Self::LegacyItem2 => "item2.fox".to_owned(),
+            Self::LegacyItem3 => "item3.fox".to_owned(),
+            Self::LegacyItem4 => "item4.fox".to_owned(),
+            Self::ModernIteme | Self::LegacyIteme => "iteme.fox".to_owned(),
+            Self::ModernPortals => "portals.fox".to_owned(),
+            Self::ModernPortalse => "portalse.fox".to_owned(),
+            Self::ModernEffects | Self::LegacyEffects => "effects.fox".to_owned(),
+            Self::ModernEffectse | Self::LegacyEffectse => "effectse.fox".to_owned(),
+            Self::ModernJunction | Self::LegacyJunction => "junction.fox".to_owned(),
+            Self::ModernWall(0) | Self::LegacyWall(0) => "wall.fox".to_owned(),
+            Self::ModernWall(g) | Self::LegacyWall(g) => format!("wall_{g}.fox"),
+        }
+    }
+}
+
 /// Layered sprite & GPU texture cache for a single Furcadia patch category
 /// (floors, items, walls, portals, effects, or a species/dynamic avatar).
 ///
@@ -648,11 +755,29 @@ impl FoxSpriteCache {
         legacy_filename: Option<&str>,
         prefix: &str,
     ) -> Self {
+        let single: [&str; 1];
+        let legacy_candidates: &[&str] = match legacy_filename {
+            Some(f) => {
+                single = [f];
+                &single
+            }
+            None => &[],
+        };
+        Self::load_with_legacy_candidates(assets, default_filename, legacy_candidates, prefix)
+    }
+
+    fn load_with_legacy_candidates(
+        assets: &AssetLocator,
+        default_filename: &str,
+        legacy_filenames: &[&str],
+        prefix: &str,
+    ) -> Self {
         let default_archive = assets
             .default_patch_path(default_filename)
             .and_then(|p| FoxArchive::load(&p).ok());
-        let legacy_archive = legacy_filename
-            .and_then(|f| assets.legacy_patch_path(f))
+        let legacy_archive = legacy_filenames
+            .iter()
+            .find_map(|f| assets.legacy_patch_path(f))
             .and_then(|p| FoxArchive::load(&p).ok());
         Self {
             default_archive,
@@ -707,13 +832,17 @@ impl FoxSpriteCache {
         }
     }
 
+    fn clear_cached_textures(&mut self) {
+        self.shape_textures.clear();
+        self.image_textures.clear();
+        self.avatar_textures.clear();
+    }
+
     fn set_dream_patch(&mut self, path: &std::path::Path) -> Result<(), String> {
         match FoxArchive::load(path) {
             Ok(arc) => {
                 self.dream_archive = Some(arc);
-                self.shape_textures.clear();
-                self.image_textures.clear();
-                self.avatar_textures.clear();
+                self.clear_cached_textures();
                 Ok(())
             }
             Err(e) => {
@@ -732,9 +861,47 @@ impl FoxSpriteCache {
 
     fn clear_dream_patch(&mut self) {
         if self.dream_archive.take().is_some() {
-            self.shape_textures.clear();
-            self.image_textures.clear();
-            self.avatar_textures.clear();
+            self.clear_cached_textures();
+        }
+    }
+
+    fn set_default_archive(&mut self, arc: FoxArchive) {
+        self.default_archive = Some(arc);
+        self.clear_cached_textures();
+    }
+
+    fn set_legacy_archive(&mut self, arc: FoxArchive) {
+        self.legacy_archive = Some(arc);
+        self.clear_cached_textures();
+    }
+
+    fn clear_base_archives(&mut self) {
+        let had_default = self.default_archive.take().is_some();
+        let had_legacy = self.legacy_archive.take().is_some();
+        if had_default || had_legacy {
+            self.clear_cached_textures();
+        }
+    }
+
+    fn reload_base_from_assets(
+        &mut self,
+        assets: &AssetLocator,
+        default_filename: Option<&str>,
+        legacy_filenames: &[&str],
+    ) {
+        self.clear_base_archives();
+        if let Some(arc) = default_filename
+            .and_then(|f| assets.default_patch_path(f))
+            .and_then(|p| FoxArchive::load(&p).ok())
+        {
+            self.set_default_archive(arc);
+        }
+        if let Some(arc) = legacy_filenames
+            .iter()
+            .find_map(|f| assets.legacy_patch_path(f))
+            .and_then(|p| FoxArchive::load(&p).ok())
+        {
+            self.set_legacy_archive(arc);
         }
     }
 
@@ -1027,6 +1194,32 @@ impl FoxSpriteCache {
         self.get_or_load_layers_inner(ctx, palette, id, None, None, dir, anim_ms, use_legacy)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_archive_shape_layers(
+        fox: Option<&mut FoxArchive>,
+        archive_tag: u8,
+        prefix: &str,
+        image_textures: &mut HashMap<(u8, usize), (TextureHandle, bool)>,
+        ctx: &egui::Context,
+        palette: &Palette,
+        id: u16,
+        dir: u8,
+        anim_ms: u64,
+    ) -> Option<ResolvedShapeLayers> {
+        let fox = fox?;
+        let shape = fox.resolve_object_shape(id, dir).cloned()?;
+        Self::resolve_shape_slots(
+            fox,
+            archive_tag,
+            prefix,
+            image_textures,
+            ctx,
+            palette,
+            &shape,
+            anim_ms,
+        )
+    }
+
     fn get_or_load_dream_shape_layers(
         &mut self,
         ctx: &egui::Context,
@@ -1035,16 +1228,15 @@ impl FoxSpriteCache {
         dir: u8,
         anim_ms: u64,
     ) -> Option<ResolvedShapeLayers> {
-        let fox = self.dream_archive.as_mut()?;
-        let shape = fox.resolve_object_shape(id, dir).cloned()?;
-        Self::resolve_shape_slots(
-            fox,
+        Self::resolve_archive_shape_layers(
+            self.dream_archive.as_mut(),
             ARCHIVE_DREAM,
             &self.prefix,
             &mut self.image_textures,
             ctx,
             palette,
-            &shape,
+            id,
+            dir,
             anim_ms,
         )
     }
@@ -1057,16 +1249,36 @@ impl FoxSpriteCache {
         dir: u8,
         anim_ms: u64,
     ) -> Option<ResolvedShapeLayers> {
-        let fox = self.default_archive.as_mut()?;
-        let shape = fox.resolve_object_shape(id, dir).cloned()?;
-        Self::resolve_shape_slots(
-            fox,
+        Self::resolve_archive_shape_layers(
+            self.default_archive.as_mut(),
             ARCHIVE_DEFAULT,
             &self.prefix,
             &mut self.image_textures,
             ctx,
             palette,
-            &shape,
+            id,
+            dir,
+            anim_ms,
+        )
+    }
+
+    fn get_or_load_legacy_shape_layers(
+        &mut self,
+        ctx: &egui::Context,
+        palette: &Palette,
+        id: u16,
+        dir: u8,
+        anim_ms: u64,
+    ) -> Option<ResolvedShapeLayers> {
+        Self::resolve_archive_shape_layers(
+            self.legacy_archive.as_mut(),
+            ARCHIVE_LEGACY,
+            &self.prefix,
+            &mut self.image_textures,
+            ctx,
+            palette,
+            id,
+            dir,
             anim_ms,
         )
     }
@@ -1408,6 +1620,9 @@ enum UiToNet {
         server_code: Option<char>,
         if_newer_than: Option<std::path::PathBuf>,
     },
+    DownloadStockPatch {
+        slot: StockPatchSlot,
+    },
     DownloadPortrait {
         portrait_id: u32,
     },
@@ -1464,6 +1679,10 @@ enum NetToUi {
         file_id: usize,
         path: Option<std::path::PathBuf>,
     },
+    StockPatchDownloaded {
+        slot: StockPatchSlot,
+        archive: Option<Box<FoxArchive>>,
+    },
     PortraitDownloaded {
         portrait_id: u32,
         rgba: Option<(usize, usize, Vec<u8>)>,
@@ -1477,6 +1696,13 @@ enum NetToUi {
         seq: u64,
         misspelled: Vec<MisspelledWord>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CacheUsageStats {
+    species: (usize, u64),
+    dreams: (usize, u64),
+    patches: (usize, u64),
 }
 
 struct BackgroundSession {
@@ -1586,6 +1812,7 @@ struct FurcadiaApp {
     wall_caches: HashMap<usize, FoxSpriteCache>,
     species_caches: HashMap<usize, FoxSpriteCache>,
     pending_species_downloads: std::collections::HashSet<usize>,
+    pending_stock_patch_downloads: std::collections::HashSet<StockPatchSlot>,
     dynamic_avatars: HashMap<u16, (usize, bool)>,
     dynamic_avatar_server: Option<char>,
     custom_portrait_rgba: HashMap<u32, Option<(usize, usize, Vec<u8>)>>,
@@ -1691,8 +1918,8 @@ struct FurcadiaApp {
     font_popup_open: bool,
     import_report: Option<String>,
     cache_report: Option<String>,
-    /// `((species_files, species_bytes), (dream_files, dream_bytes))`, computed on demand for Settings.
-    cache_usage: Option<((usize, u64), (usize, u64))>,
+    /// Cached download file/byte counts, computed on demand for Settings.
+    cache_usage: Option<CacheUsageStats>,
     /// Explicit download URL used for the current dream (player dreams), so it can be re-fetched.
     last_dream_explicit_url: Option<String>,
     /// Last dream identifier passed to `enter_dream`, used to re-download after flushing dream cache.
@@ -1777,10 +2004,10 @@ impl FurcadiaApp {
         let lightinge_cache = FoxSpriteCache::load(&assets, "lightinge.fox", "lightinge");
         let ambience_cache = FoxSpriteCache::load(&assets, "ambience.fox", "ambience");
         let ambiencee_cache = FoxSpriteCache::load(&assets, "ambiencee.fox", "ambiencee");
-        let junction_cache = FoxSpriteCache::load_with_legacy(
+        let junction_cache = FoxSpriteCache::load_with_legacy_candidates(
             &assets,
             "junction.fox",
-            Some("junction.fsh"),
+            &["junction.fsh", "junction.fox"],
             "junction",
         );
         let mut legacy_item_splits = Vec::new();
@@ -1790,9 +2017,7 @@ impl FurcadiaApp {
             ("item4.fox", 1349, 1748, 1349),
         ] {
             let cache = FoxSpriteCache::load_legacy_only(&assets, fname, fname);
-            if cache.is_loaded() {
-                legacy_item_splits.push((min_id, max_id, offset, cache));
-            }
+            legacy_item_splits.push((min_id, max_id, offset, cache));
         }
         let mut wall_caches = HashMap::new();
         wall_caches.insert(
@@ -1967,6 +2192,7 @@ impl FurcadiaApp {
             wall_caches,
             species_caches: HashMap::new(),
             pending_species_downloads: std::collections::HashSet::new(),
+            pending_stock_patch_downloads: std::collections::HashSet::new(),
             dynamic_avatars: HashMap::new(),
             dynamic_avatar_server: None,
             custom_portrait_rgba: HashMap::new(),
@@ -2326,7 +2552,14 @@ impl FurcadiaApp {
                 "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Select a cloud-synced Furcadia folder'; if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }",
             ])
             .output();
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        let out = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"Select a cloud-synced Furcadia folder\")",
+            ])
+            .output();
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let out = furcadia_client::sys::command("zenity")
             .args(["--file-selection", "--directory", "--title=Select a cloud-synced Furcadia folder"])
             .output()
@@ -2443,7 +2676,16 @@ impl FurcadiaApp {
                     .stderr(std::process::Stdio::null())
                     .status();
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("afplay")
+                    .arg(&path)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             for (bin, args) in [
                 ("pw-play", Vec::<&str>::new()),
                 ("paplay", vec![]),
@@ -2650,7 +2892,24 @@ impl FurcadiaApp {
                     .stderr(std::process::Stdio::null())
                     .status();
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    "on run argv",
+                    "-e",
+                    "display notification (item 2 of argv) with title (item 1 of argv)",
+                    "-e",
+                    "end run",
+                    "--",
+                    &title,
+                    &body,
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             let _ = std::process::Command::new("notify-send")
                 .args(["-a", "Furcadia", &title, &body])
                 .stdin(std::process::Stdio::null())
@@ -2768,6 +3027,8 @@ impl FurcadiaApp {
             self.assets = AssetLocator::discover();
             self.fonts_configured = false;
             self.palette = self.assets.load_default_palette().unwrap_or_default();
+            self.pending_stock_patch_downloads.clear();
+            self.reload_base_patch_caches();
             self.species_caches.clear();
             self.char_portraits.clear();
             if let Some(card) = self.looked_player.as_mut() {
@@ -2830,7 +3091,14 @@ impl FurcadiaApp {
         let dreams = AssetLocator::dreams_cache_dir()
             .map(|d| AssetLocator::dir_usage(&d))
             .unwrap_or((0, 0));
-        self.cache_usage = Some((species, dreams));
+        let patches = AssetLocator::stock_patches_cache_dir()
+            .map(|d| AssetLocator::dir_usage(&d))
+            .unwrap_or((0, 0));
+        self.cache_usage = Some(CacheUsageStats {
+            species,
+            dreams,
+            patches,
+        });
     }
 
     fn retrigger_loaded_avatar_downloads(&mut self) {
@@ -2886,6 +3154,7 @@ impl FurcadiaApp {
     }
 
     fn clear_dream_download_cache(&mut self) {
+        self.pending_stock_patch_downloads.clear();
         let result = AssetLocator::dreams_cache_dir()
             .ok_or_else(|| "could not resolve cache directory".to_owned())
             .and_then(|d| AssetLocator::clear_dir(&d).map_err(|e| e.to_string()));
@@ -2909,28 +3178,39 @@ impl FurcadiaApp {
         let dreams_res = AssetLocator::dreams_cache_dir()
             .ok_or_else(|| "could not resolve dream cache directory".to_owned())
             .and_then(|d| AssetLocator::clear_dir(&d).map_err(|e| e.to_string()));
+        let patches_res = AssetLocator::stock_patches_cache_dir()
+            .ok_or_else(|| "could not resolve stock patch cache directory".to_owned())
+            .and_then(|d| AssetLocator::clear_dir(&d).map_err(|e| e.to_string()));
 
+        self.pending_stock_patch_downloads.clear();
+        self.reload_base_patch_caches();
         let redownloading_dream = self.reload_or_clear_dream_after_cache_flush();
+        if !redownloading_dream && (self.is_connected || self.world.map.is_some()) {
+            self.ensure_stock_patches_for_current_map();
+        }
         self.reset_avatar_memory_caches();
         self.retrigger_loaded_avatar_downloads();
 
-        let msg = match (species_res, dreams_res) {
-            (Ok((sf, sb)), Ok((df, db))) => {
+        let msg = match (species_res, dreams_res, patches_res) {
+            (Ok((sf, sb)), Ok((df, db)), Ok((pf, pb))) => {
                 let mut s = format!(
-                    "Cleared {} cached file(s) ({} avatars/portraits/images, {} dreams; {}).",
-                    sf + df,
+                    "Cleared {} cached file(s) ({} avatars/portraits/images, {} dreams, {} stock patches; {}).",
+                    sf + df + pf,
                     sf,
                     df,
-                    format_bytes(sb + db)
+                    pf,
+                    format_bytes(sb + db + pb)
                 );
                 if redownloading_dream {
-                    s.push_str(" Re-downloading current dream and active avatars.");
+                    s.push_str(" Re-downloading current dream, stock patches, and active avatars.");
                 } else {
                     s.push_str(" Cached files will re-download as needed.");
                 }
                 s
             }
-            (Err(e), _) | (_, Err(e)) => format!("Could not clear all caches: {e}"),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                format!("Could not clear all caches: {e}")
+            }
         };
         self.cache_report = Some(msg.clone());
         self.push_system_line("system", &msg);
@@ -2950,7 +3230,14 @@ impl FurcadiaApp {
                  if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }",
             ])
             .output();
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        let out = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"Select Furcadia Folder\")",
+            ])
+            .output();
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let out = furcadia_client::sys::command("zenity")
             .args(["--file-selection", "--directory", "--title=Select Furcadia Windows Folder"])
             .output()
@@ -3162,6 +3449,7 @@ impl FurcadiaApp {
                 self.load_dream_dir(&dir);
             }
         }
+        self.ensure_stock_patches_for_current_map();
         self.cam_offset = target.cam_offset;
         self.to_net = target.to_net;
         self.from_net = target.from_net;
@@ -3185,6 +3473,7 @@ impl FurcadiaApp {
         let mut events_for_notify: Vec<(String, String, BgNotifyKind)> = Vec::new();
         let mut portrait_downloads: Vec<BgPortraitDownload> = Vec::new();
         let mut portrait_directives: Vec<String> = Vec::new();
+        let mut stock_patch_downloads: Vec<(StockPatchSlot, Option<Box<FoxArchive>>)> = Vec::new();
         let nicknames_snapshot = self.mention_nicknames.clone();
         let notify_mention = self.notify_mention;
         let flash_on_main_chat = self.flash_taskbar_on_main_chat;
@@ -3331,9 +3620,15 @@ impl FurcadiaApp {
                             remappable,
                         });
                     }
+                    NetToUi::StockPatchDownloaded { slot, archive } => {
+                        stock_patch_downloads.push((slot, archive));
+                    }
                     _ => {}
                 }
             }
+        }
+        for (slot, archive) in stock_patch_downloads {
+            self.apply_stock_patch_downloaded(slot, archive);
         }
         for dl in portrait_downloads {
             self.apply_portrait_downloaded(dl.portrait_id, dl.rgba, dl.remappable);
@@ -4318,6 +4613,544 @@ impl FurcadiaApp {
         }
     }
 
+    fn has_stock_patch_loaded(&self, slot: StockPatchSlot) -> bool {
+        match slot {
+            StockPatchSlot::ModernFloors => self.floors_cache.default_archive.is_some(),
+            StockPatchSlot::LegacyFloors => self.floors_cache.legacy_archive.is_some(),
+            StockPatchSlot::LegacyFloors2 => self.floors2_cache.legacy_archive.is_some(),
+            StockPatchSlot::ModernFloore => self.floore_cache.default_archive.is_some(),
+            StockPatchSlot::LegacyFloore => self.floore_cache.legacy_archive.is_some(),
+            StockPatchSlot::ModernItems => self.items_cache.default_archive.is_some(),
+            StockPatchSlot::LegacyItem => self.items_cache.legacy_archive.is_some(),
+            StockPatchSlot::LegacyItem2 => self
+                .legacy_item_splits
+                .iter()
+                .any(|(min_id, _, _, c)| *min_id == 305 && c.legacy_archive.is_some()),
+            StockPatchSlot::LegacyItem3 => self
+                .legacy_item_splits
+                .iter()
+                .any(|(min_id, _, _, c)| *min_id == 1000 && c.legacy_archive.is_some()),
+            StockPatchSlot::LegacyItem4 => self
+                .legacy_item_splits
+                .iter()
+                .any(|(min_id, _, _, c)| *min_id == 1349 && c.legacy_archive.is_some()),
+            StockPatchSlot::ModernIteme => self.iteme_cache.default_archive.is_some(),
+            StockPatchSlot::LegacyIteme => self.iteme_cache.legacy_archive.is_some(),
+            StockPatchSlot::ModernPortals => self.portals_cache.default_archive.is_some(),
+            StockPatchSlot::ModernPortalse => self.portalse_cache.default_archive.is_some(),
+            StockPatchSlot::ModernEffects => self.effects_cache.default_archive.is_some(),
+            StockPatchSlot::LegacyEffects => self.effects_cache.legacy_archive.is_some(),
+            StockPatchSlot::ModernEffectse => self.effectse_cache.default_archive.is_some(),
+            StockPatchSlot::LegacyEffectse => self.effectse_cache.legacy_archive.is_some(),
+            StockPatchSlot::ModernJunction => self.junction_cache.default_archive.is_some(),
+            StockPatchSlot::LegacyJunction => self.junction_cache.legacy_archive.is_some(),
+            StockPatchSlot::ModernWall(g) => self
+                .wall_caches
+                .get(&g)
+                .is_some_and(|c| c.default_archive.is_some()),
+            StockPatchSlot::LegacyWall(g) => self
+                .wall_caches
+                .get(&g)
+                .is_some_and(|c| c.legacy_archive.is_some()),
+        }
+    }
+
+    fn request_stock_patch(&mut self, slot: StockPatchSlot) {
+        if !slot.is_valid() || self.has_stock_patch_loaded(slot) {
+            return;
+        }
+        if self.pending_stock_patch_downloads.insert(slot) {
+            let _ = self.to_net.send(UiToNet::DownloadStockPatch { slot });
+        }
+    }
+
+    fn apply_stock_patch_downloaded(
+        &mut self,
+        slot: StockPatchSlot,
+        archive: Option<Box<FoxArchive>>,
+    ) {
+        let Some(arc) = archive else {
+            return;
+        };
+        let arc = *arc;
+        self.cache_usage = None;
+        match slot {
+            StockPatchSlot::ModernFloors => self.floors_cache.set_default_archive(arc),
+            StockPatchSlot::LegacyFloors => self.floors_cache.set_legacy_archive(arc),
+            StockPatchSlot::LegacyFloors2 => self.floors2_cache.set_legacy_archive(arc),
+            StockPatchSlot::ModernFloore => self.floore_cache.set_default_archive(arc),
+            StockPatchSlot::LegacyFloore => self.floore_cache.set_legacy_archive(arc),
+            StockPatchSlot::ModernItems => self.items_cache.set_default_archive(arc),
+            StockPatchSlot::LegacyItem => self.items_cache.set_legacy_archive(arc),
+            StockPatchSlot::LegacyItem2 => {
+                if let Some((_, _, _, c)) = self
+                    .legacy_item_splits
+                    .iter_mut()
+                    .find(|(min_id, _, _, _)| *min_id == 305)
+                {
+                    c.set_legacy_archive(arc);
+                }
+            }
+            StockPatchSlot::LegacyItem3 => {
+                if let Some((_, _, _, c)) = self
+                    .legacy_item_splits
+                    .iter_mut()
+                    .find(|(min_id, _, _, _)| *min_id == 1000)
+                {
+                    c.set_legacy_archive(arc);
+                }
+            }
+            StockPatchSlot::LegacyItem4 => {
+                if let Some((_, _, _, c)) = self
+                    .legacy_item_splits
+                    .iter_mut()
+                    .find(|(min_id, _, _, _)| *min_id == 1349)
+                {
+                    c.set_legacy_archive(arc);
+                }
+            }
+            StockPatchSlot::ModernIteme => self.iteme_cache.set_default_archive(arc),
+            StockPatchSlot::LegacyIteme => self.iteme_cache.set_legacy_archive(arc),
+            StockPatchSlot::ModernPortals => self.portals_cache.set_default_archive(arc),
+            StockPatchSlot::ModernPortalse => self.portalse_cache.set_default_archive(arc),
+            StockPatchSlot::ModernEffects => self.effects_cache.set_default_archive(arc),
+            StockPatchSlot::LegacyEffects => self.effects_cache.set_legacy_archive(arc),
+            StockPatchSlot::ModernEffectse => self.effectse_cache.set_default_archive(arc),
+            StockPatchSlot::LegacyEffectse => self.effectse_cache.set_legacy_archive(arc),
+            StockPatchSlot::ModernJunction => self.junction_cache.set_default_archive(arc),
+            StockPatchSlot::LegacyJunction => self.junction_cache.set_legacy_archive(arc),
+            StockPatchSlot::ModernWall(g) => {
+                let cache = self.wall_caches.entry(g).or_insert_with(|| FoxSpriteCache {
+                    default_archive: None,
+                    legacy_archive: None,
+                    dream_archive: None,
+                    shape_textures: HashMap::new(),
+                    image_textures: HashMap::new(),
+                    avatar_textures: HashMap::new(),
+                    prefix: format!("wall_{g}"),
+                });
+                cache.set_default_archive(arc);
+            }
+            StockPatchSlot::LegacyWall(g) => {
+                let cache = self.wall_caches.entry(g).or_insert_with(|| FoxSpriteCache {
+                    default_archive: None,
+                    legacy_archive: None,
+                    dream_archive: None,
+                    shape_textures: HashMap::new(),
+                    image_textures: HashMap::new(),
+                    avatar_textures: HashMap::new(),
+                    prefix: format!("wall_{g}"),
+                });
+                cache.set_legacy_archive(arc);
+            }
+        }
+    }
+
+    fn reload_base_patch_caches(&mut self) {
+        self.floors_cache
+            .reload_base_from_assets(&self.assets, Some("floors.fox"), &["floors.fox"]);
+        self.floors2_cache
+            .reload_base_from_assets(&self.assets, None, &["floors2.fox"]);
+        self.floore_cache
+            .reload_base_from_assets(&self.assets, Some("floore.fox"), &["floore.fox"]);
+        self.items_cache
+            .reload_base_from_assets(&self.assets, Some("items.fox"), &["item.fox"]);
+        self.iteme_cache
+            .reload_base_from_assets(&self.assets, Some("iteme.fox"), &["iteme.fox"]);
+        self.portals_cache
+            .reload_base_from_assets(&self.assets, Some("portals.fox"), &[]);
+        self.portalse_cache
+            .reload_base_from_assets(&self.assets, Some("portalse.fox"), &[]);
+        self.effects_cache
+            .reload_base_from_assets(&self.assets, Some("effects.fox"), &["effects.fox"]);
+        self.effectse_cache
+            .reload_base_from_assets(&self.assets, Some("effectse.fox"), &["effectse.fox"]);
+        self.lighting_cache
+            .reload_base_from_assets(&self.assets, Some("lighting.fox"), &[]);
+        self.lightinge_cache
+            .reload_base_from_assets(&self.assets, Some("lightinge.fox"), &[]);
+        self.ambience_cache
+            .reload_base_from_assets(&self.assets, Some("ambience.fox"), &[]);
+        self.ambiencee_cache
+            .reload_base_from_assets(&self.assets, Some("ambiencee.fox"), &[]);
+        self.junction_cache.reload_base_from_assets(
+            &self.assets,
+            Some("junction.fox"),
+            &["junction.fsh", "junction.fox"],
+        );
+        for (min_id, _, _, cache) in &mut self.legacy_item_splits {
+            let fname = match *min_id {
+                305 => "item2.fox",
+                1000 => "item3.fox",
+                _ => "item4.fox",
+            };
+            cache.reload_base_from_assets(&self.assets, None, &[fname]);
+        }
+        if let Some(wall0) = self.wall_caches.get_mut(&0) {
+            wall0.reload_base_from_assets(&self.assets, Some("wall.fox"), &["wall.fox"]);
+        }
+        for (g, cache) in &mut self.wall_caches {
+            if *g == 0 {
+                continue;
+            }
+            let fname = format!("wall_{g}.fox");
+            cache.reload_base_from_assets(&self.assets, Some(&fname), &[&fname]);
+        }
+        for g in 1..=20usize {
+            if self.wall_caches.contains_key(&g) {
+                continue;
+            }
+            let fname = format!("wall_{g}.fox");
+            if self.assets.default_patch_path(&fname).is_some()
+                || self.assets.legacy_patch_path(&fname).is_some()
+            {
+                self.wall_caches.insert(
+                    g,
+                    FoxSpriteCache::load_with_legacy(
+                        &self.assets,
+                        &fname,
+                        Some(&fname),
+                        &format!("wall_{g}"),
+                    ),
+                );
+            }
+        }
+    }
+
+    fn dream_has_base_item(&self, item_id: u16) -> bool {
+        if item_id == 0 {
+            return true;
+        }
+        if !self.items_cache.has_dream() || item_id >= 1750 {
+            for (min_id, max_id, offset, cache) in &self.dream_item_splits {
+                if item_id >= *min_id && item_id <= *max_id {
+                    let oid = item_id - *offset;
+                    if cache
+                        .dream_archive
+                        .as_ref()
+                        .is_some_and(|fox| fox.resolve_object_shape(oid, 0).is_some())
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        if let Some(fox) = self.items_cache.dream_archive.as_ref() {
+            let dream_oid = if fox.is_fshx_or_fsh {
+                item_id
+            } else {
+                item_id - 1
+            };
+            if fox.resolve_object_shape(dream_oid, 0).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn ensure_stock_patches_for_current_map(&mut self) {
+        let is_modern = self.world.is_modern;
+        let Some(map) = self.world.map.as_ref() else {
+            self.request_stock_patch(if is_modern {
+                StockPatchSlot::ModernFloors
+            } else {
+                StockPatchSlot::LegacyFloors
+            });
+            return;
+        };
+
+        let mut needed: Vec<StockPatchSlot> = Vec::new();
+        let mut need_floors = false;
+        let mut need_floors2 = false;
+        let mut need_floore = false;
+        let mut seen_floors = std::collections::HashSet::<u16>::new();
+
+        for &f in &map.floors {
+            if !seen_floors.insert(f) || f == 161 {
+                continue;
+            }
+            if (209..=308).contains(&f) {
+                if !need_floors2 {
+                    let in_dream = self.floors2_cache.dream_archive.as_ref().is_some_and(|fox| {
+                        fox.resolve_object_shape(f - 209, 0).is_some()
+                            || fox.resolve_object_shape(f, 0).is_some()
+                    });
+                    if !in_dream {
+                        need_floors2 = true;
+                    }
+                }
+                continue;
+            }
+            if f >= 500 {
+                if !need_floore {
+                    let in_dream = self
+                        .floore_cache
+                        .dream_archive
+                        .as_ref()
+                        .is_some_and(|fox| fox.resolve_object_shape(f - 500, 0).is_some())
+                        || self
+                            .floors_cache
+                            .dream_archive
+                            .as_ref()
+                            .is_some_and(|fox| fox.resolve_object_shape(f, 0).is_some());
+                    if !in_dream {
+                        need_floore = true;
+                    }
+                }
+                continue;
+            }
+            if !need_floors {
+                let in_dream = self
+                    .floors_cache
+                    .dream_archive
+                    .as_ref()
+                    .is_some_and(|fox| fox.resolve_object_shape(f, 0).is_some());
+                if !in_dream {
+                    need_floors = true;
+                }
+            }
+        }
+        if need_floors {
+            needed.push(if is_modern {
+                StockPatchSlot::ModernFloors
+            } else {
+                StockPatchSlot::LegacyFloors
+            });
+        }
+        if need_floors2 {
+            needed.push(StockPatchSlot::LegacyFloors2);
+        }
+        if need_floore {
+            needed.push(if is_modern {
+                StockPatchSlot::ModernFloore
+            } else {
+                StockPatchSlot::LegacyFloore
+            });
+        }
+
+        let mut seen_items = std::collections::HashSet::<u16>::new();
+        let mut need_modern_items = false;
+        let mut need_legacy_item = false;
+        let mut need_legacy_item2 = false;
+        let mut need_legacy_item3 = false;
+        let mut need_legacy_item4 = false;
+        let mut need_iteme = false;
+        let mut need_portals = is_modern
+            && !self.world.dream_labels.is_empty()
+            && self
+                .portals_cache
+                .dream_archive
+                .as_ref()
+                .is_none_or(|fox| !fox.has_portal_shapes(0));
+        let mut need_portalse = false;
+
+        for &it in &map.items {
+            if it == 0 || !seen_items.insert(it) {
+                continue;
+            }
+            if it >= 2400 {
+                if !need_iteme
+                    && self
+                        .iteme_cache
+                        .dream_archive
+                        .as_ref()
+                        .is_none_or(|fox| fox.resolve_object_shape(it - 2400, 0).is_none())
+                {
+                    need_iteme = true;
+                }
+                continue;
+            }
+            if (2000..=2099).contains(&it) {
+                if is_modern && !need_portalse {
+                    let pid = it - 2000;
+                    let in_dream = self.portalse_cache.dream_archive.as_ref().is_some_and(|fox| {
+                        fox.resolve_object_shape(pid, 0).is_some() || fox.has_portal_shapes(pid)
+                    }) || self.portals_cache.dream_archive.as_ref().is_some_and(|fox| {
+                        fox.resolve_object_shape(pid, 0).is_some() || fox.has_portal_shapes(pid)
+                    });
+                    if !in_dream {
+                        need_portalse = true;
+                    }
+                }
+                continue;
+            }
+            if (1800..=1899).contains(&it) {
+                if is_modern && !need_portals {
+                    let pid = it - 1800;
+                    let in_dream = self.portals_cache.dream_archive.as_ref().is_some_and(|fox| {
+                        fox.resolve_object_shape(pid, 0).is_some() || fox.has_portal_shapes(pid)
+                    });
+                    if !in_dream {
+                        need_portals = true;
+                    }
+                }
+                continue;
+            }
+            if is_modern {
+                if it <= 1749 && !need_modern_items && !self.dream_has_base_item(it) {
+                    need_modern_items = true;
+                }
+            } else if it <= 304 {
+                if !need_legacy_item && !self.dream_has_base_item(it) {
+                    need_legacy_item = true;
+                }
+            } else if it <= 999 {
+                if !need_legacy_item2 && !self.dream_has_base_item(it) {
+                    need_legacy_item2 = true;
+                }
+            } else if it <= 1348 {
+                if !need_legacy_item3 && !self.dream_has_base_item(it) {
+                    need_legacy_item3 = true;
+                }
+            } else if it <= 1748 && !need_legacy_item4 && !self.dream_has_base_item(it) {
+                need_legacy_item4 = true;
+            }
+        }
+        if need_modern_items {
+            needed.push(StockPatchSlot::ModernItems);
+        }
+        if need_legacy_item {
+            needed.push(StockPatchSlot::LegacyItem);
+        }
+        if need_legacy_item2 {
+            needed.push(StockPatchSlot::LegacyItem2);
+        }
+        if need_legacy_item3 {
+            needed.push(StockPatchSlot::LegacyItem3);
+        }
+        if need_legacy_item4 {
+            needed.push(StockPatchSlot::LegacyItem4);
+        }
+        if need_iteme {
+            needed.push(if is_modern {
+                StockPatchSlot::ModernIteme
+            } else {
+                StockPatchSlot::LegacyIteme
+            });
+        }
+        if need_portals {
+            needed.push(StockPatchSlot::ModernPortals);
+        }
+        if need_portalse {
+            needed.push(StockPatchSlot::ModernPortalse);
+        }
+
+        let mut wall_seen = [false; 256];
+        let mut need_wall0 = false;
+        let mut need_junction = false;
+        let mut need_wall_groups = [false; 8];
+        for &w in &map.walls {
+            for b in [(w & 0xff) as usize, ((w >> 8) & 0xff) as usize] {
+                if b == 0 || wall_seen[b] {
+                    continue;
+                }
+                wall_seen[b] = true;
+                let slot = b % 12;
+                if slot < 4 && slot != 1 && slot != 3 {
+                    continue;
+                }
+                let tex = b / 12;
+                if tex < 2 {
+                    let has_dream_group = self
+                        .wall_caches
+                        .get(&(tex + 1))
+                        .is_some_and(|c| c.has_dream());
+                    if !has_dream_group {
+                        if !self.wall_caches.get(&0).is_some_and(|c| c.has_dream()) {
+                            need_wall0 = true;
+                        }
+                        if !self.junction_cache.has_dream() {
+                            need_junction = true;
+                        }
+                    }
+                } else if (2..=6).contains(&tex) {
+                    let g = tex + 1;
+                    if !self.wall_caches.get(&g).is_some_and(|c| c.has_dream()) {
+                        need_wall_groups[g] = true;
+                    }
+                }
+            }
+        }
+        if need_wall0 {
+            needed.push(if is_modern {
+                StockPatchSlot::ModernWall(0)
+            } else {
+                StockPatchSlot::LegacyWall(0)
+            });
+        }
+        if need_junction {
+            needed.push(if is_modern {
+                StockPatchSlot::ModernJunction
+            } else {
+                StockPatchSlot::LegacyJunction
+            });
+        }
+        for (g, &wanted) in need_wall_groups.iter().enumerate() {
+            if wanted {
+                needed.push(if is_modern {
+                    StockPatchSlot::ModernWall(g)
+                } else {
+                    StockPatchSlot::LegacyWall(g)
+                });
+            }
+        }
+
+        let mut seen_effects = std::collections::HashSet::<u16>::new();
+        let mut need_effects = false;
+        let mut need_effectse = false;
+        for &e in &map.effects {
+            if e == 0 || !seen_effects.insert(e) {
+                continue;
+            }
+            if e >= 200 {
+                if is_modern && e <= 249 && !need_effects && !self.effectse_cache.has_dream() {
+                    let in_dream = self.effects_cache.dream_archive.as_ref().is_some_and(|fox| {
+                        let oid = if fox.is_fshx_or_fsh { e } else { e - 1 };
+                        fox.resolve_object_shape(oid, 0).is_some()
+                    });
+                    if !in_dream {
+                        need_effects = true;
+                    }
+                }
+                if !need_effectse
+                    && self
+                        .effectse_cache
+                        .dream_archive
+                        .as_ref()
+                        .is_none_or(|fox| fox.resolve_object_shape(e - 200, 0).is_none())
+                {
+                    need_effectse = true;
+                }
+            } else if !need_effects {
+                let in_dream = self.effects_cache.dream_archive.as_ref().is_some_and(|fox| {
+                    let oid = if fox.is_fshx_or_fsh { e } else { e - 1 };
+                    fox.resolve_object_shape(oid, 0).is_some()
+                });
+                if !in_dream {
+                    need_effects = true;
+                }
+            }
+        }
+        if need_effects {
+            needed.push(if is_modern {
+                StockPatchSlot::ModernEffects
+            } else {
+                StockPatchSlot::LegacyEffects
+            });
+        }
+        if need_effectse {
+            needed.push(if is_modern {
+                StockPatchSlot::ModernEffectse
+            } else {
+                StockPatchSlot::LegacyEffectse
+            });
+        }
+
+        for slot in needed {
+            self.request_stock_patch(slot);
+        }
+    }
+
     fn enter_dream(
         &mut self,
         name: &str,
@@ -4371,6 +5204,7 @@ impl FurcadiaApp {
                 if prev_modern {
                     self.world.is_modern = true;
                 }
+                self.ensure_stock_patches_for_current_map();
                 self.send_pending_vascodagama();
                 return;
             }
@@ -4431,18 +5265,38 @@ impl FurcadiaApp {
             {
                 return Some(sp);
             }
+            if !self.floors2_cache.has_dream() && self.floors2_cache.legacy_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::LegacyFloors2);
+            }
         }
         if fid >= 500 {
-            return self
+            let res = self
                 .floore_cache
                 .get_or_load_shape_mode(ctx, &self.palette, fid - 500, 0, use_legacy)
                 .or_else(|| {
                     self.floors_cache
                         .get_or_load_shape_mode(ctx, &self.palette, fid, 0, use_legacy)
                 });
+            if res.is_none() && !self.floore_cache.has_dream() {
+                if use_legacy && self.floore_cache.legacy_archive.is_none() {
+                    self.request_stock_patch(StockPatchSlot::LegacyFloore);
+                } else if !use_legacy && self.floore_cache.default_archive.is_none() {
+                    self.request_stock_patch(StockPatchSlot::ModernFloore);
+                }
+            }
+            return res;
         }
-        self.floors_cache
-            .get_or_load_shape_mode(ctx, &self.palette, fid, 0, use_legacy)
+        let res = self
+            .floors_cache
+            .get_or_load_shape_mode(ctx, &self.palette, fid, 0, use_legacy);
+        if res.is_none() && floor_id != 161 {
+            if use_legacy && self.floors_cache.legacy_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::LegacyFloors);
+            } else if !use_legacy && self.floors_cache.default_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::ModernFloors);
+            }
+        }
+        res
     }
 
     fn resolve_floor_layers(
@@ -4484,10 +5338,13 @@ impl FurcadiaApp {
             {
                 return Some(shape);
             }
+            if !self.floors2_cache.has_dream() && self.floors2_cache.legacy_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::LegacyFloors2);
+            }
         }
 
         if fid >= 500 {
-            return self
+            let res = self
                 .floore_cache
                 .get_or_load_shape_layers_mode(
                     ctx,
@@ -4507,10 +5364,27 @@ impl FurcadiaApp {
                         use_legacy,
                     )
                 });
+            if res.is_none() && !self.floore_cache.has_dream() {
+                if use_legacy && self.floore_cache.legacy_archive.is_none() {
+                    self.request_stock_patch(StockPatchSlot::LegacyFloore);
+                } else if !use_legacy && self.floore_cache.default_archive.is_none() {
+                    self.request_stock_patch(StockPatchSlot::ModernFloore);
+                }
+            }
+            return res;
         }
 
-        self.floors_cache
-            .get_or_load_shape_layers_mode(ctx, &self.palette, fid, 0, anim_ms, use_legacy)
+        let res = self
+            .floors_cache
+            .get_or_load_shape_layers_mode(ctx, &self.palette, fid, 0, anim_ms, use_legacy);
+        if res.is_none() && floor_id != 161 {
+            if use_legacy && self.floors_cache.legacy_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::LegacyFloors);
+            } else if !use_legacy && self.floors_cache.default_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::ModernFloors);
+            }
+        }
+        res
     }
 
     fn resolve_item_layers(
@@ -4522,7 +5396,7 @@ impl FurcadiaApp {
     ) -> Option<ResolvedShapeLayers> {
         if item_id == 0 {
             if self.world.is_modern && portal_state.is_some() {
-                return resolve_portal_layers_from(
+                let res = resolve_portal_layers_from(
                     &mut self.portals_cache,
                     ctx,
                     &self.palette,
@@ -4530,12 +5404,19 @@ impl FurcadiaApp {
                     portal_state,
                     anim_ms,
                 );
+                if res.is_none()
+                    && !self.portals_cache.has_dream()
+                    && self.portals_cache.default_archive.is_none()
+                {
+                    self.request_stock_patch(StockPatchSlot::ModernPortals);
+                }
+                return res;
             }
             return None;
         }
         if (1800..=1899).contains(&item_id) {
             let pid = item_id - 1800;
-            return resolve_portal_layers_from(
+            let res = resolve_portal_layers_from(
                 &mut self.portals_cache,
                 ctx,
                 &self.palette,
@@ -4557,10 +5438,17 @@ impl FurcadiaApp {
                     None
                 }
             });
+            if res.is_none()
+                && !self.portals_cache.has_dream()
+                && self.portals_cache.default_archive.is_none()
+            {
+                self.request_stock_patch(StockPatchSlot::ModernPortals);
+            }
+            return res;
         }
         if (2000..=2099).contains(&item_id) {
             let pid = item_id - 2000;
-            return resolve_portal_layers_from(
+            let res = resolve_portal_layers_from(
                 &mut self.portalse_cache,
                 ctx,
                 &self.palette,
@@ -4592,117 +5480,26 @@ impl FurcadiaApp {
                     None
                 }
             });
+            if res.is_none() {
+                if !self.portalse_cache.has_dream() && self.portalse_cache.default_archive.is_none()
+                {
+                    self.request_stock_patch(StockPatchSlot::ModernPortalse);
+                }
+                if !self.portals_cache.has_dream() && self.portals_cache.default_archive.is_none() {
+                    self.request_stock_patch(StockPatchSlot::ModernPortals);
+                }
+            }
+            return res;
         }
         let use_legacy = !self.world.is_modern;
         if item_id >= 2400 {
             let oid = item_id - 2400;
-            if self.world.is_modern && portal_state.is_some_and(|s| s >= 0)
-                && cache_has_portal_shapes(&self.iteme_cache, oid) {
-                    if let res @ Some(_) = resolve_portal_layers_from(
-                        &mut self.iteme_cache,
-                        ctx,
-                        &self.palette,
-                        oid,
-                        portal_state,
-                        anim_ms,
-                    ) {
-                        return res;
-                    }
-                    return resolve_portal_layers_from(
-                        &mut self.portals_cache,
-                        ctx,
-                        &self.palette,
-                        0,
-                        portal_state,
-                        anim_ms,
-                    );
-                }
-            if let res @ Some(_) = self.iteme_cache.get_or_load_shape_layers_mode(
-                ctx,
-                &self.palette,
-                oid,
-                0,
-                anim_ms,
-                use_legacy,
-            ) {
-                return res;
-            }
-        }
-        if !self.items_cache.has_dream() || item_id >= 1750 {
-            for (min_id, max_id, offset, cache) in &mut self.dream_item_splits {
-                if item_id >= *min_id && item_id <= *max_id {
-                    let oid = item_id - *offset;
-                    if self.world.is_modern && portal_state.is_some_and(|s| s >= 0)
-                        && cache_has_portal_shapes(cache, oid) {
-                            if let res @ Some(_) = resolve_portal_layers_from(
-                                cache,
-                                ctx,
-                                &self.palette,
-                                oid,
-                                portal_state,
-                                anim_ms,
-                            ) {
-                                return res;
-                            }
-                            return resolve_portal_layers_from(
-                                &mut self.portals_cache,
-                                ctx,
-                                &self.palette,
-                                0,
-                                portal_state,
-                                anim_ms,
-                            );
-                        }
-                    if let res @ Some(_) =
-                        cache.get_or_load_shape_layers(ctx, &self.palette, oid, 0, anim_ms)
-                    {
-                        return res;
-                    }
-                }
-            }
-        }
-        if self.items_cache.has_dream() {
-            let dream_oid = if self.items_cache.dream_is_fshx_or_fsh() {
-                item_id
-            } else {
-                item_id - 1
-            };
-            if self.world.is_modern && portal_state.is_some_and(|s| s >= 0)
-                && cache_has_portal_shapes(&self.items_cache, dream_oid) {
-                    if let res @ Some(_) = resolve_portal_layers_from(
-                        &mut self.items_cache,
-                        ctx,
-                        &self.palette,
-                        dream_oid,
-                        portal_state,
-                        anim_ms,
-                    ) {
-                        return res;
-                    }
-                    return resolve_portal_layers_from(
-                        &mut self.portals_cache,
-                        ctx,
-                        &self.palette,
-                        0,
-                        portal_state,
-                        anim_ms,
-                    );
-                }
-            if let res @ Some(_) = self.items_cache.get_or_load_dream_shape_layers(
-                ctx,
-                &self.palette,
-                dream_oid,
-                0,
-                anim_ms,
-            ) {
-                return res;
-            }
-        }
-        let oid = item_id - 1;
-        if self.world.is_modern && portal_state.is_some_and(|s| s >= 0)
-            && cache_has_portal_shapes(&self.items_cache, oid) {
+            if self.world.is_modern
+                && portal_state.is_some_and(|s| s >= 0)
+                && cache_has_portal_shapes(&self.iteme_cache, oid)
+            {
                 if let res @ Some(_) = resolve_portal_layers_from(
-                    &mut self.items_cache,
+                    &mut self.iteme_cache,
                     ctx,
                     &self.palette,
                     oid,
@@ -4720,6 +5517,173 @@ impl FurcadiaApp {
                     anim_ms,
                 );
             }
+            if let res @ Some(_) = self.iteme_cache.get_or_load_shape_layers_mode(
+                ctx,
+                &self.palette,
+                oid,
+                0,
+                anim_ms,
+                use_legacy,
+            ) {
+                return res;
+            }
+            if use_legacy && !self.iteme_cache.has_dream() && self.iteme_cache.legacy_archive.is_none()
+            {
+                self.request_stock_patch(StockPatchSlot::LegacyIteme);
+            } else if !use_legacy
+                && !self.iteme_cache.has_dream()
+                && self.iteme_cache.default_archive.is_none()
+            {
+                self.request_stock_patch(StockPatchSlot::ModernIteme);
+            }
+        }
+        if !self.items_cache.has_dream() || item_id >= 1750 {
+            for (min_id, max_id, offset, cache) in &mut self.dream_item_splits {
+                if item_id >= *min_id && item_id <= *max_id {
+                    let oid = item_id - *offset;
+                    if self.world.is_modern
+                        && portal_state.is_some_and(|s| s >= 0)
+                        && cache_has_portal_shapes(cache, oid)
+                    {
+                        if let res @ Some(_) = resolve_portal_layers_from(
+                            cache,
+                            ctx,
+                            &self.palette,
+                            oid,
+                            portal_state,
+                            anim_ms,
+                        ) {
+                            return res;
+                        }
+                        return resolve_portal_layers_from(
+                            &mut self.portals_cache,
+                            ctx,
+                            &self.palette,
+                            0,
+                            portal_state,
+                            anim_ms,
+                        );
+                    }
+                    if let res @ Some(_) =
+                        cache.get_or_load_shape_layers(ctx, &self.palette, oid, 0, anim_ms)
+                    {
+                        return res;
+                    }
+                }
+            }
+        }
+        if self.items_cache.has_dream() {
+            let dream_oid = if self.items_cache.dream_is_fshx_or_fsh() {
+                item_id
+            } else {
+                item_id - 1
+            };
+            if self.world.is_modern
+                && portal_state.is_some_and(|s| s >= 0)
+                && cache_has_portal_shapes(&self.items_cache, dream_oid)
+            {
+                if let res @ Some(_) = resolve_portal_layers_from(
+                    &mut self.items_cache,
+                    ctx,
+                    &self.palette,
+                    dream_oid,
+                    portal_state,
+                    anim_ms,
+                ) {
+                    return res;
+                }
+                return resolve_portal_layers_from(
+                    &mut self.portals_cache,
+                    ctx,
+                    &self.palette,
+                    0,
+                    portal_state,
+                    anim_ms,
+                );
+            }
+            if let res @ Some(_) = self.items_cache.get_or_load_dream_shape_layers(
+                ctx,
+                &self.palette,
+                dream_oid,
+                0,
+                anim_ms,
+            ) {
+                return res;
+            }
+        }
+
+        let oid = item_id - 1;
+        if use_legacy {
+            let mut missing_split_slot: Option<StockPatchSlot> = None;
+            if (305..=1748).contains(&item_id) {
+                for (min_id, max_id, offset, cache) in &mut self.legacy_item_splits {
+                    if item_id >= *min_id && item_id <= *max_id {
+                        let legacy_oid = item_id - *offset;
+                        if let res @ Some(_) = cache.get_or_load_legacy_shape_layers(
+                            ctx,
+                            &self.palette,
+                            legacy_oid,
+                            0,
+                            anim_ms,
+                        ) {
+                            return res;
+                        }
+                        if cache.legacy_archive.is_none() {
+                            missing_split_slot = Some(match *min_id {
+                                305 => StockPatchSlot::LegacyItem2,
+                                1000 => StockPatchSlot::LegacyItem3,
+                                _ => StockPatchSlot::LegacyItem4,
+                            });
+                        }
+                    }
+                }
+            }
+            if let res @ Some(_) = self.items_cache.get_or_load_legacy_shape_layers(
+                ctx,
+                &self.palette,
+                item_id,
+                0,
+                anim_ms,
+            ) {
+                return res;
+            }
+            if let Some(slot) = missing_split_slot {
+                self.request_stock_patch(slot);
+            } else if item_id <= 304 && self.items_cache.legacy_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::LegacyItem);
+            }
+            if let res @ Some(_) = self.items_cache.get_or_load_default_shape_layers(
+                ctx,
+                &self.palette,
+                oid,
+                0,
+                anim_ms,
+            ) {
+                return res;
+            }
+            return None;
+        }
+
+        if portal_state.is_some_and(|s| s >= 0) && cache_has_portal_shapes(&self.items_cache, oid) {
+            if let res @ Some(_) = resolve_portal_layers_from(
+                &mut self.items_cache,
+                ctx,
+                &self.palette,
+                oid,
+                portal_state,
+                anim_ms,
+            ) {
+                return res;
+            }
+            return resolve_portal_layers_from(
+                &mut self.portals_cache,
+                ctx,
+                &self.palette,
+                0,
+                portal_state,
+                anim_ms,
+            );
+        }
         if let res @ Some(_) = self.items_cache.get_or_load_default_shape_layers(
             ctx,
             &self.palette,
@@ -4729,35 +5693,36 @@ impl FurcadiaApp {
         ) {
             return res;
         }
-        if item_id >= 305 {
+        if (1..=1749).contains(&item_id) && self.items_cache.default_archive.is_none() {
+            self.request_stock_patch(StockPatchSlot::ModernItems);
+        }
+        if (305..=1748).contains(&item_id) {
             for (min_id, max_id, offset, cache) in &mut self.legacy_item_splits {
                 if item_id >= *min_id && item_id <= *max_id {
                     let legacy_oid = item_id - *offset;
-                    if let res @ Some(_) = cache.get_or_load_shape_layers_mode(
+                    if let res @ Some(_) = cache.get_or_load_legacy_shape_layers(
                         ctx,
                         &self.palette,
                         legacy_oid,
                         0,
                         anim_ms,
-                        true,
                     ) {
                         return res;
                     }
                 }
             }
         }
-        if let res @ Some(_) = self.items_cache.get_or_load_shape_layers_mode(
+        if let res @ Some(_) = self.items_cache.get_or_load_legacy_shape_layers(
             ctx,
             &self.palette,
             item_id,
             0,
             anim_ms,
-            true,
         ) {
             return res;
         }
-        if self.world.is_modern && portal_state.is_some_and(|s| s >= 0) {
-            return resolve_portal_layers_from(
+        if portal_state.is_some_and(|s| s >= 0) {
+            let res = resolve_portal_layers_from(
                 &mut self.portals_cache,
                 ctx,
                 &self.palette,
@@ -4765,6 +5730,13 @@ impl FurcadiaApp {
                 portal_state,
                 anim_ms,
             );
+            if res.is_none()
+                && !self.portals_cache.has_dream()
+                && self.portals_cache.default_archive.is_none()
+            {
+                self.request_stock_patch(StockPatchSlot::ModernPortals);
+            }
+            return res;
         }
         None
     }
@@ -4817,11 +5789,34 @@ impl FurcadiaApp {
                 return res;
             }
             if effect_id <= 249 {
-                return resolve_effects_base(self, effect_id);
+                if let res @ Some(_) = resolve_effects_base(self, effect_id) {
+                    return res;
+                }
+                if !use_legacy
+                    && !self.effects_cache.has_dream()
+                    && self.effects_cache.default_archive.is_none()
+                {
+                    self.request_stock_patch(StockPatchSlot::ModernEffects);
+                }
+            }
+            if !self.effectse_cache.has_dream() {
+                if use_legacy && self.effectse_cache.legacy_archive.is_none() {
+                    self.request_stock_patch(StockPatchSlot::LegacyEffectse);
+                } else if !use_legacy && self.effectse_cache.default_archive.is_none() {
+                    self.request_stock_patch(StockPatchSlot::ModernEffectse);
+                }
             }
             return None;
         }
-        resolve_effects_base(self, effect_id)
+        let res = resolve_effects_base(self, effect_id);
+        if res.is_none() && !self.effects_cache.has_dream() {
+            if use_legacy && self.effects_cache.legacy_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::LegacyEffects);
+            } else if !use_legacy && self.effects_cache.default_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::ModernEffects);
+            }
+        }
+        res
     }
 
     fn resolve_junction_sprite(
@@ -4835,18 +5830,25 @@ impl FurcadiaApp {
         }
         let use_legacy = !self.world.is_modern;
         // Dream wall_1.fox / wall_2.fox suppresses junction.fox for that group (`ps.iv`).
-        if self
-            .wall_caches
-            .get(&(group_or + 1))
-            .is_some_and(|c| c.has_dream() || c.default_archive.is_some())
-        {
+        if self.wall_caches.get(&(group_or + 1)).is_some_and(|c| {
+            c.has_dream() || c.default_archive.is_some() || c.legacy_archive.is_some()
+        }) {
             return None;
         }
         let obj_id = (15 * group_or + mask as usize) as u16;
         let is_fshx = self.junction_cache.active_is_fshx_or_fsh(use_legacy);
         let dir = if is_fshx { 0 } else { 7 };
-        self.junction_cache
-            .get_or_load_shape_mode(ctx, &self.palette, obj_id, dir, use_legacy)
+        let res = self
+            .junction_cache
+            .get_or_load_shape_mode(ctx, &self.palette, obj_id, dir, use_legacy);
+        if res.is_none() && !self.junction_cache.has_dream() {
+            if use_legacy && self.junction_cache.legacy_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::LegacyJunction);
+            } else if !use_legacy && self.junction_cache.default_archive.is_none() {
+                self.request_stock_patch(StockPatchSlot::ModernJunction);
+            }
+        }
+        res
     }
 
     fn resolve_wall_edge_sprite(
@@ -4869,10 +5871,9 @@ impl FurcadiaApp {
         };
 
         let use_legacy = !self.world.is_modern;
-        let has_tex_file = self
-            .wall_caches
-            .get(&(tex + 1))
-            .is_some_and(|c| c.has_dream() || c.default_archive.is_some());
+        let has_tex_file = self.wall_caches.get(&(tex + 1)).is_some_and(|c| {
+            c.has_dream() || c.default_archive.is_some() || c.legacy_archive.is_some()
+        });
 
         if tex < 2 && !has_tex_file {
             if obj == 8 {
@@ -4886,45 +5887,120 @@ impl FurcadiaApp {
                 } else {
                     7
                 };
-                return self
-                    .junction_cache
-                    .get_or_load_shape_mode(ctx, &self.palette, junc_obj, jdir, use_legacy);
+                let res = self.junction_cache.get_or_load_shape_mode(
+                    ctx,
+                    &self.palette,
+                    junc_obj,
+                    jdir,
+                    use_legacy,
+                );
+                if res.is_none() && !self.junction_cache.has_dream() {
+                    if use_legacy && self.junction_cache.legacy_archive.is_none() {
+                        self.request_stock_patch(StockPatchSlot::LegacyJunction);
+                    } else if !use_legacy && self.junction_cache.default_archive.is_none() {
+                        self.request_stock_patch(StockPatchSlot::ModernJunction);
+                    }
+                }
+                return res;
             }
-            let cache = self.wall_caches.get_mut(&0)?;
+            let (res, missing_base) = {
+                let Some(cache) = self.wall_caches.get_mut(&0) else {
+                    self.request_stock_patch(if use_legacy {
+                        StockPatchSlot::LegacyWall(0)
+                    } else {
+                        StockPatchSlot::ModernWall(0)
+                    });
+                    return None;
+                };
+                let is_paired = cache.active_uses_paired_wall_ids(use_legacy);
+                let side_off = if dir == 9 { 1 } else { 0 };
+                let (obj_id, lookup_dir) = if is_paired {
+                    (16 * tex as u16 + 2 * obj + side_off, 0)
+                } else {
+                    (8 * tex as u16 + obj, dir)
+                };
+                if cache.has_dream() {
+                    (
+                        cache.get_or_load_dream_shape(ctx, &self.palette, obj_id, lookup_dir),
+                        false,
+                    )
+                } else {
+                    let loaded = cache.get_or_load_shape_mode(
+                        ctx,
+                        &self.palette,
+                        obj_id,
+                        lookup_dir,
+                        use_legacy,
+                    );
+                    let need_base = loaded.is_none()
+                        && if use_legacy {
+                            cache.legacy_archive.is_none()
+                        } else {
+                            cache.default_archive.is_none()
+                        };
+                    (loaded, need_base)
+                }
+            };
+            if missing_base {
+                self.request_stock_patch(if use_legacy {
+                    StockPatchSlot::LegacyWall(0)
+                } else {
+                    StockPatchSlot::ModernWall(0)
+                });
+            }
+            return res;
+        }
+
+        let file_key = tex + 1;
+        let (res, missing_base) = {
+            let Some(cache) = self.wall_caches.get_mut(&file_key) else {
+                if (3..=7).contains(&file_key) {
+                    self.request_stock_patch(if use_legacy {
+                        StockPatchSlot::LegacyWall(file_key)
+                    } else {
+                        StockPatchSlot::ModernWall(file_key)
+                    });
+                }
+                return None;
+            };
             let is_paired = cache.active_uses_paired_wall_ids(use_legacy);
             let side_off = if dir == 9 { 1 } else { 0 };
             let (obj_id, lookup_dir) = if is_paired {
-                (16 * tex as u16 + 2 * obj + side_off, 0)
+                (2 * obj + side_off, 0)
             } else {
-                (8 * tex as u16 + obj, dir)
+                (obj, dir)
             };
-            return if cache.has_dream() {
-                cache.get_or_load_dream_shape(ctx, &self.palette, obj_id, lookup_dir)
+            if cache.has_dream() {
+                (
+                    cache.get_or_load_dream_shape(ctx, &self.palette, obj_id, lookup_dir),
+                    false,
+                )
             } else {
-                cache.get_or_load_shape_mode(
+                let loaded = cache.get_or_load_shape_mode(
                     ctx,
                     &self.palette,
                     obj_id,
                     lookup_dir,
                     use_legacy,
-                )
-            };
-        }
-
-        let file_key = tex + 1;
-        let cache = self.wall_caches.get_mut(&file_key)?;
-        let is_paired = cache.active_uses_paired_wall_ids(use_legacy);
-        let side_off = if dir == 9 { 1 } else { 0 };
-        let (obj_id, lookup_dir) = if is_paired {
-            (2 * obj + side_off, 0)
-        } else {
-            (obj, dir)
+                );
+                let need_base = loaded.is_none()
+                    && (3..=7).contains(&file_key)
+                    && if use_legacy {
+                        cache.legacy_archive.is_none()
+                    } else {
+                        cache.default_archive.is_none()
+                    };
+                (loaded, need_base)
+            }
         };
-        if cache.has_dream() {
-            cache.get_or_load_dream_shape(ctx, &self.palette, obj_id, lookup_dir)
-        } else {
-            cache.get_or_load_shape_mode(ctx, &self.palette, obj_id, lookup_dir, use_legacy)
+        if missing_base {
+            self.request_stock_patch(if use_legacy {
+                StockPatchSlot::LegacyWall(file_key)
+            } else {
+                StockPatchSlot::ModernWall(file_key)
+            });
         }
+        res
     }
 
     fn handle_net_events(&mut self, ctx: &egui::Context) {
@@ -5090,6 +6166,7 @@ impl FurcadiaApp {
                             if prev_modern {
                                 self.world.is_modern = true;
                             }
+                            self.ensure_stock_patches_for_current_map();
                             self.cam_offset = Vec2::ZERO;
                             self.push_system_line(
                                 "success",
@@ -5125,9 +6202,13 @@ impl FurcadiaApp {
                             if prev_modern {
                                 self.world.is_modern = true;
                             }
+                            self.ensure_stock_patches_for_current_map();
                         }
                     }
                     self.send_pending_vascodagama();
+                }
+                NetToUi::StockPatchDownloaded { slot, archive } => {
+                    self.apply_stock_patch_downloaded(slot, archive);
                 }
                 NetToUi::SpeciesDownloaded { file_id, path } => {
                     if let Some(p) = path {
@@ -6540,17 +7621,45 @@ impl FurcadiaApp {
                 return;
             }
 
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "macos")]
+            {
+                let _ = tx.send(UpdateInstallMsg::OpenDmg(dest_path));
+                ctx_clone.request_repaint();
+                return;
+            }
+
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             {
                 let _ = tx.send(UpdateInstallMsg::Installing);
                 ctx_clone.request_repaint();
 
                 let is_arch = filename.ends_with(".pkg.tar.zst");
+                let is_rpm = filename.ends_with(".rpm");
                 let is_deb = filename.ends_with(".deb");
                 let install_res = if is_arch {
                     std::process::Command::new("pkexec")
                         .args(["pacman", "-U", "--noconfirm", &dest_str])
                         .output()
+                } else if is_rpm {
+                    if std::path::Path::new("/usr/bin/dnf").exists() {
+                        std::process::Command::new("pkexec")
+                            .args(["dnf", "install", "-y", &dest_str])
+                            .output()
+                    } else if std::path::Path::new("/usr/bin/zypper").exists() {
+                        std::process::Command::new("pkexec")
+                            .args([
+                                "zypper",
+                                "--non-interactive",
+                                "install",
+                                "--allow-unsigned-rpm",
+                                &dest_str,
+                            ])
+                            .output()
+                    } else {
+                        std::process::Command::new("pkexec")
+                            .args(["rpm", "-Uvh", &dest_str])
+                            .output()
+                    }
                 } else if is_deb {
                     std::process::Command::new("pkexec")
                         .args(["apt-get", "install", "-y", &dest_str])
@@ -6613,15 +7722,33 @@ impl FurcadiaApp {
         };
         if let Some(m) = msg {
             match m {
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                 UpdateInstallMsg::Installing => {
                     self.update_install_state = UpdateInstallState::Installing;
                 }
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                 UpdateInstallMsg::Installed => {
                     self.update_install_rx = None;
                     self.update_install_state = UpdateInstallState::Installed;
                     self.update_status = Some("Update installed! Restart to apply.".to_owned());
+                }
+                #[cfg(target_os = "macos")]
+                UpdateInstallMsg::OpenDmg(path) => {
+                    self.update_install_rx = None;
+                    match std::process::Command::new("open").arg(&path).spawn() {
+                        Ok(_) => {
+                            self.update_install_state = UpdateInstallState::Installed;
+                            self.update_status = Some(
+                                "Opened disk image — drag Furcadia Native Client to Applications and restart."
+                                    .to_owned(),
+                            );
+                        }
+                        Err(e) => {
+                            self.update_install_state = UpdateInstallState::Failed(format!(
+                                "Could not open disk image: {e}"
+                            ));
+                        }
+                    }
                 }
                 #[cfg(target_os = "windows")]
                 UpdateInstallMsg::LaunchInstallerAndExit(path) => {
@@ -7456,7 +8583,10 @@ impl FurcadiaApp {
             if self.cache_usage.is_none() {
                 self.refresh_cache_usage();
             }
-            if let Some(((sf, sb), (df, db))) = self.cache_usage {
+            if let Some(usage) = self.cache_usage {
+                let (sf, sb) = usage.species;
+                let (df, db) = usage.dreams;
+                let (pf, pb) = usage.patches;
                 ui.label(
                     RichText::new(format!(
                         "Avatars, portraits & images: {sf} file(s) ({})",
@@ -7469,6 +8599,14 @@ impl FurcadiaApp {
                     RichText::new(format!("Dream packages: {df} file(s) ({})", format_bytes(db)))
                         .size(11.5)
                         .color(Color32::LIGHT_GRAY),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "Stock game patches: {pf} file(s) ({})",
+                        format_bytes(pb)
+                    ))
+                    .size(11.5)
+                    .color(Color32::LIGHT_GRAY),
                 );
             }
             ui.horizontal_wrapped(|ui| {
@@ -7494,14 +8632,16 @@ impl FurcadiaApp {
                         let _ = std::fs::create_dir_all(&dir);
                         #[cfg(target_os = "windows")]
                         let _ = furcadia_client::sys::command("explorer").arg(&dir).spawn();
-                        #[cfg(not(target_os = "windows"))]
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").arg(&dir).spawn();
+                        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                         let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
                     }
                 }
             });
             ui.label(
                 RichText::new(
-                    "Deletes downloaded species, custom portraits, chat images, and dream packages so they download fresh. Your settings, logs, and imported Windows Furcadia assets are kept.",
+                    "Deletes downloaded species, custom portraits, chat images, dream packages, and stock game patches so they download fresh. Your settings, logs, and imported Windows Furcadia assets are kept.",
                 )
                 .size(11.0)
                 .color(Color32::GRAY),
@@ -7547,7 +8687,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             let _ = std::fs::create_dir_all(&dir);
                             #[cfg(target_os = "windows")]
                             let _ = furcadia_client::sys::command("explorer").arg(&dir).spawn();
-                            #[cfg(not(target_os = "windows"))]
+                            #[cfg(target_os = "macos")]
+                            let _ = std::process::Command::new("open").arg(&dir).spawn();
+                            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                             let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
                         }
                     }
@@ -10161,10 +11303,12 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
             self.push_system_line("emit", "Sound system initialized.");
         }
         if reload_patches {
+            self.pending_stock_patch_downloads.clear();
             if let Some(dir) = self.current_dream_dir.clone() {
                 self.load_dream_dir(&dir);
                 self.push_system_line("emit", "Reloaded dream patches.");
             }
+            self.ensure_stock_patches_for_current_map();
         }
         if open_last_link {
             let last_url = self.chat_log.iter().rev().find_map(|line| {
@@ -16049,6 +17193,70 @@ fn network_worker(rx: Receiver<UiToNet>, tx: Sender<NetToUi>, ctx: egui::Context
                         dl_ctx.request_repaint();
                     });
                 }
+                UiToNet::DownloadStockPatch { slot } => {
+                    let dl_tx = tx.clone();
+                    let dl_ctx = ctx.clone();
+                    thread::spawn(move || {
+                        let subdir = slot.subdir();
+                        let fname = slot.filename();
+                        let archive = AssetLocator::stock_patch_cache_path(subdir, &fname)
+                            .and_then(|dest_path| {
+                                if dest_path.is_file() {
+                                    if let Ok(arc) = FoxArchive::load(&dest_path) {
+                                        return Some(Box::new(arc));
+                                    }
+                                }
+                                let parent = dest_path.parent()?;
+                                std::fs::create_dir_all(parent).ok()?;
+                                let suffix = format!("{:?}", std::thread::current().id())
+                                    .chars()
+                                    .filter(|c| c.is_ascii_alphanumeric())
+                                    .collect::<String>();
+                                let tmp_path = parent.join(format!("{fname}.{suffix}.tmp"));
+                                let _ = std::fs::remove_file(&tmp_path);
+                                let url = AssetLocator::stock_patch_url(subdir, &fname);
+                                let curl_ok = furcadia_client::sys::command("curl")
+                                    .args([
+                                        "-fsSL",
+                                        "--proto",
+                                        "=https",
+                                        "--proto-redir",
+                                        "=https",
+                                        "--max-filesize",
+                                        "67108864",
+                                        "--connect-timeout",
+                                        "15",
+                                        "--speed-time",
+                                        "30",
+                                        "--speed-limit",
+                                        "512",
+                                        "--max-time",
+                                        "300",
+                                        "-o",
+                                    ])
+                                    .arg(&tmp_path)
+                                    .arg("--")
+                                    .arg(&url)
+                                    .output()
+                                    .is_ok_and(|o| o.status.success());
+                                if !curl_ok || !tmp_path.is_file() {
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    return None;
+                                }
+                                let Ok(arc) = FoxArchive::load(&tmp_path) else {
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    return None;
+                                };
+                                if replace_file_atomically(&tmp_path, &dest_path).is_err() {
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    return None;
+                                }
+                                Some(Box::new(arc))
+                            });
+                        let _ = dl_tx.send(NetToUi::StockPatchDownloaded { slot, archive });
+                        dl_ctx.request_repaint();
+                    });
+                }
                 UiToNet::DownloadSpecies {
                     file_id,
                     server_code,
@@ -17054,6 +18262,10 @@ mod tests {
             "html_url": "https://github.com/morganlowe/native-furcadia/releases/tag/v1.0.3",
             "assets": [
                 {"browser_download_url": "https://github.com/morganlowe/native-furcadia/releases/download/v1.0.3/FurcadiaNative-Setup-1.0.3-x86_64.exe"},
+                {"browser_download_url": "https://github.com/morganlowe/native-furcadia/releases/download/v1.0.3/FurcadiaNative-1.0.3-macos-arm64.dmg"},
+                {"browser_download_url": "https://github.com/morganlowe/native-furcadia/releases/download/v1.0.3/furcadia-native-debug-1.0.3-1-x86_64.pkg.tar.zst"},
+                {"browser_download_url": "https://github.com/morganlowe/native-furcadia/releases/download/v1.0.3/furcadia-native-1.0.3-1-x86_64.pkg.tar.zst"},
+                {"browser_download_url": "https://github.com/morganlowe/native-furcadia/releases/download/v1.0.3/furcadia-native-1.0.3-1.x86_64.rpm"},
                 {"browser_download_url": "https://github.com/morganlowe/native-furcadia/releases/download/v1.0.3/furcadia-native_1.0.3_amd64.deb"}
             ]
         }"#;
@@ -17064,6 +18276,13 @@ mod tests {
             info.html_url,
             "https://github.com/morganlowe/native-furcadia/releases/tag/v1.0.3"
         );
+        assert!(
+            info.asset_url
+                .as_deref()
+                .is_some_and(|u| !u.contains("-debug-")),
+            "expected matching non-debug release asset URL on host platform, got {:?}",
+            info.asset_url
+        );
         assert_eq!(
             update_download_filename("https://example.com/releases/FurcadiaNative-Setup-1.0.3-x86_64.exe?dl=1"),
             "FurcadiaNative-Setup-1.0.3-x86_64.exe"
@@ -17071,6 +18290,29 @@ mod tests {
         assert_eq!(
             update_download_filename("https://example.com/furcadia-native_1.0.3_amd64.deb"),
             "furcadia-native_1.0.3_amd64.deb"
+        );
+    }
+
+    #[test]
+    fn select_linux_asset_url_matches_arch_rpm_and_deb() {
+        let urls = vec![
+            "https://example.com/furcadia-native-debug-2.2.0-1-x86_64.pkg.tar.zst".to_owned(),
+            "https://example.com/furcadia-native-2.2.0-1-x86_64.pkg.tar.zst".to_owned(),
+            "https://example.com/furcadia-native-2.2.0-1.x86_64.rpm".to_owned(),
+            "https://example.com/furcadia-native_2.2.0_amd64.deb".to_owned(),
+            "https://example.com/FurcadiaNative-2.2.0-macos-arm64.dmg".to_owned(),
+        ];
+        assert_eq!(
+            select_linux_asset_url(&urls, true, false).as_deref(),
+            Some("https://example.com/furcadia-native-2.2.0-1-x86_64.pkg.tar.zst")
+        );
+        assert_eq!(
+            select_linux_asset_url(&urls, false, true).as_deref(),
+            Some("https://example.com/furcadia-native-2.2.0-1.x86_64.rpm")
+        );
+        assert_eq!(
+            select_linux_asset_url(&urls, false, false).as_deref(),
+            Some("https://example.com/furcadia-native_2.2.0_amd64.deb")
         );
     }
 
@@ -17643,5 +18885,99 @@ mod tests {
         let headers = "HTTP/1.1 302 Found\r\nContent-Length: 0\r\nLocation: http://apollo.furcadia.com/dreams/pmallegria.zip\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 20786286\r\nContent-Type: application/octet-stream\r\n\r\n";
         assert_eq!(parse_http_content_length(headers), Some(20_786_286));
         assert_eq!(parse_http_content_length("HTTP/1.1 200 OK\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn stock_patch_slot_maps_subdirs_filenames_and_validity() {
+        let cases = [
+            (StockPatchSlot::ModernFloors, "modern", "floors.fox", false, true),
+            (StockPatchSlot::LegacyFloors, "legacy", "floors.fox", true, true),
+            (StockPatchSlot::LegacyFloors2, "legacy", "floors2.fox", true, true),
+            (StockPatchSlot::ModernFloore, "modern", "floore.fox", false, true),
+            (StockPatchSlot::LegacyFloore, "legacy", "floore.fox", true, true),
+            (StockPatchSlot::ModernItems, "modern", "items.fox", false, true),
+            (StockPatchSlot::LegacyItem, "legacy", "item.fox", true, true),
+            (StockPatchSlot::LegacyItem2, "legacy", "item2.fox", true, true),
+            (StockPatchSlot::LegacyItem3, "legacy", "item3.fox", true, true),
+            (StockPatchSlot::LegacyItem4, "legacy", "item4.fox", true, true),
+            (StockPatchSlot::ModernIteme, "modern", "iteme.fox", false, true),
+            (StockPatchSlot::LegacyIteme, "legacy", "iteme.fox", true, true),
+            (StockPatchSlot::ModernPortals, "modern", "portals.fox", false, true),
+            (StockPatchSlot::ModernPortalse, "modern", "portalse.fox", false, true),
+            (StockPatchSlot::ModernEffects, "modern", "effects.fox", false, true),
+            (StockPatchSlot::LegacyEffects, "legacy", "effects.fox", true, true),
+            (StockPatchSlot::ModernEffectse, "modern", "effectse.fox", false, true),
+            (StockPatchSlot::LegacyEffectse, "legacy", "effectse.fox", true, true),
+            (StockPatchSlot::ModernJunction, "modern", "junction.fox", false, true),
+            (StockPatchSlot::LegacyJunction, "legacy", "junction.fox", true, true),
+            (StockPatchSlot::ModernWall(0), "modern", "wall.fox", false, true),
+            (StockPatchSlot::LegacyWall(0), "legacy", "wall.fox", true, true),
+            (StockPatchSlot::ModernWall(3), "modern", "wall_3.fox", false, true),
+            (StockPatchSlot::LegacyWall(7), "legacy", "wall_7.fox", true, true),
+            (StockPatchSlot::ModernWall(1), "modern", "wall_1.fox", false, false),
+            (StockPatchSlot::LegacyWall(2), "legacy", "wall_2.fox", true, false),
+            (StockPatchSlot::ModernWall(8), "modern", "wall_8.fox", false, false),
+        ];
+        for (slot, expected_subdir, expected_file, expected_legacy, expected_valid) in cases {
+            assert_eq!(slot.subdir(), expected_subdir, "subdir for {slot:?}");
+            assert_eq!(slot.filename(), expected_file, "filename for {slot:?}");
+            assert_eq!(slot.is_legacy(), expected_legacy, "is_legacy for {slot:?}");
+            assert_eq!(slot.is_valid(), expected_valid, "is_valid for {slot:?}");
+        }
+    }
+
+    #[test]
+    fn fox_sprite_cache_base_setters_and_clear_preserve_dream_archive() {
+        fn synth_fsh(w: u8, h: u8) -> FoxArchive {
+            let pix_len = (w as usize) * (h as usize);
+            let chunk_size = (4 + pix_len) as u16;
+            let mut raw = Vec::new();
+            raw.extend_from_slice(&1u16.to_le_bytes());
+            raw.extend_from_slice(&chunk_size.to_le_bytes());
+            raw.push(w);
+            raw.push(h);
+            raw.push(0);
+            raw.push(0);
+            raw.extend(std::iter::repeat_n(1u8, pix_len));
+            FoxArchive::from_bytes(raw).expect("synthetic fsh should parse")
+        }
+
+        let mut cache = FoxSpriteCache {
+            default_archive: None,
+            legacy_archive: None,
+            dream_archive: Some(synth_fsh(2, 2)),
+            shape_textures: HashMap::from([((0, 0, true), None)]),
+            image_textures: HashMap::new(),
+            avatar_textures: HashMap::new(),
+            prefix: "test".to_owned(),
+        };
+
+        cache.set_legacy_archive(synth_fsh(3, 3));
+        assert!(cache.shape_textures.is_empty());
+        assert_eq!(
+            cache.dream_archive.as_ref().map(|a| (a.images[0].width, a.images[0].height)),
+            Some((2, 2))
+        );
+        assert_eq!(
+            cache.legacy_archive.as_ref().map(|a| (a.images[0].width, a.images[0].height)),
+            Some((3, 3))
+        );
+
+        cache.shape_textures.insert((1, 0, false), None);
+        cache.set_default_archive(synth_fsh(4, 4));
+        assert!(cache.shape_textures.is_empty());
+        assert!(cache.dream_archive.is_some());
+        assert!(cache.legacy_archive.is_some());
+        assert_eq!(
+            cache.default_archive.as_ref().map(|a| (a.images[0].width, a.images[0].height)),
+            Some((4, 4))
+        );
+
+        cache.shape_textures.insert((2, 0, false), None);
+        cache.clear_base_archives();
+        assert!(cache.shape_textures.is_empty());
+        assert!(cache.default_archive.is_none());
+        assert!(cache.legacy_archive.is_none());
+        assert!(cache.dream_archive.is_some());
     }
 }

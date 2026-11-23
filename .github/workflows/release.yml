@@ -24,7 +24,6 @@ jobs:
       - name: Build .deb package
         run: |
           chmod +x packaging/debian/build-deb.sh
-          sed -i 's/cargo build --release --offline --bins/cargo build --release --locked --bins/' packaging/debian/build-deb.sh
           ./packaging/debian/build-deb.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -39,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Arch build tools
         run: |
-          pacman -Syu --noconfirm base-devel rust cargo git libx11 libxcb libxkbcommon libglvnd curl bzip2 unzip
+          pacman -Syu --noconfirm base-devel rust cargo git libx11 libxcb libxkbcommon libglvnd curl bzip2 unzip openssl pkgconf
       - name: Build Arch package
         run: |
           useradd -m builder
@@ -54,6 +53,24 @@ jobs:
         with:
           name: arch-package
           path: dist/*.pkg.tar.zst
+
+  build-rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install RPM build dependencies
+        run: |
+          dnf install -y rpm-build rust cargo gcc gcc-c++ make perl-core pkgconf-pkg-config libxcb-devel libxkbcommon-devel libX11-devel mesa-libGL-devel
+      - name: Build .rpm package
+        run: |
+          chmod +x packaging/rpm/build-rpm.sh
+          ./packaging/rpm/build-rpm.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: dist/*.rpm
 
   build-windows:
     runs-on: windows-latest
@@ -75,8 +92,24 @@ jobs:
           name: windows-installer
           path: dist/FurcadiaNative-Setup-*.exe
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test --all-targets
+      - name: Build macOS .dmg
+        run: |
+          chmod +x packaging/macos/build-dmg.sh
+          ./packaging/macos/build-dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/*.dmg
+
   release:
-    needs: [build-deb, build-arch, build-windows]
+    needs: [build-deb, build-arch, build-rpm, build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -87,83 +120,145 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
-          name: "Furcadia Native Client v2.1.2 — Character Picker Custom Portraits & Persistent Portrait Cache"
+          make_latest: true
+          name: "Furcadia Native Client v2.2.0 — Automatic Stock Patch Downloads, Legacy Floors, RPM & macOS"
           body: |
-            ## Furcadia Native Client v2.1.2 — Character Picker Custom Portraits & Persistent Portrait Cache
+            ## Furcadia Native Client v2.2.0 — Automatic Stock Patch Downloads, Legacy Floors, RPM & macOS
 
-            A native, lightweight Rust client for Furcadia supporting Linux and Windows.
+            A fast, standalone native Rust client for Furcadia supporting **Linux**, **Windows**, and **macOS** — no Wine or pre-existing Furcadia installation required.
 
             ### Highlights
             - Fast native GUI (`furc-gui`) built with `eframe` / `egui` and CLI (`furc-cli`)
-            - Modern dream rendering, remappable portraits, desctags, and avatar/digo support
-            - Multi-character tabs, player badges in chat, and drag-to-reorder player/whisper tabs
-            - Pounce friend watchlist, saved dreams, chat logging, and Windows Furcadia asset import
-            - Linux system tray with alert blinking & unread badge, plus integrated desktop launcher icons
+            - Standalone first-launch setup: automatically downloads and caches stock modern & legacy `.fox` patches, species, dynamic Digo avatars, portraits, and dreams on demand
+            - Modern (`V01.50`) and Legacy (`V01.40`) dream rendering, remappable custom portraits, desctags, inline smileys, and Windows Furcadia data import
+            - Multi-character reorderable tabs, per-character cookie counts, Pounce friend watchlist, Saved Dreams, shared/per-device logs, and cloud folder sync (Nextcloud, Drive, Dropbox)
+            - Native Linux desktop & system tray alert blinking (`StatusNotifierItem`), Windows installer, Fedora/RHEL/openSUSE RPM packages, and Apple Silicon macOS `.dmg` builds
 
-            ### What's New in v2.1.2
-            - **Character Picker Custom Portrait Loading & Fallback Downloads**:
-              - Triggered on-demand `UiToNet::DownloadPortrait` requests from `custom_portrait_texture` whenever a resolved custom portrait ID is not yet cached in memory, and added fallback downloads from the file server if cached `.fprt` files fail decoding.
-            - **Persistent Portrait Cache (`config.ini`) & `last_port` Filtering**:
-              - Added `character_portraits` (`ClientConfig::character_portraits`) persistence across launches with shared-settings merging, and filtered `clogin.php` `last_port > 16` so `1..=16` portrait slot indices are ignored while `]&`-resolved `pp<id>` file IDs take precedence.
-            - **Silent Self-`glook` & Accurate Portrait Directive Attribution**:
-              - Sent a silent self-`glook` on `ServerMessage::CharacterIdentity` and after clicking **Change Portrait** (`portrchng`) without popping up the `LookedPlayerCard`, matched `]&` portrait directives against `account_info.characters` IDs before falling back to `glook` targets, and wired background-tab portrait directives and downloads in `poll_bg_sessions`.
+            ### What's New in v2.2.0
+            - **Automatic On-Demand Stock Patch Downloads & Caching**:
+              - Fetches missing modern (`modern/*.fox`) and legacy (`legacy/*.fox`) stock archives asynchronously over HTTPS from `https://play.furcadia.com/` into the local patch cache (`~/.local/share/furcadia-client/patches/{modern|legacy}/` on Linux and macOS, or `%LOCALAPPDATA%\furcadia-client\patches\` on Windows).
+              - Validates downloaded `.fox` archives with `FoxArchive::load` before atomically installing them and automatically hot-swaps them into active floor, item, wall, and effect caches.
+              - Rejected empty directory skeletons in `AssetLocator::discover` so partial/empty folders do not block fallback to downloaded stock patches.
+            - **Legacy Dream Floor & Tile Rendering Fixes**:
+              - Fixed missing legacy floor and path tiles (such as path tiles `124..=127` in legacy dreams like `thesleazyferret`) by checking dream patches first and falling back cleanly to `legacy_floors.fox` without dropping dream archives when base patches reload.
+              - Updated **Settings → Cached Downloads** to inspect and clear cached stock game patches alongside downloaded species, portraits, chat images, and dreams.
+            - **Fedora / RHEL / openSUSE RPM Support & In-App Updater**:
+              - Added [`packaging/rpm/furcadia-native.spec`](https://github.com/${{ github.repository }}/blob/v2.2.0/packaging/rpm/furcadia-native.spec), [`packaging/rpm/build-rpm.sh`](https://github.com/${{ github.repository }}/blob/v2.2.0/packaging/rpm/build-rpm.sh), and a `build-rpm` CI job producing `.rpm` packages.
+              - Updated the in-app GitHub updater (`parse_github_release_json` & `trigger_update_install`) to detect RPM-based distributions and install `.rpm` releases cleanly via `pkexec` (`dnf`, `zypper`, or `rpm`).
+            - **macOS `.dmg` Packaging & Native Integration**:
+              - Added Apple Silicon (`arm64`) macOS builds via [`packaging/macos/build-dmg.sh`](https://github.com/${{ github.repository }}/blob/v2.2.0/packaging/macos/build-dmg.sh) producing `FurcadiaNative-2.2.0-macos-arm64.dmg` with `Furcadia Native Client.app` (bundling `furc-gui`, `furc-cli`, and `.icns` icon).
+              - Added native macOS support for sound effects (`afplay`), desktop notifications & folder pickers (`osascript`), opening cache/logs folders (`open`), and downloading/opening `.dmg` updates in the updater.
+            - **Arch & Debian Packaging Fixes**:
+              - Added `options=('!debug')` to `packaging/arch/PKGBUILD` so releases no longer ship a stray `-debug-` `.pkg.tar.zst` asset.
+              - Switched `packaging/debian/build-deb.sh` from `--offline` to `--locked` and included `/usr/share/doc/furcadia-native/copyright`.
 
-            ### What's New in v2.1.1
-            - **In-Game Dream Downloading Overlay & Live Progress**:
-              - Added a translucent Furcadia-themed overlay card centered over the map viewport while a dream downloads and extracts, showing the dream name, current stage (`Connecting to dream server...` → `Downloading dream package...` → `Extracting dream assets...`), a determinate progress bar from HTTP `Content-Length` (or animated bar when omitted), byte counters (`received / total (%)`), and live sidebar `Dream: <name> (DL xx%)` status.
-            - **Large Dream Download Timeout Fix**:
-              - Replaced the fixed 25-second `curl` cutoff with streaming progress (`--connect-timeout 15 --speed-time 30 --speed-limit 512 --max-time 300`) so large multi-megabyte dream packages (e.g., `pmallegria`, `pmfurn`) complete reliably on slower connections while still aborting on genuine stalls.
+            <details>
+            <summary><strong>Previous Releases Recap (v2.1.x &amp; Milestone 2.0)</strong></summary>
 
-            ### What's New in v2.1.0
-            - **Custom Portrait Decoding & Classic 8-Bit Remapping Fixes**:
-              - **13-Bit LZW Table-Full `CLEAR` Support**: Fixed `decompress_furcadia_lzw` for real 95×95 `FPRT10`/`FPRT01` custom portraits whose LZW dictionary reaches 4095 entries and emits the table-full `CLEAR` code (`0x100`) at 13 bits before resetting to 9 bits.
-              - **Classic 8-Bit Portrait Recoloring**: Added `Palette::with_classic_remap_markers` to translate Furcadia's classic 8-bit remappable palette ranges (Fur, Markings, Hair, Vest, Bracers, Cape, Boots, Trousers, Eyes, and Badge) into FOX5 remap markers so 8-bit `FSH`/`FSHX` portraits Inside `FPRT01` and `FPRT20` properly recolor to match each character's color code while keeping static palette indices intact.
-              - **Persistent Portrait ID Mapping Across Dream Transfers**: Preserved `player_portrait_ids` across dream changes (`clear_dream_assets`) so players' custom portraits continue displaying without requiring a new look/spawn packet after entering a dream.
-            - **In-Game Reconnect & Dream Entry Reliability**:
-              - **Clean Reconnect State Reset**: Clicking **Reconnect** from the in-game disconnect banner now tracks an explicit `reconnecting` state (displaying live connection stage progress in the banner), clears stale avatars and pending dream state (`pending_dream_name`, `pending_dream_modern`, `world.avatars`, `world.map_name`), and logs a `Reconnecting as <Name>...` status line.
-              - **Guaranteed `vascodagama` Handshake Timer**: Scheduled automatic 50ms UI repaints while `pending_vascodagama` or `reconnecting` is active so the post-login `vascodagama` dream-entry command fires reliably after 500ms even when the window is idle or unfocused.
-            - **Chat Scroll Pinning Across Banner & Layout Shifts**:
-              - Added explicit `chat_pinned_to_bottom` and `chat_scroll_to_bottom` tracking so the chat log and whisper tabs stay pinned to the newest line when the disconnect/reconnect banner appears or disappears, when the multi-line input box expands, or when switching tabs and sending messages—while respecting manual upward scrolling.
-            - **Multibyte Chat Line Safety**:
-              - Replaced byte-index slicing in `rewrite_pounce_add_message` with safe `.get(..prefix.len())` checks to prevent panics when multi-byte UTF-8 characters (such as full-width symbols) straddle the prefix boundary.
+            - **v2.1.2**: Character Picker custom portrait loading & fallback downloads, persistent `character_portraits` cache in `config.ini`, `last_port > 16` filtering, silent self-`glook`, and background-tab portrait directive handling.
+            - **v2.1.1**: In-game translucent dream download overlay with progress bar/ETA/sidebar status and streaming `curl` timeout tuning for large multi-MB dreams.
+            - **v2.1.0**: 13-bit LZW table-full `CLEAR` portrait decoding, classic 8-bit portrait palette remapping, persistent portrait mappings across dreams, clean in-game **Reconnect**, and smart chat scroll pinning.
+            - **v2.0.0**: Bounded GPU/sprite caches, capped chat histories, clean tab thread/socket teardown, decompression bomb limits, atomic `0o600` config creation, and zero-warning Clippy baseline.
 
-            ### Milestone 2.0 General Stability, Security & Open-Source Foundation
-            - **Long-Session Memory, GPU Texture & Thread Leak Fixes**:
-              - Closed character tabs cleanly terminate their `network_worker` thread and close live sockets when dropped.
-              - Bounded GPU texture and sprite caches (`avatar_textures`, `custom_portrait_textures`, `custom_portrait_rgba`, `chat_img_textures`) with automatic eviction and disconnect cleanup.
-              - Capped in-memory chat and whisper tab histories (full history remains persisted to disk logs) and gated/rotated `login_trace.log` behind debug packet logging.
-            - **Security & Privacy Hardening**:
-              - Surfaced a clear GUI/CLI notice when connecting over Furcadia's legacy/unverified TLS handshake.
-              - Hardened `curl` asset/image downloads with `--proto =http,https`, `--proto-redir =http,https`, `--max-filesize`, and `--` argument termination.
-              - Atomic `0o600` config creation on Unix to eliminate the `config.ini` permissions race, plus newline-safe serialization that preserves leading/trailing password whitespace, and dream path sanitization.
-            - **Parser, Decompressor & Protocol Safety**:
-              - Hard decompression byte limits across LZMA (`.fox`), BZip2 (`.rch` / portraits), and Furcadia LZW decoders to prevent decompression bombs.
-              - Checked arithmetic and dimension bounds across `.fox` and `.map` parsers, bounded network line reads in `FurcadiaClient`, multi-address DNS fallback, and 97 passing unit tests with zero Clippy warnings.
+            </details>
 
-            ### Installation
-
-            #### Windows
-            1. Download `FurcadiaNative-Setup-2.1.2-x86_64.exe` from the assets below.
-            2. Run the installer. It installs `furc-gui` and `furc-cli`, adds a **Furcadia Native Client** entry to your Start Menu, and registers an uninstaller in Windows Apps & Features.
-
-            #### Debian / Ubuntu / Linux Mint
-            ```sh
-            sudo apt install ./furcadia-native_2.1.2_amd64.deb
-            ```
-            Or double-click the `.deb` file to install via your graphical package manager.
+            ### Download & Install
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
-            Download the `.pkg.tar.zst` asset and install with:
+            Download `furcadia-native-2.2.0-1-x86_64.pkg.tar.zst` from the assets below and install with:
             ```sh
-            sudo pacman -U furcadia-native-2.1.2-1-x86_64.pkg.tar.zst
+            sudo pacman -U ./furcadia-native-2.2.0-1-x86_64.pkg.tar.zst
             ```
-            Or build from source with `PKGBUILD`:
+
+            #### Debian / Ubuntu / Linux Mint
+            Download `furcadia-native_2.2.0_amd64.deb` from the assets below and install with:
             ```sh
-            git clone https://github.com/morganlowe/native-furcadia.git
-            cd native-furcadia/packaging/arch
+            sudo apt install ./furcadia-native_2.2.0_amd64.deb
+            ```
+            *(Or double-click the `.deb` file to open it in your graphical software installer.)*
+
+            #### Fedora / RHEL / Rocky / AlmaLinux / openSUSE (RPM)
+            Download `furcadia-native-2.2.0-1.*.x86_64.rpm` from the assets below and install with:
+            ```sh
+            # Fedora / RHEL / Rocky / AlmaLinux
+            sudo dnf install ./furcadia-native-2.2.0-1*.x86_64.rpm
+
+            # openSUSE
+            sudo zypper install --allow-unsigned-rpm ./furcadia-native-2.2.0-1*.x86_64.rpm
+            ```
+
+            #### Windows (64-bit)
+            1. Download `FurcadiaNative-Setup-2.2.0-x86_64.exe` from the assets below.
+            2. Run the installer. It installs both `furc-gui` and `furc-cli`, creates a **Furcadia Native Client** Start Menu shortcut, and registers an uninstaller in **Apps & Features**.
+
+            #### macOS (Apple Silicon)
+            1. Download `FurcadiaNative-2.2.0-macos-arm64.dmg` from the assets below and open it.
+            2. Drag **Furcadia Native Client** to **Applications** (the CLI binary `furc-cli` is also bundled inside `Contents/MacOS/`).
+            3. Because the app is ad-hoc signed without an Apple Developer notarization certificate, clear the quarantine attribute before first launch if Gatekeeper blocks it:
+               ```sh
+               xattr -dr com.apple.quarantine "/Applications/Furcadia Native Client.app"
+               ```
+
+            ---
+
+            ### Build from Source & Build Packages
+
+            Install the [stable Rust toolchain](https://www.rust-lang.org/tools/install), then clone the repository:
+            ```sh
+            git clone https://github.com/${{ github.repository }}.git
+            cd ${{ github.event.repository.name }}
+            ```
+
+            <details>
+            <summary><strong>Build Instructions by Platform (Arch, Debian/Ubuntu, Fedora/RPM, Windows, macOS)</strong></summary>
+
+            #### Arch Linux (`makepkg`)
+            ```sh
+            sudo pacman -S --needed base-devel rust git libx11 libxcb libxkbcommon libglvnd curl bzip2 unzip openssl pkgconf
+            cd packaging/arch
             makepkg -si
             ```
+
+            #### Debian / Ubuntu / Linux Mint (`.deb`)
+            ```sh
+            sudo apt-get update
+            sudo apt-get install -y build-essential dpkg-dev pkg-config libssl-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev curl bzip2 unzip
+            ./packaging/debian/build-deb.sh
+            sudo apt install ./dist/furcadia-native_2.2.0_amd64.deb
+            ```
+
+            #### Fedora / RHEL / openSUSE (`.rpm`)
+            ```sh
+            sudo dnf install -y rpm-build gcc gcc-c++ make perl-core pkgconf-pkg-config libxcb-devel libxkbcommon-devel libX11-devel mesa-libGL-devel curl bzip2 unzip
+            ./packaging/rpm/build-rpm.sh
+            sudo dnf install ./dist/furcadia-native-2.2.0-1*.x86_64.rpm
+            ```
+
+            #### Windows (Inno Setup `.exe`)
+            Requires Visual Studio Build Tools (MSVC C++ workload), Rust, and [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+            ```powershell
+            cargo build --release --locked --bins
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\windows\installer.iss
+            # Output: dist\FurcadiaNative-Setup-2.2.0-x86_64.exe
+            ```
+
+            #### macOS (`.dmg`)
+            Requires Xcode Command Line Tools (`xcode-select --install`) and Rust:
+            ```sh
+            ./packaging/macos/build-dmg.sh
+            # Output: dist/FurcadiaNative-2.2.0-macos-$(uname -m).dmg
+            ```
+
+            #### Generic Binary Build (Any OS)
+            ```sh
+            cargo build --release --locked --bins
+            # Outputs: target/release/furc-gui and target/release/furc-cli
+            ```
+
+            </details>
           files: |
             artifacts/debian-package/*.deb
             artifacts/arch-package/*.pkg.tar.zst
+            artifacts/rpm-package/*.rpm
             artifacts/windows-installer/*.exe
+            artifacts/macos-dmg/*.dmg

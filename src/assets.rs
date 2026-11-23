@@ -124,6 +124,36 @@ impl AssetLocator {
         Some(Self::cache_root_dir()?.join("species"))
     }
 
+    /// Returns `~/.local/share/furcadia-client/patches` (or equivalent XDG / Windows AppData dir)
+    /// for cached stock world patches (`modern/` and `legacy/`).
+    pub fn stock_patches_cache_dir() -> Option<PathBuf> {
+        Some(Self::cache_root_dir()?.join("patches"))
+    }
+
+    /// Returns `<stock_patches_cache_dir>/<subdir>/<filename>` (e.g. `patches/legacy/floors.fox`).
+    pub fn stock_patch_cache_path(subdir: &str, filename: &str) -> Option<PathBuf> {
+        Some(Self::stock_patches_cache_dir()?.join(subdir).join(filename))
+    }
+
+    /// Official URL for a stock world patch archive (`modern/<file>` or `legacy/<file>`).
+    pub fn stock_patch_url(subdir: &str, filename: &str) -> String {
+        format!("https://play.furcadia.com/{subdir}/{filename}")
+    }
+
+    fn dir_has_any_file(dir: &Path) -> bool {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| entry.path().is_file())
+    }
+
+    /// Returns true if `dir` looks like a populated Furcadia asset root rather than an empty folder skeleton.
+    pub fn is_populated_assets_root(dir: &Path) -> bool {
+        ["patches/default", "patches/legacy", "maps"]
+            .into_iter()
+            .any(|sub| Self::dir_has_any_file(&dir.join(sub)))
+    }
+
     /// Searches standard workspace-relative, XDG user, and Windows installation paths for Furcadia assets.
     pub fn discover() -> Self {
         let mut candidates = vec![
@@ -148,7 +178,9 @@ impl AssetLocator {
         }
         candidates.push(PathBuf::from(r"C:\Program Files (x86)\Furcadia"));
         candidates.push(PathBuf::from(r"C:\Program Files\Furcadia"));
-        let root = candidates.into_iter().find(|p| p.is_dir());
+        let root = candidates
+            .into_iter()
+            .find(|p| Self::is_populated_assets_root(p));
         Self { root }
     }
 
@@ -184,22 +216,12 @@ impl AssetLocator {
         Palette::load(&path).ok()
     }
 
-    /// Returns the path to a default patch file (e.g. `"floors.fox"`).
-    pub fn default_patch_path(&self, filename: &str) -> Option<PathBuf> {
-        let root = self.root.as_ref()?;
-        let path = root.join("patches/default").join(filename);
-        path.is_file().then_some(path)
-    }
-
-    /// Returns the path to a legacy patch file in `patches/legacy/` (e.g. `"floors.fox"`, `"junction.fsh"`).
-    pub fn legacy_patch_path(&self, filename: &str) -> Option<PathBuf> {
-        let root = self.root.as_ref()?;
-        let dir = root.join("patches/legacy");
+    fn find_patch_in_dir(dir: &Path, filename: &str) -> Option<PathBuf> {
         let exact = dir.join(filename);
         if exact.is_file() {
             return Some(exact);
         }
-        if let Ok(entries) = fs::read_dir(&dir) {
+        if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_file()
@@ -212,6 +234,48 @@ impl AssetLocator {
             }
         }
         None
+    }
+
+    fn default_patch_path_with_stock_dir(
+        &self,
+        filename: &str,
+        stock_patches_dir: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if let Some(root) = self.root.as_ref() {
+            if let Some(p) = Self::find_patch_in_dir(&root.join("patches/default"), filename) {
+                return Some(p);
+            }
+        }
+        let dir = stock_patches_dir?.join("modern");
+        Self::find_patch_in_dir(&dir, filename)
+    }
+
+    fn legacy_patch_path_with_stock_dir(
+        &self,
+        filename: &str,
+        stock_patches_dir: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if let Some(root) = self.root.as_ref() {
+            if let Some(p) = Self::find_patch_in_dir(&root.join("patches/legacy"), filename) {
+                return Some(p);
+            }
+        }
+        let dir = stock_patches_dir?.join("legacy");
+        Self::find_patch_in_dir(&dir, filename)
+    }
+
+    /// Returns the path to a default patch file (e.g. `"floors.fox"`), preferring
+    /// imported/bundled `patches/default/` and falling back to cached `patches/modern/`.
+    pub fn default_patch_path(&self, filename: &str) -> Option<PathBuf> {
+        let stock_dir = Self::stock_patches_cache_dir();
+        self.default_patch_path_with_stock_dir(filename, stock_dir.as_deref())
+    }
+
+    /// Returns the path to a legacy patch file in `patches/legacy/` (e.g. `"floors.fox"`, `"junction.fsh"`),
+    /// falling back to cached `patches/legacy/`.
+    pub fn legacy_patch_path(&self, filename: &str) -> Option<PathBuf> {
+        let stock_dir = Self::stock_patches_cache_dir();
+        self.legacy_patch_path_with_stock_dir(filename, stock_dir.as_deref())
     }
 
     /// Returns `(file_count, total_bytes)` for everything under `dir` (recursive). Missing dir → `(0, 0)`.
@@ -478,5 +542,92 @@ mod tests {
         assert!(common.join("species4.fox").is_file());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn is_populated_assets_root_rejects_empty_skeleton_and_accepts_populated_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "furc_assets_test_root_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("patches/default")).expect("create default skeleton");
+        fs::create_dir_all(root.join("patches/legacy")).expect("create legacy skeleton");
+        fs::create_dir_all(root.join("maps")).expect("create maps skeleton");
+
+        assert!(!AssetLocator::is_populated_assets_root(&root));
+
+        fs::write(root.join("patches/legacy/floors.fox"), b"test").expect("write legacy patch");
+        assert!(AssetLocator::is_populated_assets_root(&root));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stock_patch_url_targets_play_furcadia_host() {
+        assert_eq!(
+            AssetLocator::stock_patch_url("legacy", "floors.fox"),
+            "https://play.furcadia.com/legacy/floors.fox"
+        );
+        assert_eq!(
+            AssetLocator::stock_patch_url("modern", "items.fox"),
+            "https://play.furcadia.com/modern/items.fox"
+        );
+    }
+
+    #[test]
+    fn patch_paths_fall_back_to_stock_cache_dir_when_root_missing_or_partial() {
+        let base = std::env::temp_dir().join(format!(
+            "furc_assets_test_fallback_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let stock_dir = base.join("stock");
+        let root_dir = base.join("imported");
+        fs::create_dir_all(stock_dir.join("modern")).expect("create stock modern");
+        fs::create_dir_all(stock_dir.join("legacy")).expect("create stock legacy");
+        fs::create_dir_all(root_dir.join("patches/default")).expect("create root default");
+        fs::create_dir_all(root_dir.join("patches/legacy")).expect("create root legacy");
+
+        let stock_modern_floors = stock_dir.join("modern/floors.fox");
+        let stock_legacy_floors = stock_dir.join("legacy/floors.fox");
+        let stock_legacy_floors2 = stock_dir.join("legacy/floors2.fox");
+        let stock_legacy_junc = stock_dir.join("legacy/junction.fox");
+        fs::write(&stock_modern_floors, b"stock_mod").expect("write stock modern floors");
+        fs::write(&stock_legacy_floors, b"stock_leg").expect("write stock legacy floors");
+        fs::write(&stock_legacy_floors2, b"stock_leg2").expect("write stock legacy floors2");
+        fs::write(&stock_legacy_junc, b"stock_junc").expect("write stock legacy junc");
+
+        let no_root = AssetLocator { root: None };
+        assert_eq!(
+            no_root.default_patch_path_with_stock_dir("floors.fox", Some(&stock_dir)),
+            Some(stock_modern_floors.clone())
+        );
+        assert_eq!(
+            no_root.legacy_patch_path_with_stock_dir("floors.fox", Some(&stock_dir)),
+            Some(stock_legacy_floors.clone())
+        );
+        assert_eq!(
+            no_root.legacy_patch_path_with_stock_dir("JUNCTION.FOX", Some(&stock_dir)),
+            Some(stock_legacy_junc)
+        );
+
+        let root_modern_floors = root_dir.join("patches/default/floors.fox");
+        fs::write(&root_modern_floors, b"root_mod").expect("write root modern floors");
+        let partial_root = AssetLocator {
+            root: Some(root_dir),
+        };
+        assert_eq!(
+            partial_root.default_patch_path_with_stock_dir("floors.fox", Some(&stock_dir)),
+            Some(root_modern_floors)
+        );
+        assert_eq!(
+            partial_root.legacy_patch_path_with_stock_dir("floors2.fox", Some(&stock_dir)),
+            Some(stock_legacy_floors2)
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

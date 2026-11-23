@@ -1,11 +1,11 @@
 <div align="center">
   <img src="native-icon.png" alt="Furcadia Native Client icon" width="96" />
   <h1>Furcadia Native Client</h1>
-  <p><strong>A fast, standalone native desktop client for exploring Furcadia dreams, trading, roleplaying, and keeping up with the people you know — on Linux and Windows, with no Wine required.</strong></p>
+  <p><strong>A fast, standalone native desktop client for exploring Furcadia dreams, trading, roleplaying, and keeping up with the people you know — on Linux, Windows, and macOS, with no Wine required.</strong></p>
   <p>
     <img src="https://img.shields.io/github/v/release/morganlowe/native-furcadia?label=Version&style=flat-square" alt="Latest release" />
     <img src="https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-blue?style=flat-square" alt="CC BY-NC-SA 4.0 license" />
-    <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey?style=flat-square" alt="Linux and Windows" />
+    <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey?style=flat-square" alt="Linux, Windows, and macOS" />
     <img src="https://img.shields.io/badge/Stack-Rust%20%7C%20egui-orange?style=flat-square&logo=rust&logoColor=white" alt="Built with Rust and egui" />
   </p>
   <p>
@@ -39,14 +39,14 @@
 
 </details>
 
-Furcadia Native Client is an independent, natively compiled Rust client for Furcadia built with `egui`. It runs **standalone out of the box** on both clean Linux and Windows installs — automatically fetching stock species, dynamic Digo avatars, portraits, and dreams without requiring Wine or a pre-existing installation — while still letting you import your existing Windows or Wine Furcadia files whenever you want.
+Furcadia Native Client is an independent, natively compiled Rust client for Furcadia built with `egui`. It runs **standalone out of the box** on clean Linux, Windows, and macOS installs — automatically fetching stock modern and legacy game patches, species, dynamic Digo avatars, portraits, and dreams without requiring Wine or a pre-existing installation — while still letting you import your existing Windows or Wine Furcadia files whenever you want.
 
 Alongside the graphical desktop client (`furc-gui`), the repository provides a script-friendly command-line client (`furc-cli`) and a reusable Rust library (`furcadia_client`) for Furcadia networking, protocol handling, and archive decoding.
 
 ## Why Furcadia Native Client?
 
-- **True native performance & long-session stability**: compiled to a small native Rust executable for Linux and Windows with zero Wine, compatibility layers, or browser bloat — with bounded GPU/sprite caches, capped in-memory chat history, clean tab teardown, and hardened archive/decompression limits for overnight sessions.
-- **Ready on a fresh install**: connects cleanly on first launch and downloads public species, dynamic avatars, portraits, and dream assets automatically.
+- **True native performance & long-session stability**: compiled to a small native Rust executable for Linux, Windows, and macOS with zero Wine, compatibility layers, or browser bloat — with bounded GPU/sprite caches, capped in-memory chat history, clean tab teardown, and hardened archive/decompression limits for overnight sessions.
+- **Ready on a fresh install**: connects cleanly on first launch and downloads public modern/legacy stock patches, species, dynamic avatars, portraits, and dream assets automatically.
 - **Multi-alt power in one window**: keep multiple logged-in characters open simultaneously as reorderable character tabs, complete with per-character cookie counts preserved across tab switches.
 - **Built for daily RP and trading**: includes dedicated **Cookie**, **Gift**, and **Trade** menus right on the player card, inline Furcadia smiley sprites, `[bracketed text]` highlighting, rich text buttons, and a configurable dice roller.
 - **Clean, distraction-free UI**: crisp plain-text and ASCII interface free of emoji clutter, with customizable themes, fonts, sizes, and colors.
@@ -141,15 +141,11 @@ Prebuilt packages are published on the [GitHub Releases page](https://github.com
 
 | Platform | Release asset |
 | --- | --- |
-| Windows 64-bit | `FurcadiaNative-Setup-<version>-x86_64.exe` |
-| Debian, Ubuntu, Linux Mint | `furcadia-native_<version>_amd64.deb` |
 | Arch Linux, CachyOS, Manjaro, EndeavourOS | `furcadia-native-<version>-1-x86_64.pkg.tar.zst` |
-
-On Debian-based distributions, install the downloaded package with:
-
-```sh
-sudo apt install ./furcadia-native_<version>_amd64.deb
-```
+| Debian, Ubuntu, Linux Mint | `furcadia-native_<version>_amd64.deb` |
+| Fedora, RHEL, Rocky, AlmaLinux, openSUSE | `furcadia-native-<version>-1.<dist>.x86_64.rpm` |
+| Windows 64-bit | `FurcadiaNative-Setup-<version>-x86_64.exe` |
+| macOS (Apple Silicon) | `FurcadiaNative-<version>-macos-arm64.dmg` |
 
 On Arch Linux, CachyOS, Manjaro, and EndeavourOS, install the downloaded package with:
 
@@ -157,19 +153,68 @@ On Arch Linux, CachyOS, Manjaro, and EndeavourOS, install the downloaded package
 sudo pacman -U ./furcadia-native-<version>-1-x86_64.pkg.tar.zst
 ```
 
-The Windows installer installs both `furc-gui` and `furc-cli`, creates a Start Menu shortcut, and registers an uninstaller in Windows Apps & Features. Package contents and available platforms can vary by release; check the release notes for the current assets.
+On Debian-based distributions, install the downloaded package with:
 
-## Build from source
+```sh
+sudo apt install ./furcadia-native_<version>_amd64.deb
+```
+
+On RPM-based distributions, install the downloaded package with:
+
+```sh
+# Fedora / RHEL / Rocky / AlmaLinux
+sudo dnf install ./furcadia-native-<version>-1*.x86_64.rpm
+
+# openSUSE
+sudo zypper install --allow-unsigned-rpm ./furcadia-native-<version>-1*.x86_64.rpm
+```
+
+The Windows installer installs both `furc-gui` and `furc-cli`, creates a Start Menu shortcut, and registers an uninstaller in Windows Apps & Features.
+
+On macOS, open the `.dmg` and drag **Furcadia Native Client** to **Applications** (`furc-cli` is also bundled inside `Contents/MacOS/`). Because the app is ad-hoc signed without an Apple Developer notarization certificate, clear the quarantine attribute before first launch if Gatekeeper blocks it:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Furcadia Native Client.app"
+```
+
+## Build from source & build packages
 
 You will need the [stable Rust toolchain](https://www.rust-lang.org/tools/install). Linux builds also need the system development libraries required by `eframe`/`winit` and OpenSSL (`libx11`, `libxcb`, `libxkbcommon`, OpenGL, and `openssl`/`pkg-config` dev packages).
 
 ```sh
 git clone https://github.com/morganlowe/native-furcadia.git
 cd native-furcadia
-cargo build --release --bins
+cargo build --release --locked --bins
 ```
 
 The compiled binaries are written to `target/release/furc-gui` and `target/release/furc-cli`. Launch the graphical client with `./target/release/furc-gui`.
+
+To build native installer packages from source:
+
+- **Arch Linux (`makepkg`)**:
+  ```sh
+  sudo pacman -S --needed base-devel rust git libx11 libxcb libxkbcommon libglvnd curl bzip2 unzip openssl pkgconf
+  cd packaging/arch && makepkg -si
+  ```
+- **Debian / Ubuntu / Linux Mint (`.deb`)**:
+  ```sh
+  sudo apt-get install -y build-essential dpkg-dev pkg-config libssl-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev curl bzip2 unzip
+  ./packaging/debian/build-deb.sh
+  ```
+- **Fedora / RHEL / openSUSE (`.rpm`)**:
+  ```sh
+  sudo dnf install -y rpm-build gcc gcc-c++ make perl-core pkgconf-pkg-config libxcb-devel libxkbcommon-devel libX11-devel mesa-libGL-devel curl bzip2 unzip
+  ./packaging/rpm/build-rpm.sh
+  ```
+- **Windows (Inno Setup `.exe`)** *(requires MSVC C++ Build Tools + Inno Setup 6)*:
+  ```powershell
+  cargo build --release --locked --bins
+  & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\windows\installer.iss
+  ```
+- **macOS (`.dmg`)** *(requires Xcode Command Line Tools)*:
+  ```sh
+  ./packaging/macos/build-dmg.sh
+  ```
 
 ## Command-line client
 
@@ -187,7 +232,7 @@ While connected, type chat directly or use `/wh NAME message`, `/who`, `/onln NA
 
 ## Data and privacy
 
-Local configuration is stored at `~/.config/furcadia-native/config.ini` on Linux (or `%APPDATA%\furcadia-native\config.ini` on Windows). Downloaded caches and logs are also stored locally. The client connects to Furcadia services for login, game sessions, news, and public assets, and to GitHub to check for newer releases; account credentials are used solely to authenticate with Furcadia.
+Local configuration is stored at `~/.config/furcadia-native/config.ini` on Linux/macOS (or `%APPDATA%\furcadia-native\config.ini` on Windows). Downloaded caches and logs are also stored locally. The client connects to Furcadia services for login, game sessions, news, and public assets, and to GitHub to check for newer releases; account credentials are used solely to authenticate with Furcadia.
 
 - On Unix-like systems, `config.ini` is created atomically with owner-only (`0600`) permissions. Avoid sharing your configuration file because it may contain saved credentials.
 - External asset and dream downloads are restricted to HTTP/HTTPS with size caps, and dream/portrait archives enforce strict decompression and dimension bounds.
@@ -195,7 +240,7 @@ Local configuration is stored at `~/.config/furcadia-native/config.ini` on Linux
 
 ## Project status
 
-Release 2.1.2 builds on the Milestone 2.0 stability, security, and open-source foundation (bounded GPU/sprite caches, capped in-memory chat history, clean character-tab socket/thread teardown, hardened decompression and download limits, comprehensive rustdoc documentation, and a zero-warning Clippy baseline), 2.1.0 portrait/reconnect/scroll polish, and 2.1.1 dream download progress with custom portrait loading and persistence in the Character Picker across 100 passing unit tests.
+Release 2.2.0 builds on the Milestone 2.0 stability, security, and open-source foundation (bounded GPU/sprite caches, capped in-memory chat history, clean character-tab socket/thread teardown, hardened decompression and download limits, comprehensive rustdoc documentation, and a zero-warning Clippy baseline) and 2.1.x portrait/reconnect/download progress polish with automatic on-demand modern and legacy stock patch downloads and caching, legacy floor/path tile rendering fixes, RPM and Apple Silicon macOS `.dmg` packages, and 106 passing unit tests.
 
 This is an independent, actively developed client. Some behavior and asset support may differ from the official Windows client, and compatibility can vary across dreams and custom patches. Please report reproducible bugs or feature requests on [GitHub Issues](https://github.com/morganlowe/native-furcadia/issues) with your OS and relevant log output (never attach passwords or private credentials).
 
