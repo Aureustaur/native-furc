@@ -609,9 +609,17 @@ mod tests {
             no_root.legacy_patch_path_with_stock_dir("floors.fox", Some(&stock_dir)),
             Some(stock_legacy_floors.clone())
         );
+        let junc_found = no_root
+            .legacy_patch_path_with_stock_dir("JUNCTION.FOX", Some(&stock_dir))
+            .expect("case-insensitive lookup should resolve junction.fox");
+        assert_eq!(junc_found.parent(), stock_legacy_junc.parent());
+        assert!(junc_found
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("junction.fox")));
         assert_eq!(
-            no_root.legacy_patch_path_with_stock_dir("JUNCTION.FOX", Some(&stock_dir)),
-            Some(stock_legacy_junc)
+            fs::read(&junc_found).expect("read junction.fox"),
+            b"stock_junc"
         );
 
         let root_modern_floors = root_dir.join("patches/default/floors.fox");
