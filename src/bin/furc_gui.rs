@@ -1790,6 +1790,8 @@ struct FurcadiaApp {
     pounce_visible: bool,
     pounce_detached: bool,
     pounce_show_offline: bool,
+    pounce_panel_width: f32,
+    chat_panel_height: f32,
 
     assets: AssetLocator,
     palette: Palette,
@@ -2171,6 +2173,8 @@ impl FurcadiaApp {
             pounce_visible: cfg.pounce_visible,
             pounce_detached: cfg.pounce_detached,
             pounce_show_offline: cfg.pounce_show_offline,
+            pounce_panel_width: 260.0,
+            chat_panel_height: 260.0,
             assets,
             palette,
             floors_cache,
@@ -8708,7 +8712,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     return;
                 }
 
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Logs:");
                     for ch in &chars {
                         if ui.selectable_label(&self.log_viewer_char == ch, ch).clicked() {
@@ -11456,11 +11460,12 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         self.render_sidebar(ctx);
 
         if self.pounce_visible && !self.pounce_detached {
+            let pounce_min_w = 220.0_f32;
             let pounce_max_w = (ctx.screen_rect().width() * 0.35).max(240.0);
+            let pounce_w = self.pounce_panel_width.clamp(pounce_min_w, pounce_max_w);
             egui::SidePanel::right("pounce_panel")
-                .default_width(260.0)
-                .min_width(220.0)
-                .max_width(pounce_max_w)
+                .exact_width(pounce_w)
+                .resizable(false)
                 .frame(
                     egui::Frame::none()
                         .fill(self.ui_panel())
@@ -11469,6 +11474,25 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 )
                 .show(ctx, |ui| {
                     self.render_pounce_contents(ui, false);
+                });
+            let accent = self.ui_accent();
+            egui::SidePanel::right("pounce_resize_handle")
+                .exact_width(5.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| {
+                    let resp = ui.allocate_response(ui.available_size(), Sense::drag());
+                    if resp.hovered() || resp.dragged() {
+                        ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        let x = resp.rect.center().x;
+                        ui.painter()
+                            .vline(x, resp.rect.y_range(), Stroke::new(1.5_f32, accent));
+                    }
+                    if resp.dragged() && ui.input(|i| i.pointer.primary_down()) {
+                        self.pounce_panel_width =
+                            (pounce_w - resp.drag_delta().x).clamp(pounce_min_w, pounce_max_w);
+                    }
                 });
         }
 
@@ -11577,17 +11601,36 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     self.render_chat_panel_contents(ui);
                 });
         } else {
-            let screen_h = ctx.screen_rect().height();
-            let chat_default_h = (screen_h * 0.34).clamp(210.0, 340.0);
-            let chat_max_h = (screen_h * 0.65).max(240.0);
+            let chat_min_h = 180.0_f32;
+            let chat_max_h = (ctx.screen_rect().height() * 0.65).max(240.0);
+            let chat_h = self.chat_panel_height.clamp(chat_min_h, chat_max_h);
             egui::TopBottomPanel::bottom("chat_panel")
-                .default_height(chat_default_h)
-                .min_height(180.0)
-                .max_height(chat_max_h)
-                .resizable(true)
+                .exact_height(chat_h)
+                .resizable(false)
                 .frame(chat_frame)
                 .show(ctx, |ui| {
                     self.render_chat_panel_contents(ui);
+                });
+            egui::TopBottomPanel::bottom("chat_resize_handle")
+                .exact_height(5.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| {
+                    let resp = ui.allocate_response(ui.available_size(), Sense::drag());
+                    let y = resp.rect.center().y;
+                    let stroke_color = if resp.hovered() || resp.dragged() {
+                        ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        accent
+                    } else {
+                        GOLD_DIM
+                    };
+                    ui.painter()
+                        .hline(resp.rect.x_range(), y, Stroke::new(1.0_f32, stroke_color));
+                    if resp.dragged() && ui.input(|i| i.pointer.primary_down()) {
+                        self.chat_panel_height =
+                            (chat_h - resp.drag_delta().y).clamp(chat_min_h, chat_max_h);
+                    }
                 });
             egui::CentralPanel::default()
                 .frame(
@@ -12082,7 +12125,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 };
                 let input_h = (typed_h + 12.0).clamp(min_input_h, max_input_h);
                 let remaining_for_chat = (total_avail_h - input_h - spelling_h - bottom_chrome).max(0.0);
-                let available_h = remaining_for_chat.max(40.0);
+                let available_h = remaining_for_chat;
                 if (self.last_chat_avail_h - available_h).abs() > 0.5 && self.chat_pinned_to_bottom {
                     self.chat_scroll_to_bottom = true;
                 }
