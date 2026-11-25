@@ -9550,26 +9550,30 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         });
 
         ui.horizontal(|ui| {
-            let enter = ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.watch_input)
-                        .hint_text("Character name")
-                        .desired_width((ui.available_width() - 62.0).max(80.0)),
-                )
-                .lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Watch").clicked() || enter {
-                let name = self.watch_input.trim().replace('|', " ");
-                if !name.is_empty() {
-                    let wire = wire_player_name(&name);
-                    self.pounce.add_watch(name);
-                    self.watch_input.clear();
-                    self.save_config();
-                    if self.is_connected {
-                        self.send_raw_cmd(&format!("pounce adduser {wire}"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let watch_clicked = ui.button("Watch").clicked();
+                let input_w = (ui.available_width() - 10.0).max(60.0);
+                let enter = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.watch_input)
+                            .hint_text("Character name")
+                            .desired_width(input_w),
+                    )
+                    .lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if watch_clicked || enter {
+                    let name = self.watch_input.trim().replace('|', " ");
+                    if !name.is_empty() {
+                        let wire = wire_player_name(&name);
+                        self.pounce.add_watch(name);
+                        self.watch_input.clear();
+                        self.save_config();
+                        if self.is_connected {
+                            self.send_raw_cmd(&format!("pounce adduser {wire}"));
+                        }
                     }
                 }
-            }
+            });
         });
 
         let rows: Vec<(String, OnlineStatus)> = self
@@ -9612,41 +9616,6 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         continue;
                     }
                     ui.horizontal(|ui| {
-                        let (dot_color, status_tip) = match status {
-                            OnlineStatus::Online => (Color32::from_rgb(80, 220, 110), "Online"),
-                            OnlineStatus::Offline => (Color32::from_rgb(130, 130, 135), "Offline"),
-                            OnlineStatus::Unknown => {
-                                (Color32::from_rgb(220, 190, 80), "Checking status")
-                            }
-                        };
-                        ui.colored_label(dot_color, "●").on_hover_text(status_tip);
-                        let name_color = if status == OnlineStatus::Online {
-                            Color32::WHITE
-                        } else {
-                            Color32::LIGHT_GRAY
-                        };
-                        let name_w = (ui.available_width() - 98.0).max(48.0);
-                        let name_resp = ui
-                            .allocate_ui(Vec2::new(name_w, 18.0), |ui| {
-                                ui.add(
-                                    egui::Label::new(RichText::new(name_display_clean(&name)).color(name_color))
-                                        .truncate()
-                                        .sense(Sense::click()),
-                                )
-                            })
-                            .inner
-                            .on_hover_text(format!("{name}\nRight-click for player actions"));
-                        if name_resp.double_clicked() {
-                            to_whisper = Some(name.clone());
-                        }
-                        let row_name = name.clone();
-                        name_resp.context_menu(|ui| {
-                            if let Some(act) = render_player_menu_buttons(ui, false, true, true) {
-                                ctx_action =
-                                    Some((row_name.clone(), wire_player_name(&row_name), act));
-                                ui.close_menu();
-                            }
-                        });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("×").clicked() {
                                 to_remove = Some(name.clone());
@@ -9657,6 +9626,45 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             if self.is_connected && ui.small_button("Look").clicked() {
                                 to_glook = Some(wire_player_name(&name));
                             }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                let (dot_color, status_tip) = match status {
+                                    OnlineStatus::Online => (Color32::from_rgb(80, 220, 110), "Online"),
+                                    OnlineStatus::Offline => (Color32::from_rgb(130, 130, 135), "Offline"),
+                                    OnlineStatus::Unknown => {
+                                        (Color32::from_rgb(220, 190, 80), "Checking status")
+                                    }
+                                };
+                                ui.colored_label(dot_color, "●").on_hover_text(status_tip);
+                                let name_color = if status == OnlineStatus::Online {
+                                    Color32::WHITE
+                                } else {
+                                    Color32::LIGHT_GRAY
+                                };
+                                let name_w = (ui.available_width() - 4.0).max(32.0);
+                                let name_resp = ui
+                                    .allocate_ui(Vec2::new(name_w, 18.0), |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(name_display_clean(&name)).color(name_color),
+                                            )
+                                            .truncate()
+                                            .sense(Sense::click()),
+                                        )
+                                    })
+                                    .inner
+                                    .on_hover_text(format!("{name}\nRight-click for player actions"));
+                                if name_resp.double_clicked() {
+                                    to_whisper = Some(name.clone());
+                                }
+                                let row_name = name.clone();
+                                name_resp.context_menu(|ui| {
+                                    if let Some(act) = render_player_menu_buttons(ui, false, true, true) {
+                                        ctx_action =
+                                            Some((row_name.clone(), wire_player_name(&row_name), act));
+                                        ui.close_menu();
+                                    }
+                                });
+                            });
                         });
                     });
                 }
@@ -9703,17 +9711,19 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         let mut del_dream: Option<usize> = None;
         for (i, d) in self.dream_bookmarks.iter().enumerate() {
             ui.horizontal(|ui| {
-                let label_w = (ui.available_width() - 28.0).max(60.0);
-                if ui
-                    .add_sized([label_w, 20.0], egui::Button::new(d.as_str()))
-                    .on_hover_text(format!("Click to enter {d}"))
-                    .clicked()
-                {
-                    go_dream = Some(d.clone());
-                }
-                if ui.small_button("×").on_hover_text("Remove dream").clicked() {
-                    del_dream = Some(i);
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("×").on_hover_text("Remove dream").clicked() {
+                        del_dream = Some(i);
+                    }
+                    let label_w = (ui.available_width() - 4.0).max(40.0);
+                    if ui
+                        .add_sized([label_w, 20.0], egui::Button::new(d.as_str()).truncate())
+                        .on_hover_text(format!("Click to enter {d}"))
+                        .clicked()
+                    {
+                        go_dream = Some(d.clone());
+                    }
+                });
             });
         }
         if let Some(d) = go_dream {
@@ -9849,20 +9859,22 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 });
                             ui.separator();
                             ui.horizontal(|ui| {
-                                let enter = ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut w.input)
-                                            .hint_text(format!("Whisper {}...", w.peer))
-                                            .desired_width((ui.available_width() - 62.0).max(100.0)),
-                                    )
-                                    .lost_focus()
-                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                if (ui.button("Send").clicked() || enter)
-                                    && !w.input.trim().is_empty()
-                                {
-                                    send_msg = Some(w.input.trim().to_owned());
-                                    w.input.clear();
-                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let send_clicked = ui.button("Send").clicked();
+                                    let input_w = (ui.available_width() - 10.0).max(60.0);
+                                    let enter = ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut w.input)
+                                                .hint_text(format!("Whisper {}...", w.peer))
+                                                .desired_width(input_w),
+                                        )
+                                        .lost_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    if (send_clicked || enter) && !w.input.trim().is_empty() {
+                                        send_msg = Some(w.input.trim().to_owned());
+                                        w.input.clear();
+                                    }
+                                });
                             });
                         });
                 }
@@ -9905,7 +9917,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         let panel_bg = self.ui_panel();
         let accent = self.ui_accent();
 
-        let sidebar_w = (256.0 + (self.portrait_size - 64.0).max(0.0)).min(360.0);
+        let sidebar_w = (272.0 + (self.portrait_size - 64.0).max(0.0)).min(380.0);
         egui::SidePanel::left("furc_sidebar")
             .exact_width(sidebar_w)
             .resizable(false)
@@ -9938,7 +9950,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 });
 
                 ui.add_space(3.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .small_button("+Char Window")
                         .on_hover_text("Launch a new Furcadia window for another character")
@@ -10144,7 +10156,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                 } else {
                                     Color32::from_rgb(200, 180, 90)
                                 };
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     ui.label(RichText::new(&char_name).strong().color(accent));
                                     ui.colored_label(
                                         status_color,
@@ -10199,7 +10211,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             .color(Color32::GRAY),
                                     );
                                 }
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     if ui
                                         .selectable_label(self.afk_active, "AFK")
                                         .clicked()
@@ -10247,6 +10259,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                                     .size(11.0)
                                                     .color(Color32::from_rgb(235, 190, 120)),
                                             )
+                                            .wrap()
                                             .sense(Sense::click()),
                                         )
                                         .on_hover_text("Click to query the server (`info`) for your current cookie counts")
@@ -10264,6 +10277,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 self.render_looked_player_card(ui, ctx);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
+                    let tab_w = ((ui.available_width() - 5.0 * 4.0) / 6.0).floor().max(28.0);
                     for (tab, letter, sub, tip) in [
                         (SidebarTab::Move, "A", "MOVE", "Move & Actions"),
                         (SidebarTab::GoTo, "B", "GO TO", "Go To / Maps"),
@@ -10273,7 +10287,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         (SidebarTab::Misc, "F", "MISC", "Misc, Logs, Settings & Skin"),
                     ] {
                         let selected = self.sidebar_tab == tab;
-                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(37.0, 34.0), Sense::click());
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(tab_w, 34.0), Sense::click());
                         let fill = if selected {
                             accent
                         } else if resp.hovered() {
@@ -11442,8 +11456,11 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         self.render_sidebar(ctx);
 
         if self.pounce_visible && !self.pounce_detached {
+            let pounce_max_w = (ctx.screen_rect().width() * 0.35).max(240.0);
             egui::SidePanel::right("pounce_panel")
+                .default_width(260.0)
                 .min_width(220.0)
+                .max_width(pounce_max_w)
                 .frame(
                     egui::Frame::none()
                         .fill(self.ui_panel())
@@ -11560,8 +11577,13 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     self.render_chat_panel_contents(ui);
                 });
         } else {
+            let screen_h = ctx.screen_rect().height();
+            let chat_default_h = (screen_h * 0.34).clamp(210.0, 340.0);
+            let chat_max_h = (screen_h * 0.65).max(240.0);
             egui::TopBottomPanel::bottom("chat_panel")
-                .min_height(210.0)
+                .default_height(chat_default_h)
+                .min_height(180.0)
+                .max_height(chat_max_h)
                 .resizable(true)
                 .frame(chat_frame)
                 .show(ctx, |ui| {
@@ -12041,24 +12063,26 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 ui.separator();
                 let total_avail_h = ui.available_height();
                 let line_h = ui.text_style_height(&egui::TextStyle::Body);
-                let input_w = (ui.available_width() - 70.0).max(120.0);
+                let input_w = (ui.available_width() - 72.0).max(40.0);
                 let spelling_h = if self.spell_misspelled.is_empty() { 0.0 } else { 24.0 };
-                let min_chat_h = (line_h * 4.0 + 16.0).min((total_avail_h * 0.5).max(48.0));
-                let max_input_h = (total_avail_h - min_chat_h - spelling_h - 18.0).max(line_h + 12.0);
+                let bottom_chrome = ui.spacing().item_spacing.y * 4.0 + 24.0;
+                let min_input_h = (line_h + 12.0).max(ui.spacing().interact_size.y + 4.0);
+                let max_input_h = (total_avail_h - 64.0 - spelling_h - bottom_chrome).max(min_input_h);
                 let typed_h = if self.chat_input.is_empty() {
                     line_h
                 } else {
                     let job = build_spellcheck_layout_job(
                         ui,
                         &self.chat_input,
-                        (input_w - 12.0).max(60.0),
+                        (input_w - 12.0).max(40.0),
                         &self.spell_misspelled,
                         self.colors.input_text,
                     );
                     ui.fonts(|f| f.layout_job(job)).size().y
                 };
-                let input_h = (typed_h + 12.0).clamp(line_h + 12.0, max_input_h);
-                let available_h = (total_avail_h - input_h - spelling_h - 18.0).max(min_chat_h);
+                let input_h = (typed_h + 12.0).clamp(min_input_h, max_input_h);
+                let remaining_for_chat = (total_avail_h - input_h - spelling_h - bottom_chrome).max(0.0);
+                let available_h = remaining_for_chat.max(40.0);
                 if (self.last_chat_avail_h - available_h).abs() > 0.5 && self.chat_pinned_to_bottom {
                     self.chat_scroll_to_bottom = true;
                 }
@@ -12077,11 +12101,11 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 let scroll_out = egui::ScrollArea::vertical()
                     .id_salt(("chat_scroll", active_peer.as_deref().unwrap_or("main")))
                     .auto_shrink([false, false])
-                    .min_scrolled_height(available_h)
+                    .min_scrolled_height(remaining_for_chat)
                     .max_height(available_h)
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        ui.set_min_height(available_h);
+                        ui.set_min_height(remaining_for_chat);
                         if scroll_d.abs() > 0.5 {
                             ui.scroll_with_delta(Vec2::new(0.0, scroll_d));
                         }
@@ -12216,7 +12240,15 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     }
                 }
                 ui.separator();
-                ui.horizontal(|ui| {
+                let row_w = ui.available_width();
+                ui.allocate_ui_with_layout(
+                    Vec2::new(row_w, input_h),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        let send_btn = egui::Button::new(RichText::new("Send").color(Color32::WHITE))
+                            .fill(self.ui_panel())
+                            .stroke(Stroke::new(1.0_f32, accent));
+                        let send_clicked = ui.add(send_btn).clicked();
                     let chat_input_id = ui.make_persistent_id((
                         "main_chat_input",
                         active_peer.as_deref().unwrap_or("main"),
@@ -12238,6 +12270,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         );
                         ui.fonts(|f| f.layout_job(job))
                     };
+                    let row_input_w = (ui.available_width() - 8.0).max(40.0);
                     let resp = egui::ScrollArea::vertical()
                         .id_salt((
                             "main_chat_input_scroll",
@@ -12251,7 +12284,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                     .id(chat_input_id)
                                     .desired_rows(1)
                                     .hint_text("")
-                                    .desired_width(input_w)
+                                    .desired_width(row_input_w)
                                     .layouter(&mut layouter),
                             )
                         })
@@ -12372,10 +12405,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     if let Some(w) = ctx_add_dict {
                         self.add_word_to_dictionary(&w);
                     }
-                    let send_btn = egui::Button::new(RichText::new("Send").color(Color32::WHITE))
-                        .fill(self.ui_panel())
-                        .stroke(Stroke::new(1.0_f32, accent));
-                    if ui.add(send_btn).clicked() || enter {
+                    if send_clicked || enter {
                         self.send_chat_input();
                         resp.request_focus();
                     }
@@ -13664,6 +13694,7 @@ Light: {} | Amb: {} | Elev: {:?}",
             .stroke(Stroke::new(1.0_f32, accent.linear_multiply(0.75)))
             .inner_margin(6.0)
             .show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(&display_name)
