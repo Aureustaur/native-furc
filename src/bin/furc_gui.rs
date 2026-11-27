@@ -70,6 +70,350 @@ use furcadia_client::{
     DEFAULT_PORT,
 };
 
+const FONT_FAMILY_UI_BOLD: &str = "ui_bold";
+const MAX_SYSTEM_FONT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Validates that `bytes` is a single static SFNT (`.ttf`/`.otf`) font file
+/// supported cleanly by `epaint` / `ab_glyph` (rejecting `.ttc` collections,
+/// variable `fvar` fonts, and malformed tables).
+fn is_valid_static_sfnt(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 {
+        return false;
+    }
+    let magic = &bytes[0..4];
+    if magic != [0x00, 0x01, 0x00, 0x00] && magic != b"true" && magic != b"OTTO" {
+        return false;
+    }
+    let num_tables = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+    if num_tables == 0 {
+        return false;
+    }
+    let Some(dir_end) = 12usize.checked_add(num_tables.saturating_mul(16)) else {
+        return false;
+    };
+    if dir_end > bytes.len() {
+        return false;
+    }
+
+    let mut has_head = false;
+    let mut has_hhea = false;
+    let mut has_maxp = false;
+    let mut has_cmap = false;
+    let mut has_outline = false;
+
+    for i in 0..num_tables {
+        let rec = 12 + i * 16;
+        let tag = &bytes[rec..rec + 4];
+        let table_off = u32::from_be_bytes([
+            bytes[rec + 8],
+            bytes[rec + 9],
+            bytes[rec + 10],
+            bytes[rec + 11],
+        ]);
+        let table_len = u32::from_be_bytes([
+            bytes[rec + 12],
+            bytes[rec + 13],
+            bytes[rec + 14],
+            bytes[rec + 15],
+        ]);
+        if tag == b"fvar" {
+            return false;
+        }
+        let Some(end) = table_off.checked_add(table_len) else {
+            return false;
+        };
+        if (end as usize) > bytes.len() {
+            return false;
+        }
+        match tag {
+            b"head" => {
+                if table_len < 54 {
+                    return false;
+                }
+                let off = table_off as usize;
+                let upm = u16::from_be_bytes([bytes[off + 18], bytes[off + 19]]);
+                if !(16..=16384).contains(&upm) {
+                    return false;
+                }
+                has_head = true;
+            }
+            b"hhea" => has_hhea = true,
+            b"maxp" => has_maxp = true,
+            b"cmap" => has_cmap = true,
+            b"glyf" | b"CFF " => has_outline = true,
+            _ => {}
+        }
+    }
+
+    has_head && has_hhea && has_maxp && has_cmap && has_outline
+}
+
+fn load_valid_font_file(path: &std::path::Path) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_SYSTEM_FONT_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if is_valid_static_sfnt(&bytes) {
+        Some(bytes)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn fc_match_font_path(pattern: &str) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}", pattern])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path_str = String::from_utf8(out.stdout).ok()?;
+    let trimmed = path_str.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(trimmed))
+    }
+}
+
+/// Discovers paired `(regular, bold)` static UI fonts from the host OS so `egui`
+/// renders crisp sans-serif text instead of its thin `Ubuntu-Light` default.
+fn discover_system_ui_fonts() -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let pairs: &[(&[&str], &[&str])] = &[
+            (
+                &[
+                    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+                    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                    "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+                ],
+                &[
+                    "/usr/share/fonts/noto/NotoSans-SemiBold.ttf",
+                    "/usr/share/fonts/noto/NotoSans-Medium.ttf",
+                    "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+                    "/usr/share/fonts/truetype/noto/NotoSans-SemiBold.ttf",
+                    "/usr/share/fonts/truetype/noto/NotoSans-Medium.ttf",
+                    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+                    "/usr/share/fonts/google-noto/NotoSans-SemiBold.ttf",
+                    "/usr/share/fonts/google-noto/NotoSans-Medium.ttf",
+                    "/usr/share/fonts/google-noto/NotoSans-Bold.ttf",
+                ],
+            ),
+            (
+                &[
+                    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+                ],
+                &[
+                    "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+                ],
+            ),
+            (
+                &[
+                    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+                ],
+                &[
+                    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+                ],
+            ),
+            (
+                &[
+                    "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+                    "/usr/share/fonts/ubuntu/Ubuntu-R.ttf",
+                    "/usr/share/fonts/TTF/Ubuntu-Regular.ttf",
+                ],
+                &[
+                    "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+                    "/usr/share/fonts/ubuntu/Ubuntu-B.ttf",
+                    "/usr/share/fonts/TTF/Ubuntu-Bold.ttf",
+                ],
+            ),
+            (
+                &[
+                    "/usr/share/fonts/TTF/Inter-Regular.ttf",
+                    "/usr/share/fonts/inter/Inter-Regular.ttf",
+                ],
+                &[
+                    "/usr/share/fonts/TTF/Inter-SemiBold.ttf",
+                    "/usr/share/fonts/TTF/Inter-Medium.ttf",
+                    "/usr/share/fonts/TTF/Inter-Bold.ttf",
+                    "/usr/share/fonts/inter/Inter-SemiBold.ttf",
+                    "/usr/share/fonts/inter/Inter-Bold.ttf",
+                ],
+            ),
+        ];
+
+        for (reg_paths, bold_paths) in pairs {
+            if let Some(reg) = reg_paths
+                .iter()
+                .find_map(|p| load_valid_font_file(std::path::Path::new(p)))
+            {
+                let bold = bold_paths
+                    .iter()
+                    .find_map(|p| load_valid_font_file(std::path::Path::new(p)));
+                return (Some(reg), bold);
+            }
+        }
+
+        let reg = fc_match_font_path("sans-serif:weight=regular")
+            .and_then(|p| load_valid_font_file(&p));
+        let bold = ["sans-serif:weight=semibold", "sans-serif:weight=bold"]
+            .iter()
+            .find_map(|pat| fc_match_font_path(pat).and_then(|p| load_valid_font_file(&p)));
+        return (reg, bold);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let fonts_dir = std::env::var_os("WINDIR")
+            .map(|w| std::path::PathBuf::from(w).join("Fonts"))
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\Fonts"));
+        let pairs: &[(&str, &[&str])] = &[
+            ("segoeui.ttf", &["seguisb.ttf", "segoeuib.ttf"]),
+            ("arial.ttf", &["arialbd.ttf"]),
+            ("tahoma.ttf", &["tahomabd.ttf"]),
+        ];
+        for (reg_file, bold_files) in pairs {
+            if let Some(reg) = load_valid_font_file(&fonts_dir.join(reg_file)) {
+                let bold = bold_files
+                    .iter()
+                    .find_map(|f| load_valid_font_file(&fonts_dir.join(f)));
+                return (Some(reg), bold);
+            }
+        }
+        return (None, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let pairs: &[(&str, &[&str])] = &[
+            (
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+                &["/System/Library/Fonts/Supplemental/Arial Bold.ttf"],
+            ),
+            (
+                "/System/Library/Fonts/Supplemental/Verdana.ttf",
+                &["/System/Library/Fonts/Supplemental/Verdana Bold.ttf"],
+            ),
+            (
+                "/Library/Fonts/Arial.ttf",
+                &["/Library/Fonts/Arial Bold.ttf"],
+            ),
+        ];
+        for (reg_path, bold_paths) in pairs {
+            if let Some(reg) = load_valid_font_file(std::path::Path::new(reg_path)) {
+                let bold = bold_paths
+                    .iter()
+                    .find_map(|p| load_valid_font_file(std::path::Path::new(p)));
+                return (Some(reg), bold);
+            }
+        }
+        return (None, None);
+    }
+}
+
+/// Builds `egui::FontDefinitions` with optional system regular/bold UI fonts and
+/// Fixedsys while keeping builtin fallbacks intact.
+fn build_font_definitions(
+    regular: Option<Vec<u8>>,
+    bold: Option<Vec<u8>>,
+    fixedsys: Option<Vec<u8>>,
+) -> (egui::FontDefinitions, bool) {
+    let mut defs = egui::FontDefinitions::default();
+    let mut has_regular = false;
+    let mut has_bold = false;
+
+    if let Some(bytes) = regular.filter(|b| is_valid_static_sfnt(b)) {
+        defs.font_data
+            .insert("ui_regular".to_owned(), egui::FontData::from_owned(bytes));
+        if let Some(prop) = defs.families.get_mut(&egui::FontFamily::Proportional) {
+            prop.insert(0, "ui_regular".to_owned());
+        }
+        if let Some(mono) = defs.families.get_mut(&egui::FontFamily::Monospace) {
+            let idx = usize::from(!mono.is_empty());
+            mono.insert(idx, "ui_regular".to_owned());
+        }
+        has_regular = true;
+    }
+
+    if let Some(bytes) = bold.filter(|b| is_valid_static_sfnt(b)) {
+        defs.font_data.insert(
+            FONT_FAMILY_UI_BOLD.to_owned(),
+            egui::FontData::from_owned(bytes),
+        );
+        let mut chain = vec![FONT_FAMILY_UI_BOLD.to_owned()];
+        if has_regular {
+            chain.push("ui_regular".to_owned());
+        }
+        chain.push("Ubuntu-Light".to_owned());
+        chain.push("NotoEmoji-Regular".to_owned());
+        chain.push("emoji-icon-font".to_owned());
+        defs.families
+            .insert(egui::FontFamily::Name(FONT_FAMILY_UI_BOLD.into()), chain);
+        has_bold = true;
+    }
+
+    if let Some(bytes) = fixedsys.filter(|b| is_valid_static_sfnt(b)) {
+        defs.font_data
+            .insert("fixedsys".to_owned(), egui::FontData::from_owned(bytes));
+        let mut chain = vec!["fixedsys".to_owned()];
+        if has_regular {
+            chain.push("ui_regular".to_owned());
+        }
+        chain.push("Ubuntu-Light".to_owned());
+        chain.push("NotoEmoji-Regular".to_owned());
+        chain.push("emoji-icon-font".to_owned());
+        defs.families
+            .insert(egui::FontFamily::Name("fixedsys".into()), chain);
+    }
+
+    (defs, has_bold)
+}
+
+fn configure_text_styles(
+    ctx: &egui::Context,
+    font_size: f32,
+    family: egui::FontFamily,
+    heading_family: egui::FontFamily,
+) {
+    let sz = font_size.clamp(10.0, 28.0).round();
+    let small_sz = (sz - 2.0).max(10.0).round();
+    let heading_sz = (sz + 4.0).min(30.0).round();
+    ctx.style_mut(|style| {
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            FontId::new(sz, family.clone()),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            FontId::new(sz, family.clone()),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            FontId::new(small_sz, family.clone()),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            FontId::new(heading_sz, heading_family),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Monospace,
+            FontId::new(sz, egui::FontFamily::Monospace),
+        );
+    });
+}
+
 const BG_PURPLE: Color32 = Color32::from_rgb(23, 14, 46);
 const CARD_PURPLE: Color32 = Color32::from_rgb(34, 22, 68);
 const INPUT_PURPLE: Color32 = Color32::from_rgb(20, 12, 40);
@@ -333,6 +677,7 @@ fn render_whisper_history_lines(
         return;
     }
     let log_color = Color32::from_rgb(142, 145, 160);
+    let hist_sz = ui.style().text_styles[&egui::TextStyle::Body].size.round();
     for line in history_lines {
         let mut parts = line.splitn(3, ' ');
         let date = parts.next().unwrap_or_default();
@@ -342,7 +687,7 @@ fn render_whisper_history_lines(
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!("{date} {time}"))
-                        .size(12.5)
+                        .size(hist_sz)
                         .color(log_color),
                 );
                 let parsed = parse_chat_line(message);
@@ -361,7 +706,7 @@ fn render_whisper_history_lines(
                 );
             });
         } else {
-            ui.add(egui::Label::new(RichText::new(line).size(12.5).color(log_color)).wrap());
+            ui.add(egui::Label::new(RichText::new(line).size(hist_sz).color(log_color)).wrap());
         }
     }
     if has_live_lines {
@@ -1891,6 +2236,8 @@ struct FurcadiaApp {
     colors: UiColors,
     autocorrect: bool,
     fonts_configured: bool,
+    has_ui_bold_font: bool,
+    has_fixedsys_font: bool,
     applied_font_family: String,
     applied_font_size: u16,
     settings_open: bool,
@@ -2280,6 +2627,8 @@ impl FurcadiaApp {
             colors,
             autocorrect: cfg.autocorrect,
             fonts_configured: false,
+            has_ui_bold_font: false,
+            has_fixedsys_font: false,
             applied_font_family: String::new(),
             applied_font_size: 0,
             settings_open: false,
@@ -2600,21 +2949,31 @@ impl FurcadiaApp {
         candidates.into_iter().find(|p| p.is_file())
     }
 
+    fn ui_font_family(&self, bold: bool) -> egui::FontFamily {
+        if bold && self.has_ui_bold_font && self.font_family == "Proportional" {
+            return egui::FontFamily::Name(FONT_FAMILY_UI_BOLD.into());
+        }
+        match self.font_family.as_str() {
+            "Monospace" => egui::FontFamily::Monospace,
+            "Fixedsys" if self.has_fixedsys_font => egui::FontFamily::Name("fixedsys".into()),
+            "Fixedsys" => egui::FontFamily::Monospace,
+            _ => egui::FontFamily::Proportional,
+        }
+    }
+
     fn apply_font_settings(&mut self, ctx: &egui::Context) {
         if !self.fonts_configured {
             self.fonts_configured = true;
-            if let Some(ttf_path) = self.find_extra_asset("fsex2p00_public.ttf") {
-                if let Ok(bytes) = std::fs::read(&ttf_path) {
-                    let mut defs = egui::FontDefinitions::default();
-                    defs.font_data
-                        .insert("fixedsys".to_owned(), egui::FontData::from_owned(bytes));
-                    defs.families.insert(
-                        egui::FontFamily::Name("fixedsys".into()),
-                        vec!["fixedsys".to_owned()],
-                    );
-                    ctx.set_fonts(defs);
-                }
-            }
+            let (regular, bold) = discover_system_ui_fonts();
+            let fixedsys = self
+                .find_extra_asset("fsex2p00_public.ttf")
+                .and_then(|p| load_valid_font_file(&p));
+            let (defs, has_bold) = build_font_definitions(regular, bold, fixedsys);
+            self.has_ui_bold_font = has_bold;
+            self.has_fixedsys_font = defs
+                .families
+                .contains_key(&egui::FontFamily::Name("fixedsys".into()));
+            ctx.set_fonts(defs);
         }
         if self.applied_font_family == self.font_family && self.applied_font_size == self.font_size {
             return;
@@ -2622,36 +2981,10 @@ impl FurcadiaApp {
         self.applied_font_family = self.font_family.clone();
         self.applied_font_size = self.font_size;
 
-        let family = match self.font_family.as_str() {
-            "Monospace" => egui::FontFamily::Monospace,
-            "Fixedsys" => {
-                if self.find_extra_asset("fsex2p00_public.ttf").is_some() {
-                    egui::FontFamily::Name("fixedsys".into())
-                } else {
-                    egui::FontFamily::Monospace
-                }
-            }
-            _ => egui::FontFamily::Proportional,
-        };
-        let sz = (self.font_size as f32).clamp(9.0, 28.0);
-        ctx.style_mut(|style| {
-            style.text_styles.insert(
-                egui::TextStyle::Body,
-                FontId::new(sz, family.clone()),
-            );
-            style.text_styles.insert(
-                egui::TextStyle::Button,
-                FontId::new((sz - 0.5).max(9.0), family.clone()),
-            );
-            style.text_styles.insert(
-                egui::TextStyle::Small,
-                FontId::new((sz - 2.0).max(8.5), family.clone()),
-            );
-            style.text_styles.insert(
-                egui::TextStyle::Monospace,
-                FontId::new(sz, egui::FontFamily::Monospace),
-            );
-        });
+        let family = self.ui_font_family(false);
+        let heading_family = self.ui_font_family(true);
+        let sz = (self.font_size as f32).clamp(10.0, 28.0).round();
+        configure_text_styles(ctx, sz, family, heading_family);
     }
 
     fn play_sound(&self, wav_name: &str) {
@@ -7886,7 +8219,7 @@ impl FurcadiaApp {
                     RichText::new(
                         "This imports available patches/assets, your Pounce watchlist, and chat and whisper logs. It also scans character INI files. The app checks Documents/Furcadia, My Documents/Furcadia, OneDrive/Documents/Furcadia, common Furcadia install folders, and Wine Documents/AppData folders.",
                     )
-                    .size(11.5)
+                    .size(12.0)
                     .color(Color32::LIGHT_GRAY),
                 );
                 if let Some(root) = &self.assets.root {
@@ -7905,7 +8238,7 @@ impl FurcadiaApp {
                         RichText::new(
                             "No Furcadia data found in the usual Documents or Wine folders. Choose your Windows Furcadia folder to import existing files.",
                         )
-                        .size(11.5)
+                        .size(12.0)
                         .color(Color32::LIGHT_GRAY),
                     );
                 }
@@ -8402,30 +8735,43 @@ impl FurcadiaApp {
                         ui.label(RichText::new("Emit").color(preview.emit_text));
                     });
                     ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        let _ = ui.add(
-                            egui::Button::new(
-                                RichText::new("Active")
-                                    .strong()
-                                    .color(preview.tab_active_text),
-                            )
-                            .fill(preview.tab_active_bg),
-                        );
-                        let _ = ui.add(
-                            egui::Button::new(
-                                RichText::new("Unread (2)")
-                                    .strong()
-                                    .color(preview.tab_unread_text),
-                            )
-                            .fill(preview.tab_unread_bg)
-                            .stroke(Stroke::new(1.5_f32, preview.tab_unread_bg)),
-                        );
-                        let _ = ui.add(
-                            egui::Button::new(
-                                RichText::new("Inactive").color(preview.tab_inactive_text),
-                            )
-                            .fill(preview.tab_inactive_bg),
-                        );
+                    let preview_sz = (self.font_size as f32).clamp(11.0, 24.0).round();
+                    let preview_regular = FontId::new(preview_sz, self.ui_font_family(false));
+                    let preview_bold = FontId::new(preview_sz, self.ui_font_family(true));
+                    ui.scope(|ui| {
+                        ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            let _ = ui.add(
+                                egui::Button::new(
+                                    RichText::new("Active")
+                                        .font(preview_bold.clone())
+                                        .strong()
+                                        .color(preview.tab_active_text),
+                                )
+                                .fill(preview.tab_active_bg)
+                                .rounding(4.0),
+                            );
+                            let _ = ui.add(
+                                egui::Button::new(
+                                    RichText::new("Unread (2)")
+                                        .font(preview_bold.clone())
+                                        .strong()
+                                        .color(preview.tab_unread_text),
+                                )
+                                .fill(preview.tab_unread_bg)
+                                .stroke(Stroke::new(1.5_f32, preview.tab_unread_bg))
+                                .rounding(4.0),
+                            );
+                            let _ = ui.add(
+                                egui::Button::new(
+                                    RichText::new("Inactive")
+                                        .font(preview_regular.clone())
+                                        .color(preview.tab_inactive_text),
+                                )
+                                .fill(preview.tab_inactive_bg)
+                                .rounding(4.0),
+                            );
+                        });
                     });
                 });
 
@@ -8665,7 +9011,7 @@ impl FurcadiaApp {
                 }
             });
             if let Some(status) = &self.update_status {
-                ui.label(RichText::new(status).size(11.5).color(Color32::LIGHT_GRAY));
+                ui.label(RichText::new(status).size(12.0).color(Color32::LIGHT_GRAY));
             }
             ui.separator();
             ui.label(RichText::new("Chat & Whisper Logs").strong().color(accent));
@@ -8727,7 +9073,7 @@ impl FurcadiaApp {
                 RichText::new(
                     "Use a folder already synced by Nextcloud, Google Drive, Dropbox, or another provider. Choose the same cloud folder on each computer.",
                 )
-                .size(11.5)
+                .size(12.0)
                 .color(Color32::LIGHT_GRAY),
             );
             ui.label(
@@ -8756,7 +9102,7 @@ impl FurcadiaApp {
                 if !self.sync_folder.is_empty() {
                     ui.label(
                         RichText::new(format!("Active: {}", self.sync_folder))
-                            .size(10.5)
+                            .size(11.0)
                             .color(Color32::GRAY),
                     );
                 }
@@ -8792,12 +9138,12 @@ impl FurcadiaApp {
                         "Avatars, portraits & images: {sf} file(s) ({})",
                         format_bytes(sb)
                     ))
-                    .size(11.5)
+                    .size(12.0)
                     .color(Color32::LIGHT_GRAY),
                 );
                 ui.label(
                     RichText::new(format!("Dream packages: {df} file(s) ({})", format_bytes(db)))
-                        .size(11.5)
+                        .size(12.0)
                         .color(Color32::LIGHT_GRAY),
                 );
                 ui.label(
@@ -8805,7 +9151,7 @@ impl FurcadiaApp {
                         "Stock game patches: {pf} file(s) ({})",
                         format_bytes(pb)
                     ))
-                    .size(11.5)
+                    .size(12.0)
                     .color(Color32::LIGHT_GRAY),
                 );
             }
@@ -9607,7 +9953,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             RichText::new(
                                                 "If this ID error keeps happening, sign in to the web client once, then return here and retry.",
                                             )
-                                            .size(12.5)
+                                            .size(13.0)
                                             .color(Color32::LIGHT_GRAY),
                                         );
                                         ui.hyperlink_to(
@@ -9651,7 +9997,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                     };
                                     ui.label(
                                         RichText::new(stage_text)
-                                            .size(13.5)
+                                            .size(14.0)
                                             .color(Color32::LIGHT_GRAY),
                                     );
                                     ui.add_space(10.0);
@@ -9789,12 +10135,12 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!("{online_count}/{} online", rows.len()))
-                    .size(11.5)
+                    .size(12.0)
                     .color(Color32::LIGHT_GRAY),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .checkbox(&mut self.pounce_show_offline, RichText::new("Show Offline").size(11.0))
+                    .checkbox(&mut self.pounce_show_offline, RichText::new("Show Offline").size(12.0))
                     .on_hover_text("Show or hide offline furres in Pounce")
                     .changed()
                 {
@@ -9841,8 +10187,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                     Color32::LIGHT_GRAY
                                 };
                                 let name_w = (ui.available_width() - 4.0).max(32.0);
+                                let row_h = ui.text_style_height(&egui::TextStyle::Body).max(18.0).ceil();
                                 let name_resp = ui
-                                    .allocate_ui(Vec2::new(name_w, 18.0), |ui| {
+                                    .allocate_ui(Vec2::new(name_w, row_h), |ui| {
                                         ui.add(
                                             egui::Label::new(
                                                 RichText::new(name_display_clean(&name)).color(name_color),
@@ -9916,8 +10263,9 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         del_dream = Some(i);
                     }
                     let label_w = (ui.available_width() - 4.0).max(40.0);
+                    let btn_h = (ui.text_style_height(&egui::TextStyle::Button) + 6.0).max(22.0).ceil();
                     if ui
-                        .add_sized([label_w, 20.0], egui::Button::new(d.as_str()).truncate())
+                        .add_sized([label_w, btn_h], egui::Button::new(d.as_str()).truncate())
                         .on_hover_text(format!("Click to enter {d}"))
                         .clicked()
                     {
@@ -10174,7 +10522,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     };
                     let mention_btn = egui::Button::new(
                         RichText::new(mention_label)
-                            .size(11.0)
+                            .font(FontId::new(12.0, self.ui_font_family(self.notify_mention)))
                             .strong()
                             .color(if self.notify_mention {
                                 Color32::from_rgb(24, 16, 6)
@@ -10213,75 +10561,85 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     let mut close_active = false;
                     let mut tab_rects: Vec<(usize, Rect)> = Vec::with_capacity(total_tabs);
 
-                    ui.horizontal_wrapped(|ui| {
-                        for vis in 0..total_tabs {
-                            if vis == active_pos {
-                                let resp = ui.add(
-                                    egui::Button::new(
-                                        RichText::new(&active_name)
-                                            .size(11.0)
-                                            .strong()
-                                            .color(self.colors.tab_active_text),
-                                    )
-                                    .fill(self.colors.tab_active_bg)
-                                    .sense(Sense::click_and_drag()),
-                                );
-                                if resp.drag_started() {
-                                    self.dragging_char_tab = Some(vis);
-                                }
-                                tab_rects.push((vis, resp.rect));
-                                if ui
-                                    .small_button("×")
-                                    .on_hover_text("Disconnect & close this character tab")
-                                    .clicked()
-                                {
-                                    close_active = true;
-                                }
-                            } else {
-                                let bg_idx = if vis < active_pos { vis } else { vis - 1 };
-                                let bg = &self.bg_sessions[bg_idx];
-                                let lbl = if bg.unread_count > 0 {
-                                    format!("{} ({})", bg.char_name, bg.unread_count)
-                                } else {
-                                    bg.char_name.clone()
-                                };
-                                let resp = if bg.unread_count > 0 {
-                                    ui.add(
+                    let char_tab_sz = ((self.font_size as f32) - 1.0).clamp(11.0, 18.0).round();
+                    let char_tab_regular = FontId::new(char_tab_sz, self.ui_font_family(false));
+                    let char_tab_bold = FontId::new(char_tab_sz, self.ui_font_family(true));
+
+                    ui.scope(|ui| {
+                        ui.spacing_mut().button_padding = Vec2::new(6.0, 3.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for vis in 0..total_tabs {
+                                if vis == active_pos {
+                                    let resp = ui.add(
                                         egui::Button::new(
-                                            RichText::new(lbl)
-                                                .size(11.0)
+                                            RichText::new(&active_name)
+                                                .font(char_tab_bold.clone())
                                                 .strong()
-                                                .color(self.colors.tab_unread_text),
+                                                .color(self.colors.tab_active_text),
                                         )
-                                        .fill(self.colors.tab_unread_bg)
+                                        .fill(self.colors.tab_active_bg)
+                                        .rounding(4.0)
                                         .sense(Sense::click_and_drag()),
-                                    )
+                                    );
+                                    if resp.drag_started() {
+                                        self.dragging_char_tab = Some(vis);
+                                    }
+                                    tab_rects.push((vis, resp.rect));
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Disconnect & close this character tab")
+                                        .clicked()
+                                    {
+                                        close_active = true;
+                                    }
                                 } else {
-                                    ui.add(
-                                        egui::Button::new(
-                                            RichText::new(lbl)
-                                                .size(11.0)
-                                                .color(self.colors.tab_inactive_text),
+                                    let bg_idx = if vis < active_pos { vis } else { vis - 1 };
+                                    let bg = &self.bg_sessions[bg_idx];
+                                    let lbl = if bg.unread_count > 0 {
+                                        format!("{} ({})", bg.char_name, bg.unread_count)
+                                    } else {
+                                        bg.char_name.clone()
+                                    };
+                                    let resp = if bg.unread_count > 0 {
+                                        ui.add(
+                                            egui::Button::new(
+                                                RichText::new(lbl)
+                                                    .font(char_tab_bold.clone())
+                                                    .strong()
+                                                    .color(self.colors.tab_unread_text),
+                                            )
+                                            .fill(self.colors.tab_unread_bg)
+                                            .rounding(4.0)
+                                            .sense(Sense::click_and_drag()),
                                         )
-                                        .fill(self.colors.tab_inactive_bg)
-                                        .sense(Sense::click_and_drag()),
-                                    )
-                                };
-                                if resp.drag_started() {
-                                    self.dragging_char_tab = Some(vis);
-                                } else if resp.clicked() {
-                                    switch_to = Some(bg_idx);
-                                }
-                                tab_rects.push((vis, resp.rect));
-                                if ui
-                                    .small_button("×")
-                                    .on_hover_text("Disconnect & close this character tab")
-                                    .clicked()
-                                {
-                                    close_bg = Some(bg_idx);
+                                    } else {
+                                        ui.add(
+                                            egui::Button::new(
+                                                RichText::new(lbl)
+                                                    .font(char_tab_regular.clone())
+                                                    .color(self.colors.tab_inactive_text),
+                                            )
+                                            .fill(self.colors.tab_inactive_bg)
+                                            .rounding(4.0)
+                                            .sense(Sense::click_and_drag()),
+                                        )
+                                    };
+                                    if resp.drag_started() {
+                                        self.dragging_char_tab = Some(vis);
+                                    } else if resp.clicked() {
+                                        switch_to = Some(bg_idx);
+                                    }
+                                    tab_rects.push((vis, resp.rect));
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Disconnect & close this character tab")
+                                        .clicked()
+                                    {
+                                        close_bg = Some(bg_idx);
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
 
                     if !ui.input(|i| i.pointer.any_down()) {
@@ -10384,10 +10742,11 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                     } else {
                                         format!("Dream: {dream}")
                                     };
+                                    let info_sz = ((self.font_size as f32) - 1.0).clamp(11.0, 16.0).round();
                                     ui.add(
                                         egui::Label::new(
                                             RichText::new(dream_txt)
-                                                .size(11.0)
+                                                .size(info_sz)
                                                 .color(if self.pending_dream_name.is_some() {
                                                     GOLD
                                                 } else {
@@ -10397,10 +10756,11 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         .truncate(),
                                     );
                                 }
+                                let info_sz = ((self.font_size as f32) - 1.0).clamp(11.0, 16.0).round();
                                 if let Some((x, y)) = self.world.self_pos {
                                     ui.label(
                                         RichText::new(format!("Pos: ({x}, {y})"))
-                                            .size(11.0)
+                                            .size(info_sz)
                                             .color(Color32::GRAY),
                                     );
                                 }
@@ -10449,7 +10809,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         .add(
                                             egui::Label::new(
                                                 RichText::new(txt)
-                                                    .size(11.0)
+                                                    .size(info_sz)
                                                     .color(Color32::from_rgb(235, 190, 120)),
                                             )
                                             .wrap()
@@ -10468,6 +10828,8 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
 
                 ui.add_space(6.0);
                 self.render_looked_player_card(ui, ctx);
+                let sidebar_tab_bold = egui::FontId::new(11.0, self.ui_font_family(true));
+                let sidebar_tab_regular = egui::FontId::new(9.0, self.ui_font_family(false));
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let tab_w = ((ui.available_width() - 5.0 * 4.0) / 6.0).floor().max(28.0);
@@ -10506,14 +10868,14 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             egui::pos2(rect.center().x, rect.top() + 10.5),
                             egui::Align2::CENTER_CENTER,
                             letter,
-                            egui::FontId::proportional(11.0),
+                            sidebar_tab_bold.clone(),
                             if selected { Color32::from_rgb(28, 18, 8) } else { accent },
                         );
                         p.text(
                             egui::pos2(rect.center().x, rect.bottom() - 9.0),
                             egui::Align2::CENTER_CENTER,
                             sub,
-                            egui::FontId::proportional(8.5),
+                            sidebar_tab_regular.clone(),
                             if selected {
                                 Color32::from_rgb(28, 18, 8)
                             } else {
@@ -10830,7 +11192,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         "Loaded Map: {}x{}",
                                         map.width, map.height
                                     ))
-                                    .size(11.5)
+                                    .size(12.0)
                                     .color(Color32::LIGHT_GRAY),
                                 );
                             }
@@ -10859,7 +11221,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
 
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Wings (Toggle On/Off)").size(11.5).color(accent));
+                            ui.label(RichText::new("Wings (Toggle On/Off)").size(12.0).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
                                     ("Classic", "clsscwngs"),
@@ -10880,7 +11242,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
 
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Mythical & Special Digos (Toggle)").size(11.5).color(accent));
+                            ui.label(RichText::new("Mythical & Special Digos (Toggle)").size(12.0).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
                                     ("Dragon", "dragon"),
@@ -10910,7 +11272,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
 
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Ferians (Toggle)").size(11.5).color(accent));
+                            ui.label(RichText::new("Ferians (Toggle)").size(12.0).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
                                     ("Wolven", "wolven"),
@@ -10931,7 +11293,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
 
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Nobles (Toggle)").size(11.5).color(accent));
+                            ui.label(RichText::new("Nobles (Toggle)").size(12.0).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
                                     ("Canine", "noblecanine"),
@@ -10956,7 +11318,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         SidebarTab::Emotes => {
                             ui.label(RichText::new("DIGO ABILITIES & ACTIONS").strong().color(accent));
                             ui.add_space(2.0);
-                            ui.label(RichText::new("Digo Magic & Effects").size(11.5).color(accent));
+                            ui.label(RichText::new("Digo Magic & Effects").size(12.0).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
                                     ("Magic", "magic"),
@@ -10980,7 +11342,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new("Size:").size(11.5).color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("Size:").size(12.0).color(Color32::LIGHT_GRAY));
                                 for (label, cmd) in [
                                     ("50%", "kittersize 50"),
                                     ("100%", "kittersize 100"),
@@ -10997,7 +11359,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
 
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Social & Actions").size(11.5).color(accent));
+                            ui.label(RichText::new("Social & Actions").size(12.0).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, cmd) in [
                                     ("Lead", "lead"),
@@ -11021,7 +11383,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             });
 
                             ui.add_space(6.0);
-                            ui.label(RichText::new("Emotes").size(11.5).color(accent));
+                            ui.label(RichText::new("Emotes").size(12.0).color(accent));
                             ui.horizontal_wrapped(|ui| {
                                 for (label, emote) in [
                                     ("Wave", ":waves."),
@@ -11236,7 +11598,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                         ),
                     ] {
                         ui.label(RichText::new(cat).strong().color(accent));
-                        ui.label(RichText::new(items).size(11.5).color(Color32::LIGHT_GRAY));
+                        ui.label(RichText::new(items).size(12.0).color(Color32::LIGHT_GRAY));
                         ui.add_space(6.0);
                     }
                 });
@@ -11271,7 +11633,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                             self.trigger_update_check(ctx);
                         }
                         if let Some(status) = &self.update_status {
-                            ui.label(RichText::new(status).size(11.5).color(Color32::LIGHT_GRAY));
+                            ui.label(RichText::new(status).size(12.0).color(Color32::LIGHT_GRAY));
                         }
                     });
                     ui.add_space(4.0);
@@ -11295,8 +11657,8 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     ("Furcadia", "Protocol & game world by Dragon's Eye Productions, Inc. Uses user-supplied local Furcadia assets."),
                 ] {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(name).strong().size(11.5).color(Color32::WHITE));
-                        ui.label(RichText::new(format!("- {desc}")).size(11.5).color(Color32::LIGHT_GRAY));
+                        ui.label(RichText::new(name).strong().size(12.0).color(Color32::WHITE));
+                        ui.label(RichText::new(format!("- {desc}")).size(12.0).color(Color32::LIGHT_GRAY));
                     });
                 }
 
@@ -11315,7 +11677,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new("Bear Built  •  CC BY-NC-SA 4.0 (Non-Commercial)")
-                            .size(11.5)
+                            .size(12.0)
                             .color(Color32::GRAY),
                     );
                 });
@@ -11931,7 +12293,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         let body_family = chat_style.text_styles[&egui::TextStyle::Body].family.clone();
         chat_style.text_styles.insert(
             egui::TextStyle::Body,
-            FontId::new(self.chat_font_size as f32, body_family),
+            FontId::new((self.chat_font_size as f32).round(), body_family),
         );
         chat_style.visuals.override_text_color = Some(self.colors.chat_text);
         ui.set_style(chat_style);
@@ -11962,10 +12324,21 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 // Chat + Whisper Tabs bar (horizontally scrollable when many whispers are open)
                 let mut close_peer: Option<String> = None;
                 let tabs_max_w = ui.available_width().max(0.0);
+                let tab_font_sz = (self.font_size as f32).clamp(11.0, 24.0).round();
+                let tab_regular_font = FontId::new(tab_font_sz, self.ui_font_family(false));
+                let tab_bold_font = FontId::new(tab_font_sz, self.ui_font_family(true));
                 ui.scope(|ui| {
                     // Use a solid scrollbar so it gets its own strip below the tabs.
                     ui.spacing_mut().scroll.floating = false;
-                    ui.allocate_ui(Vec2::new(tabs_max_w, 34.0), |ui| {
+                    ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let tab_text_h = ui.fonts(|f| f.row_height(&tab_regular_font));
+                    let tab_btn_h = (tab_text_h + 10.0).max(24.0).ceil();
+                    let scroll_bar_h = ui.spacing().scroll.bar_width
+                        + ui.spacing().scroll.bar_inner_margin
+                        + ui.spacing().scroll.bar_outer_margin;
+                    let strip_h = (tab_btn_h + scroll_bar_h + 6.0).max(36.0);
+                    ui.allocate_ui(Vec2::new(tabs_max_w, strip_h), |ui| {
                         egui::ScrollArea::horizontal()
                             .id_salt("whisper_tabs_scroll")
                             .auto_shrink([false, false])
@@ -11984,28 +12357,35 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                         ui.add(
                                             egui::Button::new(
                                                 RichText::new(main_label)
+                                                    .font(tab_bold_font.clone())
                                                     .strong()
                                                     .color(self.colors.tab_unread_text),
                                             )
                                             .fill(self.colors.tab_unread_bg)
-                                            .stroke(Stroke::new(1.5_f32, self.colors.tab_unread_bg)),
+                                            .stroke(Stroke::new(1.5_f32, self.colors.tab_unread_bg))
+                                            .rounding(4.0)
+                                            .min_size(Vec2::new(0.0, tab_btn_h)),
                                         )
                                         .clicked()
                                     } else {
                                         ui.add(
                                             egui::Button::new(if main_sel {
                                                 RichText::new(main_label)
+                                                    .font(tab_bold_font.clone())
                                                     .strong()
                                                     .color(self.colors.tab_active_text)
                                             } else {
                                                 RichText::new(main_label)
+                                                    .font(tab_regular_font.clone())
                                                     .color(self.colors.tab_inactive_text)
                                             })
                                             .fill(if main_sel {
                                                 self.colors.tab_active_bg
                                             } else {
                                                 self.colors.tab_inactive_bg
-                                            }),
+                                            })
+                                            .rounding(4.0)
+                                            .min_size(Vec2::new(0.0, tab_btn_h)),
                                         )
                                         .clicked()
                                     };
@@ -12036,6 +12416,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                                 ui.add(
                                                     egui::Button::new(
                                                         RichText::new(label)
+                                                            .font(tab_bold_font.clone())
                                                             .strong()
                                                             .color(self.colors.tab_unread_text),
                                                     )
@@ -12044,25 +12425,33 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                                         1.5_f32,
                                                         self.colors.tab_unread_bg,
                                                     ))
+                                                    .rounding(4.0)
+                                                    .min_size(Vec2::new(0.0, tab_btn_h))
                                                     .sense(Sense::click_and_drag()),
                                                 )
                                             } else if sel {
                                                 ui.add(
                                                     egui::Button::new(
                                                         RichText::new(label)
+                                                            .font(tab_bold_font.clone())
                                                             .strong()
                                                             .color(self.colors.tab_active_text),
                                                     )
                                                     .fill(self.colors.tab_active_bg)
+                                                    .rounding(4.0)
+                                                    .min_size(Vec2::new(0.0, tab_btn_h))
                                                     .sense(Sense::click_and_drag()),
                                                 )
                                             } else {
                                                 ui.add(
                                                     egui::Button::new(
                                                         RichText::new(label)
+                                                            .font(tab_regular_font.clone())
                                                             .color(self.colors.tab_inactive_text),
                                                     )
                                                     .fill(self.colors.tab_inactive_bg)
+                                                    .rounding(4.0)
+                                                    .min_size(Vec2::new(0.0, tab_btn_h))
                                                     .sense(Sense::click_and_drag()),
                                                 )
                                             };
@@ -12075,7 +12464,14 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                                             }
                                             whisper_tab_rects.push((idx, resp.rect));
                                             if ui
-                                                .small_button("×")
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("×")
+                                                            .font(tab_regular_font.clone()),
+                                                    )
+                                                    .rounding(4.0)
+                                                    .min_size(Vec2::new(22.0, tab_btn_h)),
+                                                )
                                                 .on_hover_text("Close tab")
                                                 .clicked()
                                             {
@@ -12187,13 +12583,13 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                 });
                 if self.link_builder_open {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("URL:").size(11.5));
+                        ui.label(RichText::new("URL:").size(12.0));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.link_url_input)
                                 .hint_text("https://... or furc://...")
                                 .desired_width(180.0),
                         );
-                        ui.label(RichText::new("Text:").size(11.5));
+                        ui.label(RichText::new("Text:").size(12.0));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.link_label_input)
                                 .hint_text("optional label")
@@ -13320,7 +13716,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
         // Pass 3: floating dream portal titles & subtitles (`]s`), matching `tl` & `Br` (`L1951`, `L1456`).
         let dream_labels: Vec<furcadia_client::DreamLabel> =
             self.world.dream_labels.values().cloned().collect();
-        let label_font = FontId::proportional((12.0 * self.zoom).clamp(10.0, 18.0));
+        let label_font = FontId::proportional((12.0 * self.zoom).clamp(10.0, 18.0).round());
         let label_max_w = 140.0 * self.zoom.max(0.85);
         for dl in dream_labels {
             let (lx, ly) = (dl.x as usize, dl.y as usize);
@@ -13365,7 +13761,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
             ctx.request_repaint_after(std::time::Duration::from_millis(delay_ms));
         }
 
-        let badge_font = FontId::proportional((11.5 * self.zoom).clamp(9.0, 16.0));
+        let badge_font = FontId::proportional((11.5 * self.zoom).clamp(9.0, 16.0).round());
         let prev_hover_uid = self.hovered_avatar_uid;
         let ctx_menu_uid = self.context_menu_avatar.as_ref().map(|c| c.uid);
         for badge in &name_badges {
@@ -13570,7 +13966,7 @@ Light: {} | Amb: {} | Elev: {:?}",
                         pos - Vec2::new(0.0, tile_h * 0.75),
                         egui::Align2::CENTER_BOTTOM,
                         name,
-                        FontId::proportional((12.0 * self.zoom).clamp(9.0, 18.0)),
+                        FontId::proportional((12.0 * self.zoom).clamp(9.0, 18.0).round()),
                         Color32::WHITE,
                     );
                 }
@@ -13977,7 +14373,7 @@ Light: {} | Amb: {} | Elev: {:?}",
                             r.rect.center(),
                             egui::Align2::CENTER_CENTER,
                             hint,
-                            FontId::proportional(10.5),
+                            FontId::proportional(11.0),
                             Color32::GRAY,
                         );
                     }
@@ -14162,7 +14558,7 @@ Light: {} | Amb: {} | Elev: {:?}",
                                     ui.horizontal(|ui| {
                                         ui.add_sized(
                                             [46.0, 18.0],
-                                            egui::Label::new(RichText::new("Item:").size(11.5)),
+                                            egui::Label::new(RichText::new("Item:").size(12.0)),
                                         );
                                         let item_resp = ui.add(
                                             egui::TextEdit::singleline(&mut self.trade_item_input)
@@ -14210,7 +14606,7 @@ Light: {} | Amb: {} | Elev: {:?}",
                                     ui.horizontal(|ui| {
                                         ui.add_sized(
                                             [46.0, 18.0],
-                                            egui::Label::new(RichText::new("Reason:").size(11.5)),
+                                            egui::Label::new(RichText::new("Reason:").size(12.0)),
                                         );
                                         let reason_resp = ui.add(
                                             egui::TextEdit::singleline(
@@ -15831,7 +16227,7 @@ fn render_chat_line(
                                     InlineChatPart::Text(sub) if !sub.is_empty() => {
                                         let mut rt = RichText::new(sub);
                                         if style.bold {
-                                            rt = rt.strong();
+                                            rt = apply_chat_bold(ui, rt);
                                         }
                                         if style.underline {
                                             rt = rt.underline();
@@ -15883,7 +16279,7 @@ fn render_chat_line(
                     }
                     let mut rt = RichText::new(text);
                     if style.bold {
-                        rt = rt.strong();
+                        rt = apply_chat_bold(ui, rt);
                     }
                     if style.italic || is_emote {
                         rt = rt.italics();
@@ -15987,7 +16383,7 @@ fn render_chat_line(
                                 InlineChatPart::Text(seg) if !seg.is_empty() => {
                                     let mut seg_rt = RichText::new(seg);
                                     if style.bold {
-                                        seg_rt = seg_rt.strong();
+                                        seg_rt = apply_chat_bold(ui, seg_rt);
                                     }
                                     if style.italic || is_emote {
                                         seg_rt = seg_rt.italics();
@@ -16029,6 +16425,18 @@ fn render_chat_line(
     });
 }
 
+fn apply_chat_bold(ui: &egui::Ui, rt: RichText) -> RichText {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let bold_family = egui::FontFamily::Name(FONT_FAMILY_UI_BOLD.into());
+    let has_bold = body.family == egui::FontFamily::Proportional
+        && ui.fonts(|f| f.lock().fonts.definitions().families.contains_key(&bold_family));
+    if has_bold {
+        rt.family(bold_family).strong()
+    } else {
+        rt.strong()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_linked_inline_codes(
     ui: &mut egui::Ui,
@@ -16049,7 +16457,7 @@ fn render_linked_inline_codes(
             InlineChatPart::Text(segment) if !segment.is_empty() => {
                 let mut rich = RichText::new(segment);
                 if style.bold {
-                    rich = rich.strong();
+                    rich = apply_chat_bold(ui, rich);
                 }
                 if style.italic || style.color.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("emote")) {
                     rich = rich.italics();
@@ -19332,5 +19740,140 @@ mod tests {
             format_close_all_button_label(&long),
             "Close All (3 characters)"
         );
+    }
+
+    fn synth_sfnt(include_fvar: bool) -> Vec<u8> {
+        let mut tables: Vec<([u8; 4], Vec<u8>)> = vec![
+            (*b"CFF ", vec![0u8; 16]),
+            (*b"cmap", vec![0u8; 16]),
+            (
+                *b"head",
+                {
+                    let mut head = vec![0u8; 54];
+                    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+                    head
+                },
+            ),
+            (*b"hhea", vec![0u8; 36]),
+            (*b"maxp", vec![0u8; 6]),
+        ];
+        if include_fvar {
+            tables.push((*b"fvar", vec![0u8; 16]));
+        }
+        tables.sort_by_key(|(tag, _)| *tag);
+
+        let num_tables = tables.len() as u16;
+        let header_len = 12 + tables.len() * 16;
+        let mut out = Vec::with_capacity(header_len + 256);
+        out.extend_from_slice(b"OTTO");
+        out.extend_from_slice(&num_tables.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut offset = header_len as u32;
+        for (tag, payload) in &tables {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&offset.to_be_bytes());
+            out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            offset += payload.len() as u32;
+        }
+        for (_, payload) in &tables {
+            out.extend_from_slice(payload);
+        }
+        out
+    }
+
+    #[test]
+    fn static_sfnt_validator_rejects_invalid_and_variable_fonts() {
+        assert!(!is_valid_static_sfnt(&[]));
+        assert!(!is_valid_static_sfnt(b"not a font file"));
+        assert!(!is_valid_static_sfnt(b"ttcf\x00\x01\x00\x00\x00\x00\x00\x02"));
+        assert!(is_valid_static_sfnt(&synth_sfnt(false)));
+        assert!(!is_valid_static_sfnt(&synth_sfnt(true)));
+    }
+
+    #[test]
+    fn build_font_definitions_preserves_fallbacks_and_loads_in_egui() {
+        let (regular, bold) = discover_system_ui_fonts();
+        let (defs, has_bold) = build_font_definitions(regular, bold, None);
+        let prop = defs
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .expect("Proportional family must exist");
+        for fallback in ["Ubuntu-Light", "NotoEmoji-Regular", "emoji-icon-font"] {
+            assert!(prop.iter().any(|name| name == fallback), "missing {fallback}");
+        }
+        if has_bold {
+            let bold_chain = defs
+                .families
+                .get(&egui::FontFamily::Name(FONT_FAMILY_UI_BOLD.into()))
+                .expect("ui_bold family must exist");
+            for fallback in ["Ubuntu-Light", "NotoEmoji-Regular", "emoji-icon-font"] {
+                assert!(
+                    bold_chain.iter().any(|name| name == fallback),
+                    "bold missing {fallback}"
+                );
+            }
+        }
+
+        let (fixed_defs, _) = build_font_definitions(None, None, Some(synth_sfnt(false)));
+        let fixed_chain = fixed_defs
+            .families
+            .get(&egui::FontFamily::Name("fixedsys".into()))
+            .expect("fixedsys family must exist");
+        for fallback in ["Ubuntu-Light", "NotoEmoji-Regular", "emoji-icon-font"] {
+            assert!(
+                fixed_chain.iter().any(|name| name == fallback),
+                "fixedsys missing {fallback}"
+            );
+        }
+
+        let ctx = egui::Context::default();
+        ctx.set_fonts(defs);
+        ctx.begin_pass(egui::RawInput::default());
+        let galley = ctx.fonts(|f| {
+            f.layout_no_wrap(
+                "Main Chat Harry Hardacre ● ─".to_owned(),
+                FontId::proportional(13.0),
+                Color32::WHITE,
+            )
+        });
+        assert!(galley.size().x > 0.0 && galley.size().y > 0.0);
+        if has_bold {
+            let bold_galley = ctx.fonts(|f| {
+                f.layout_no_wrap(
+                    "Main Chat Harry Hardacre".to_owned(),
+                    FontId::new(13.0, egui::FontFamily::Name(FONT_FAMILY_UI_BOLD.into())),
+                    Color32::WHITE,
+                )
+            });
+            assert!(bold_galley.size().x > 0.0 && bold_galley.size().y > 0.0);
+        }
+        let _ = ctx.end_pass();
+    }
+
+    #[test]
+    fn apply_font_settings_uses_integer_text_style_sizes() {
+        let ctx = egui::Context::default();
+        for sz in 10u16..=22u16 {
+            configure_text_styles(
+                &ctx,
+                f32::from(sz),
+                egui::FontFamily::Proportional,
+                egui::FontFamily::Name(FONT_FAMILY_UI_BOLD.into()),
+            );
+            let style = ctx.style();
+            let body = &style.text_styles[&egui::TextStyle::Body];
+            let button = &style.text_styles[&egui::TextStyle::Button];
+            let small = &style.text_styles[&egui::TextStyle::Small];
+            let heading = &style.text_styles[&egui::TextStyle::Heading];
+            let mono = &style.text_styles[&egui::TextStyle::Monospace];
+            assert_eq!(button.size, body.size);
+            for s in [body.size, button.size, small.size, heading.size, mono.size] {
+                assert_eq!(s.fract(), 0.0, "non-integer font size {s} for base {sz}");
+            }
+        }
     }
 }
