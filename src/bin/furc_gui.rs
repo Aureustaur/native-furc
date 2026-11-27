@@ -1880,6 +1880,7 @@ struct FurcadiaApp {
     was_minimized: bool,
     tray_restore_until: Option<Instant>,
     allow_quit: bool,
+    close_confirm_open: bool,
     window_width: u16,
     window_height: u16,
     window_maximized: bool,
@@ -2268,6 +2269,7 @@ impl FurcadiaApp {
             was_minimized: false,
             tray_restore_until: None,
             allow_quit: false,
+            close_confirm_open: false,
             window_width: cfg.window_width,
             window_height: cfg.window_height,
             window_maximized: cfg.window_maximized,
@@ -2965,6 +2967,61 @@ impl FurcadiaApp {
             })
             .unwrap_or("Unknown")
             .to_owned()
+    }
+
+    fn active_tab_is_character(&self) -> bool {
+        matches!(self.screen, AppScreen::InGame | AppScreen::Connecting)
+    }
+
+    fn open_character_tab_names(&self) -> (Option<String>, Vec<String>) {
+        let bg_names: Vec<&str> = self
+            .bg_sessions
+            .iter()
+            .map(|s| s.char_name.as_str())
+            .collect();
+        if self.active_tab_is_character() {
+            let active = self.active_character_name();
+            let all =
+                ordered_character_tab_names(&bg_names, Some(&active), self.active_char_tab_pos);
+            (Some(active), all)
+        } else {
+            (None, ordered_character_tab_names(&bg_names, None, 0))
+        }
+    }
+
+    fn has_multiple_character_tabs(&self) -> bool {
+        if self.active_tab_is_character() {
+            !self.bg_sessions.is_empty()
+        } else {
+            self.bg_sessions.len() >= 2
+        }
+    }
+
+    fn close_active_character_tab(&mut self, ctx: &egui::Context) {
+        let active_pos = self.active_char_tab_pos.min(self.bg_sessions.len());
+        self.connect_seq = self.connect_seq.wrapping_add(1);
+        self.connected_at = None;
+        self.connecting_error = None;
+        let _ = self.to_net.send(UiToNet::Disconnect);
+        self.is_connected = false;
+        if !self.bg_sessions.is_empty() {
+            let next_idx = active_pos.min(self.bg_sessions.len() - 1);
+            self.switch_to_bg_session(next_idx, ctx);
+        } else {
+            self.screen = AppScreen::CharacterSelect;
+        }
+    }
+
+    fn quit_all_sessions(&mut self, ctx: &egui::Context) {
+        let _ = self.to_net.send(UiToNet::Disconnect);
+        for bg in &self.bg_sessions {
+            let _ = bg.to_net.send(UiToNet::Disconnect);
+        }
+        self.close_confirm_open = false;
+        self.allow_quit = true;
+        self.hidden_in_tray = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn log_chat_line(&self, text: &str) {
@@ -7307,10 +7364,12 @@ impl FurcadiaApp {
                 TrayAction::Show => self.show_from_tray(ctx),
                 TrayAction::Hide => self.hide_to_tray(ctx),
                 TrayAction::Quit => {
-                    self.allow_quit = true;
-                    self.hidden_in_tray = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    if self.has_multiple_character_tabs() {
+                        self.show_from_tray(ctx);
+                        self.close_confirm_open = true;
+                    } else {
+                        self.quit_all_sessions(ctx);
+                    }
                 }
             }
         }
@@ -7364,9 +7423,14 @@ impl eframe::App for FurcadiaApp {
         if close_req {
             self.flush_window_geometry();
         }
-        if self.close_to_tray && !self.allow_quit && close_req {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.hide_to_tray(ctx);
+        if close_req && !self.allow_quit {
+            if self.close_to_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.hide_to_tray(ctx);
+            } else if self.has_multiple_character_tabs() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.close_confirm_open = true;
+            }
         }
         let is_minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
         self.track_window_geometry(ctx, is_minimized);
@@ -7468,6 +7532,9 @@ impl eframe::App for FurcadiaApp {
         }
         if self.update_popup_open {
             self.render_update_window(ctx);
+        }
+        if self.close_confirm_open {
+            self.render_close_confirm_window(ctx);
         }
     }
 
@@ -8078,6 +8145,135 @@ impl FurcadiaApp {
             });
         if !open {
             self.update_popup_open = false;
+        }
+    }
+
+    fn render_close_confirm_window(&mut self, ctx: &egui::Context) {
+        if !self.has_multiple_character_tabs() {
+            self.close_confirm_open = false;
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.close_confirm_open = false;
+            return;
+        }
+
+        let (current_char, all_names) = self.open_character_tab_names();
+        let names_list = format_character_names(&all_names);
+        let close_all_label = format_close_all_button_label(&all_names);
+        let accent = self.ui_accent();
+        let mut open = self.close_confirm_open;
+        let mut cancel = false;
+        let mut close_current_only = false;
+        let mut close_new_tab = false;
+        let mut close_all = false;
+
+        egui::Window::new("Multiple Characters Open")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.heading(RichText::new("Multiple character tabs are open").color(accent));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "You have {} character tabs open: {names_list}.",
+                        all_names.len()
+                    ))
+                    .color(Color32::LIGHT_GRAY),
+                );
+                ui.add_space(6.0);
+                if let Some(current) = current_char.as_deref() {
+                    ui.label(format!(
+                        "Close current character {current} only, or close all ({names_list})?"
+                    ));
+                    ui.add_space(12.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!("Close {current} Only"))
+                                        .strong()
+                                        .color(Color32::from_rgb(20, 14, 6)),
+                                )
+                                .fill(accent),
+                            )
+                            .clicked()
+                        {
+                            close_current_only = true;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(&close_all_label)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(Color32::from_rgb(160, 48, 48)),
+                            )
+                            .clicked()
+                        {
+                            close_all = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                } else {
+                    let first_name = all_names
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("your logged-in character");
+                    ui.label(format!(
+                        "Close this new tab and return to {first_name}, or close all ({names_list})?"
+                    ));
+                    ui.add_space(12.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Close New Tab")
+                                        .strong()
+                                        .color(Color32::from_rgb(20, 14, 6)),
+                                )
+                                .fill(accent),
+                            )
+                            .clicked()
+                        {
+                            close_new_tab = true;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(&close_all_label)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(Color32::from_rgb(160, 48, 48)),
+                            )
+                            .clicked()
+                        {
+                            close_all = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
+            });
+
+        self.close_confirm_open = open && !cancel;
+        if close_current_only {
+            self.close_confirm_open = false;
+            self.close_active_character_tab(ctx);
+        } else if close_new_tab {
+            self.close_confirm_open = false;
+            self.switch_to_bg_session(0, ctx);
+        } else if close_all {
+            self.quit_all_sessions(ctx);
         }
     }
 
@@ -10103,14 +10299,7 @@ fn render_log_viewer_window(&mut self, ctx: &egui::Context) {
                     }
 
                     if close_active {
-                        let _ = self.to_net.send(UiToNet::Disconnect);
-                        self.is_connected = false;
-                        if !self.bg_sessions.is_empty() {
-                            let next_idx = active_pos.min(self.bg_sessions.len() - 1);
-                            self.switch_to_bg_session(next_idx, ctx);
-                        } else {
-                            self.screen = AppScreen::CharacterSelect;
-                        }
+                        self.close_active_character_tab(ctx);
                     } else if let Some(idx) = close_bg {
                         let sess = self.bg_sessions.remove(idx);
                         let _ = sess.to_net.send(UiToNet::Disconnect);
@@ -18198,6 +18387,37 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+fn ordered_character_tab_names(
+    bg_names: &[&str],
+    active_name: Option<&str>,
+    active_pos: usize,
+) -> Vec<String> {
+    let mut names: Vec<String> = bg_names.iter().map(|s| (*s).to_owned()).collect();
+    if let Some(active) = active_name {
+        let insert_at = active_pos.min(names.len());
+        names.insert(insert_at, active.to_owned());
+    }
+    names
+}
+
+fn format_character_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [a] => a.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+fn format_close_all_button_label(names: &[String]) -> String {
+    let joined = names.join(", ");
+    if joined.chars().count() <= 40 {
+        format!("Close All ({joined})")
+    } else {
+        format!("Close All ({} characters)", names.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -19053,5 +19273,64 @@ mod tests {
         assert!(cache.default_archive.is_none());
         assert!(cache.legacy_archive.is_none());
         assert!(cache.dream_archive.is_some());
+    }
+
+    #[test]
+    fn ordered_character_tab_names_places_active_at_tab_pos() {
+        let bg = ["Bree", "Cinder"];
+        assert_eq!(
+            ordered_character_tab_names(&bg, Some("Aria"), 0),
+            vec!["Aria", "Bree", "Cinder"]
+        );
+        assert_eq!(
+            ordered_character_tab_names(&bg, Some("Aria"), 1),
+            vec!["Bree", "Aria", "Cinder"]
+        );
+        assert_eq!(
+            ordered_character_tab_names(&bg, Some("Aria"), 2),
+            vec!["Bree", "Cinder", "Aria"]
+        );
+        assert_eq!(
+            ordered_character_tab_names(&bg, Some("Aria"), 99),
+            vec!["Bree", "Cinder", "Aria"]
+        );
+        assert_eq!(
+            ordered_character_tab_names(&bg, None, 1),
+            vec!["Bree", "Cinder"]
+        );
+    }
+
+    #[test]
+    fn format_character_names_handles_counts() {
+        assert_eq!(format_character_names(&[]), "");
+        assert_eq!(format_character_names(&["Aria".to_owned()]), "Aria");
+        assert_eq!(
+            format_character_names(&["Aria".to_owned(), "Bree".to_owned()]),
+            "Aria and Bree"
+        );
+        assert_eq!(
+            format_character_names(&[
+                "Aria".to_owned(),
+                "Bree".to_owned(),
+                "Cinder".to_owned()
+            ]),
+            "Aria, Bree, and Cinder"
+        );
+    }
+
+    #[test]
+    fn format_close_all_button_label_truncates_long_lists() {
+        let short = vec!["Aria".to_owned(), "Bree".to_owned()];
+        assert_eq!(format_close_all_button_label(&short), "Close All (Aria, Bree)");
+
+        let long = vec![
+            "VeryLongCharacterOne".to_owned(),
+            "VeryLongCharacterTwo".to_owned(),
+            "VeryLongCharacterThree".to_owned(),
+        ];
+        assert_eq!(
+            format_close_all_button_label(&long),
+            "Close All (3 characters)"
+        );
     }
 }

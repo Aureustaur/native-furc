@@ -47,7 +47,7 @@ Alongside the graphical desktop client (`furc-gui`), the repository provides a s
 
 - **True native performance & long-session stability**: compiled to a small native Rust executable for Linux, Windows, and macOS with zero Wine, compatibility layers, or browser bloat — with bounded GPU/sprite caches, capped in-memory chat history, clean tab teardown, and hardened archive/decompression limits for overnight sessions.
 - **Ready on a fresh install**: connects cleanly on first launch and downloads public modern/legacy stock patches, species, dynamic avatars, portraits, and dream assets automatically.
-- **Multi-alt power in one window**: keep multiple logged-in characters open simultaneously as reorderable character tabs, complete with per-character cookie counts preserved across tab switches.
+- **Multi-alt power in one window**: keep multiple logged-in characters open simultaneously as reorderable character tabs, complete with per-character cookie counts preserved across tab switches and an accidental-close confirmation prompt when closing with multiple characters open.
 - **Built for daily RP and trading**: includes dedicated **Cookie**, **Gift**, and **Trade** menus right on the player card, inline Furcadia smiley sprites, `[bracketed text]` highlighting, rich text buttons, and a configurable dice roller.
 - **Clean, distraction-free UI**: crisp plain-text and ASCII interface free of emoji clutter, with customizable themes, fonts, sizes, and colors.
 - **Keep everything yours**: optionally import existing maps, portraits, settings, Pounce watchlists, and logs, or sync preferences and logs across computers through your own cloud-synced folder.
@@ -240,7 +240,7 @@ Local configuration is stored at `~/.config/furcadia-native/config.ini` on Linux
 
 ## Project status
 
-Release 2.2.2 builds on the 2.2.0 automatic stock patch download/caching, legacy floor/path tile rendering, RPM, and Apple Silicon macOS `.dmg` foundation (and Milestone 2.0 stability, security, and open-source baseline) with app-owned exact panel sizes, explicit resize handles, and left sidebar layout fixes, and 106 passing unit tests.
+Release 2.2.3 builds on the 2.2.0 automatic stock patch download/caching, legacy floor/path tile rendering, RPM, and Apple Silicon macOS `.dmg` foundation (and Milestone 2.0 stability, security, and open-source baseline) with app-owned exact panel sizes, explicit resize handles, left sidebar layout fixes, a multi-character close confirmation dialog, and 109 passing unit tests.
 
 This is an independent, actively developed client. Some behavior and asset support may differ from the official Windows client, and compatibility can vary across dreams and custom patches. Please report reproducible bugs or feature requests on [GitHub Issues](https://github.com/morganlowe/native-furcadia/issues) with your OS and relevant log output (never attach passwords or private credentials).
 

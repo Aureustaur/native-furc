@@ -121,9 +121,9 @@ jobs:
         with:
           overwrite_files: true
           make_latest: true
-          name: "Furcadia Native Client v2.2.2 — Bulletproof Panel Resizing & Layout Fixes"
+          name: "Furcadia Native Client v2.2.3 — Multi-Character Close Confirmation"
           body: |
-            ## Furcadia Native Client v2.2.2 — Bulletproof Panel Resizing & Layout Fixes
+            ## Furcadia Native Client v2.2.3 — Multi-Character Close Confirmation
 
             A fast, standalone native Rust client for Furcadia supporting **Linux**, **Windows**, and **macOS** — no Wine or pre-existing Furcadia installation required.
 
@@ -134,17 +134,16 @@ jobs:
             - Multi-character reorderable tabs, per-character cookie counts, Pounce friend watchlist, Saved Dreams, shared/per-device logs, and cloud folder sync (Nextcloud, Drive, Dropbox)
             - Native Linux desktop & system tray alert blinking (`StatusNotifierItem`), Windows installer, Fedora/RHEL/openSUSE RPM packages, and Apple Silicon macOS `.dmg` builds
 
-            ### What's New in v2.2.2
-            - **Bulletproof App-Owned Panel Resizing (Pounce & Chat)**:
-              - Replaced egui's built-in `.resizable(true)` `PanelState` feedback loop on the **Pounce** right panel and **Chat** bottom panel with app-owned `pounce_panel_width` / `chat_panel_height` (`.exact_width(...)` / `.exact_height(...)` + `.resizable(false)`) and explicit 5px splitter drag handles that only resize while primary mouse drag is active, eliminating runaway panel growth and mouse-following on Windows, Linux, and macOS.
-              - Preserved user-dragged Pounce and Chat panel sizes across Windows minimize/restore (`0×0` screen rect).
-              - Prevented `chat_scroll` from pushing the chat input/Send row outside `chat_panel` at minimum height.
-            - **Log Viewer Multi-Character Wrapping**:
-              - Wrapped the Log Viewer character selector row cleanly for accounts with many characters.
+            ### What's New in v2.2.3
+            - **Multi-Character Close Confirmation Dialog**:
+              - Warns before closing the app window (or selecting **Quit Furcadia** from the system tray) whenever multiple character tabs are open.
+              - Lists all open character names and asks whether to close only the active character (`Close [name] Only`), close all characters (`Close All ([names])`), or `Cancel` (`Esc`).
+              - Also handles quitting from a `+Char Tab` Login/Character Select screen while 2+ background characters are open, preserves `Close button minimizes instead of quitting` (`close_to_tray`) behavior, and skips prompting during automatic update restarts.
 
             <details>
-            <summary><strong>Previous Releases Recap (v2.2.1, v2.2.0, v2.1.x &amp; Milestone 2.0)</strong></summary>
+            <summary><strong>Previous Releases Recap (v2.2.2, v2.2.1, v2.2.0, v2.1.x &amp; Milestone 2.0)</strong></summary>
 
+            - **v2.2.2**: Replaced egui's `.resizable(true)` `PanelState` feedback loop on **Pounce** and **Chat** with app-owned exact sizes and explicit 5px drag handles, preserved panel sizes across Windows minimize/restore, prevented `chat_scroll` from pushing the input row outside `chat_panel` at minimum height, and wrapped the Log Viewer character selector.
             - **v2.2.1**: Fixed left sidebar black vertical gap and right-edge clipping (`272px` base width, wrapped header/status/cookie rows, dynamic tab button widths, pinned looked-player card width), right-to-left row layouts in Pounce/Chat/detached whispers, and initial panel bounds.
             - **v2.2.0**: Automatic on-demand modern & legacy stock patch downloads/caching, legacy floor/path tile rendering fixes, Fedora/RHEL/openSUSE `.rpm` & Apple Silicon macOS `.dmg` packaging + updater support, and Arch/Debian packaging fixes.
             - **v2.1.2**: Character Picker custom portrait loading & fallback downloads, persistent `character_portraits` cache in `config.ini`, `last_port > 16` filtering, silent self-`glook`, and background-tab portrait directive handling.
@@ -157,34 +156,34 @@ jobs:
             ### Download & Install
 
             #### Arch Linux / CachyOS / Manjaro / EndeavourOS
-            Download `furcadia-native-2.2.2-1-x86_64.pkg.tar.zst` from the assets below and install with:
+            Download `furcadia-native-2.2.3-1-x86_64.pkg.tar.zst` from the assets below and install with:
             ```sh
-            sudo pacman -U ./furcadia-native-2.2.2-1-x86_64.pkg.tar.zst
+            sudo pacman -U ./furcadia-native-2.2.3-1-x86_64.pkg.tar.zst
             ```
 
             #### Debian / Ubuntu / Linux Mint
-            Download `furcadia-native_2.2.2_amd64.deb` from the assets below and install with:
+            Download `furcadia-native_2.2.3_amd64.deb` from the assets below and install with:
             ```sh
-            sudo apt install ./furcadia-native_2.2.2_amd64.deb
+            sudo apt install ./furcadia-native_2.2.3_amd64.deb
             ```
             *(Or double-click the `.deb` file to open it in your graphical software installer.)*
 
             #### Fedora / RHEL / Rocky / AlmaLinux / openSUSE (RPM)
-            Download `furcadia-native-2.2.2-1.*.x86_64.rpm` from the assets below and install with:
+            Download `furcadia-native-2.2.3-1.*.x86_64.rpm` from the assets below and install with:
             ```sh
             # Fedora / RHEL / Rocky / AlmaLinux
-            sudo dnf install ./furcadia-native-2.2.2-1*.x86_64.rpm
+            sudo dnf install ./furcadia-native-2.2.3-1*.x86_64.rpm
 
             # openSUSE
-            sudo zypper install --allow-unsigned-rpm ./furcadia-native-2.2.2-1*.x86_64.rpm
+            sudo zypper install --allow-unsigned-rpm ./furcadia-native-2.2.3-1*.x86_64.rpm
             ```
 
             #### Windows (64-bit)
-            1. Download `FurcadiaNative-Setup-2.2.2-x86_64.exe` from the assets below.
+            1. Download `FurcadiaNative-Setup-2.2.3-x86_64.exe` from the assets below.
             2. Run the installer. It installs both `furc-gui` and `furc-cli`, creates a **Furcadia Native Client** Start Menu shortcut, and registers an uninstaller in **Apps & Features**.
 
             #### macOS (Apple Silicon)
-            1. Download `FurcadiaNative-2.2.2-macos-arm64.dmg` from the assets below and open it.
+            1. Download `FurcadiaNative-2.2.3-macos-arm64.dmg` from the assets below and open it.
             2. Drag **Furcadia Native Client** to **Applications** (the CLI binary `furc-cli` is also bundled inside `Contents/MacOS/`).
             3. Because the app is ad-hoc signed without an Apple Developer notarization certificate, clear the quarantine attribute before first launch if Gatekeeper blocks it:
                ```sh
@@ -216,14 +215,14 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y build-essential dpkg-dev pkg-config libssl-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev curl bzip2 unzip
             ./packaging/debian/build-deb.sh
-            sudo apt install ./dist/furcadia-native_2.2.2_amd64.deb
+            sudo apt install ./dist/furcadia-native_2.2.3_amd64.deb
             ```
 
             #### Fedora / RHEL / openSUSE (`.rpm`)
             ```sh
             sudo dnf install -y rpm-build gcc gcc-c++ make perl-core pkgconf-pkg-config libxcb-devel libxkbcommon-devel libX11-devel mesa-libGL-devel curl bzip2 unzip
             ./packaging/rpm/build-rpm.sh
-            sudo dnf install ./dist/furcadia-native-2.2.2-1*.x86_64.rpm
+            sudo dnf install ./dist/furcadia-native-2.2.3-1*.x86_64.rpm
             ```
 
             #### Windows (Inno Setup `.exe`)
@@ -231,14 +230,14 @@ jobs:
             ```powershell
             cargo build --release --locked --bins
             & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\windows\installer.iss
-            # Output: dist\FurcadiaNative-Setup-2.2.2-x86_64.exe
+            # Output: dist\FurcadiaNative-Setup-2.2.3-x86_64.exe
             ```
 
             #### macOS (`.dmg`)
             Requires Xcode Command Line Tools (`xcode-select --install`) and Rust:
             ```sh
             ./packaging/macos/build-dmg.sh
-            # Output: dist/FurcadiaNative-2.2.2-macos-$(uname -m).dmg
+            # Output: dist/FurcadiaNative-2.2.3-macos-$(uname -m).dmg
             ```
 
             #### Generic Binary Build (Any OS)
